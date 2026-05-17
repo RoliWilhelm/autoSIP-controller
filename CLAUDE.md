@@ -11,6 +11,16 @@ labware). Manuscript in preparation (Laud et al., 2024, for HardwareX).
 ## Codebase orientation
 - `main.py` — entire application: the `StepperMotor` hardware class, the `TextEntry`
   composite widget, and the `App(tk.Tk)` with three modes (Automated, Manual, Cleaning).
+- `hardware.py` / `validation.py` / `well_plate.py` / `config_store.py` /
+  `run_logger.py` — feature modules used by `main.py`.
+- `profiles/` — starter profile JSON files (e.g. `96well_CsCl_default.json`)
+  copied into `~/.autosip/profiles/` on first launch.
+- `logs/` — per-run output, one subdirectory per fractionation run, layout
+  `logs/{project}/{timestamp}_{sample_id_at_start}/` containing
+  `metadata.json`, `log.csv`, `end.json`, `summary.md`. Visible in a file
+  manager (no dotfile location); ignored by git.
+- `~/.autosip/` — user preferences (`config.json` for `last_used` field
+  values; `profiles/` for saved profile bundles). Per-user, not per-repo.
 - `custom_96_well_plate.json` — example labware in Opentrons format. The app reads
   `ordering`, `dimensions`, and per-well `x`/`y`/`z` (mm).
 
@@ -19,9 +29,17 @@ labware). Manuscript in preparation (Laud et al., 2024, for HardwareX).
 - Adafruit DC & Stepper Motor HAT (controls both NEMA-17 motors via `adafruit_motorkit`).
 - Two NEMA-17 stepper motors: 200 base steps/rev, microstepped to 3200 effective
   steps/rev. Lead screws have 40 mm pitch (40 mm linear travel per revolution).
-- Digital Loggers IoT relay on GPIO 5 (used via `gpiozero.LED`) switching either the
-  syringe pump (Razel R-200) or a small peristaltic pump (Adafruit 3910). Only one
-  pump is connected at a time.
+- Single Digital Loggers IoT relay on GPIO 5 (driven via `gpiozero.LED`). The relay
+  outlet physically powers whichever single pump the operator has plugged in:
+  the Razel R-200 syringe pump for **fractionation** runs, or the Adafruit 3910
+  peristaltic pump for **purging** / line cleaning. Only one pump is connected at
+  a time; the operator swaps the plug between runs. There is no second relay or
+  GPIO pin.
+- The GUI exposes two semantic buttons over this single relay — **Fractionate**
+  and **Purge** — to make the operator think about which pump should be connected
+  for the operation they're about to perform. The redundancy is intentional UX,
+  not a bug. A `PumpController` in `main.py` enforces a claim-based interlock so
+  only one logical pump (Fractionate xor Purge) can be driving the relay at a time.
 - Display target: ~7" Pi touchscreen or a laptop over VNC.
 
 ## Coding constraints
@@ -40,9 +58,18 @@ labware). Manuscript in preparation (Laud et al., 2024, for HardwareX).
 - Automated mode: load Opentrons JSON → set rows/cols/well size/table+carriage start →
   Begin fractionation runs a snaking path, pumps for `volume / pump_rate` seconds per
   well, then waits the same duration, then moves to the next well.
-- Pause cancels any in-flight `after()` task, turns the pump off, and resumes from the
-  same state on unpause.
+- Pause cancels any in-flight `after()` task, turns the relay off (claim stays held),
+  and resumes from the same state on unpause.
 - On window close, motors must be released to prevent overheating.
+- `PumpController` claim invariants:
+  - At most one claimant (`"fractionate"` or `"purge"`) at a time. The opposite
+    pump's buttons across the entire UI are disabled (interlocked) while a claim
+    is held.
+  - State machine claims `"fractionate"` at run start; the claim persists across
+    the per-well pump-on / drip-wait cycles (relay flickers, claim stays); release
+    happens at run end (`move()` success path) or on Terminate.
+  - User-initiated pump clicks always confirm before turning the relay ON (no
+    suppression). State-machine driven flips never prompt.
 
 ## Style
 - Add docstrings to public methods.

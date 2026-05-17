@@ -19,7 +19,14 @@ Thumbs.db
 .vscode/
 *.swp
 
-# autoSIP-specific local runtime data
+# autoSIP-specific runtime data. Per-run logs are written to
+# <repo>/logs/<project>/<timestamp>_<sample>/ -- visible in a file manager
+# but not committed (one folder per run). Per-user config + saved profiles
+# live under ~/.autosip/, not in the repo, so they don't need to be ignored
+# here. The repo's profiles/ directory ships starter JSON files and IS
+# tracked.
+logs/
+
+# Stray-output guards (harmless if absent).
 runs/
-profiles/
 config.json

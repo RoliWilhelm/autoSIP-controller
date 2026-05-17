@@ -1,0 +1,10 @@
+{
+  "rows": "8",
+  "cols": "12",
+  "well_size": "0.9",
+  "pump_rate": "15",
+  "volume_per_well": "0.22",
+  "table_start": "13.65",
+  "carriage_start": "0.55",
+  "labware_file": ""
+}
