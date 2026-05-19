@@ -57,7 +57,9 @@ This manual covers day-to-day operation of autoSIP. It assumes you have a
 working installation (see *Quick start* above) and a calibrated rig
 mounted with an ultracentrifuge tube above the carriage and a 96-well
 plate (or other Opentrons-format labware) on the stage. For step-by-step
-walkthroughs of common workflows, see [Use Cases](docs/use_cases.md).
+walkthroughs of common workflows, see the
+[Operation Instructions — Common Workflows](docs/operation_instructions.md#63-common-workflows)
+(Section 6.3 of the manuscript supplement).
 
 ![Figure: autoSIP main window, Automated mode](docs/figures/main_window.png)
 
@@ -82,7 +84,7 @@ Two consequences follow from that convention:
   position of well **A1** of the labware on the stage, measured in cm
   from the origin. You determine these once for a given stage layout
   by jogging the needle in Manual mode (see
-  [Use Case 1](docs/use_cases.md)).
+  [Operation Instructions §6.3.1](docs/operation_instructions.md#631-calibrating-plate-start-and-waste-bin-coordinates)).
 
 - **Waste bin position** (Plate Parameters → *Waste bin: table
   position* / *Waste bin: carriage position*) is the X, Y position of
@@ -395,7 +397,7 @@ text-entry widget so you can still type a literal space character in
 any name field.
 
 For step-by-step walkthroughs of common workflows, see
-[Use Cases](docs/use_cases.md).
+[Operation Instructions §6.3](docs/operation_instructions.md#63-common-workflows).
 
 ## License
 GPL-3.0 — see LICENSE.
