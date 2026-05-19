@@ -905,15 +905,19 @@ class AutomatedFrame(tk.Frame):
 		# the entire region behaves like a single button.
 		begin_frame = tk.Frame(self, bg=PALETTE["accent"], bd=0, highlightthickness=0)
 		begin_frame.grid(row=4, column=0, columnspan=3, sticky="we", pady=(4, 0))
-		begin_frame.grid_columnconfigure(1, weight=1)
+		# Outer empty columns expand so the [tube | button | distribution]
+		# trio sits centered as a group, with the icons bookending the
+		# centered text immediately on either side of the button.
+		begin_frame.grid_columnconfigure(0, weight=1)
+		begin_frame.grid_columnconfigure(4, weight=1)
 		self.begin_tube_canvas = make_centrifuge_tube_canvas(begin_frame, size=40)
-		self.begin_tube_canvas.grid(row=0, column=0, padx=(8, 4), pady=4, sticky="w")
+		self.begin_tube_canvas.grid(row=0, column=1, padx=(0, 6), pady=4)
 		self.begin_tube_canvas.bind("<Button-1>", lambda _e: self.begin_clicked())
 		self.begin_btn = primary_button(
 			begin_frame, text="Begin Fractionation",
-			command=self.begin_clicked, anchor="w",
+			command=self.begin_clicked,
 		)
-		self.begin_btn.grid(row=0, column=1, sticky="we", padx=(0, 4), pady=4)
+		self.begin_btn.grid(row=0, column=2, pady=4)
 		# Bimodal-distribution canvas on the right: the SIP-experiment
 		# readout (two density curves, one with a larger heavy-isotope
 		# peak). Also click-through to begin_clicked for symmetry with
@@ -921,7 +925,7 @@ class AutomatedFrame(tk.Frame):
 		self.begin_dist_canvas = make_bimodal_distribution_canvas(
 			begin_frame, width=64, height=40,
 		)
-		self.begin_dist_canvas.grid(row=0, column=2, padx=(4, 8), pady=4, sticky="e")
+		self.begin_dist_canvas.grid(row=0, column=3, padx=(6, 0), pady=4)
 		self.begin_dist_canvas.bind("<Button-1>", lambda _e: self.begin_clicked())
 
 		# Progress view -- to-scale well plate, color-blind-safe palette,
