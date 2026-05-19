@@ -278,3 +278,63 @@ def make_centrifuge_tube_canvas(parent, size=36, bg=None, tube_color=None):
 	canvas.create_polygon(flat, fill=tube_color, outline=tube_color,
 		width=1, smooth=False)
 	return canvas
+
+
+def make_bimodal_distribution_canvas(parent, width=64, height=40, bg=None,
+		primary_color=None, secondary_color=None):
+	"""Render two overlapping bimodal-Gaussian curves on a small canvas.
+
+	Thematic: in a SIP experiment each sample's DNA density distribution
+	is bimodal -- a primary peak at the unlabeled-DNA density and a
+	smaller secondary peak at the heavy-isotope density. The size of the
+	secondary peak is the operator's readout of isotope incorporation.
+	Drawing two such curves side-by-side gives a quick visual signature
+	of "labeled vs unlabeled" right next to the Begin Fractionation
+	button.
+
+	Both curves are computed as the sum of two Gaussians, sampled across
+	[0, 1] and normalized so the main peak fills the canvas height. They
+	differ only in the amplitude of the secondary peak (curve A larger,
+	curve B smaller).
+	"""
+	if bg is None:
+		bg = PALETTE["accent"]
+	if primary_color is None:
+		primary_color = PALETTE["accent_fg"]            # white
+	if secondary_color is None:
+		secondary_color = "#FFD966"                       # soft yellow
+
+	canvas = tk.Canvas(parent, width=width, height=height, bg=bg,
+		highlightthickness=0, bd=0)
+
+	def _gauss(x, mu, sigma, amp):
+		return amp * math.exp(-((x - mu) ** 2) / (2.0 * sigma * sigma))
+
+	def _curve(amp1, mu1, sigma1, amp2, mu2, sigma2):
+		n = 64
+		pad_x, pad_y = 3, 3
+		plot_w = width - 2 * pad_x
+		plot_h = height - 2 * pad_y
+		ys = []
+		xs = []
+		for i in range(n):
+			x = i / (n - 1)
+			y = _gauss(x, mu1, sigma1, amp1) + _gauss(x, mu2, sigma2, amp2)
+			xs.append(x)
+			ys.append(y)
+		ymax = max(ys) or 1.0
+		pts = []
+		for x, y in zip(xs, ys):
+			px = pad_x + x * plot_w
+			py = pad_y + (1.0 - y / ymax) * plot_h
+			pts.extend([px, py])
+		return pts
+
+	# Curve A: larger second hump (heavy-isotope-incorporated population)
+	curve_a = _curve(1.0, 0.28, 0.085, 0.70, 0.72, 0.090)
+	# Curve B: smaller second hump (lightly-labeled or unlabeled sample)
+	curve_b = _curve(1.0, 0.28, 0.085, 0.22, 0.72, 0.090)
+
+	canvas.create_line(*curve_a, fill=primary_color, width=2, smooth=True)
+	canvas.create_line(*curve_b, fill=secondary_color, width=2, smooth=True)
+	return canvas

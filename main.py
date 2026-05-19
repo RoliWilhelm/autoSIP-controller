@@ -19,7 +19,11 @@ import hardware
 import styling
 import validation
 import config_store
-from styling import FONTS, PALETTE, apply_style, make_centrifuge_tube_canvas, primary_button
+from styling import (
+	FONTS, PALETTE, apply_style,
+	make_bimodal_distribution_canvas,
+	make_centrifuge_tube_canvas, primary_button,
+)
 from well_plate import WellPlateProgress, format_snapshot_log
 from run_logger import RunLogger, _fmt_hms
 
@@ -826,30 +830,43 @@ class AutomatedFrame(tk.Frame):
 		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=4)
 		platep.grid(row=2, column=0, columnspan=3, sticky="we", padx=2, pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
+		# JSON loader -- first row of Plate Parameters because loading a
+		# file populates the rows/cols/well-width/starting-point entries
+		# below. Compact label + path entry + Load button on one row.
+		loader_row = tk.Frame(platep, bg=PALETTE["bg_frame"])
+		loader_row.grid(row=0, column=0, sticky="we", pady=(0, 6))
+		loader_row.grid_columnconfigure(1, weight=1)
+		tk.Label(loader_row, text="Load well plate file:").grid(
+			row=0, column=0, sticky="w", padx=(0, 6))
+		self.json_entry = tk.Entry(loader_row)
+		self.json_entry.grid(row=0, column=1, sticky="we")
+		tk.Button(loader_row, text="Load", command=self.load_json).grid(
+			row=0, column=2, sticky="we", padx=(6, 0))
+
 		self.rows_text_entry = TextEntry(platep, "Number of rows (1–16):")
-		self.rows_text_entry.grid(row=0, column=0, sticky="we")
+		self.rows_text_entry.grid(row=1, column=0, sticky="we")
 		self.cols_text_entry = TextEntry(platep, "Number of columns (1–24):")
-		self.cols_text_entry.grid(row=1, column=0, sticky="we")
+		self.cols_text_entry.grid(row=2, column=0, sticky="we")
 		self.ws_text_entry = TextEntry(platep, "Well width (cm):")
-		self.ws_text_entry.grid(row=2, column=0, sticky="we")
+		self.ws_text_entry.grid(row=3, column=0, sticky="we")
 
 		self.table_te = TextEntry(platep, "Starting point (x-axis):")
-		self.table_te.grid(row=3, column=0, sticky="we")
+		self.table_te.grid(row=4, column=0, sticky="we")
 		self.carriage_te = TextEntry(platep, "Starting point (y-axis):")
-		self.carriage_te.grid(row=4, column=0, sticky="we")
+		self.carriage_te.grid(row=5, column=0, sticky="we")
 
 		tk.Label(platep, text="Waste bin:", anchor="w").grid(
-			row=5, column=0, sticky="w", pady=(6, 0))
+			row=6, column=0, sticky="w", pady=(6, 0))
 		self.waste_table_te = TextEntry(
 			platep, "  table position (cm, 0–20):",
 			textvariable=app.waste_bin_table_var,
 		)
-		self.waste_table_te.grid(row=6, column=0, sticky="we")
+		self.waste_table_te.grid(row=7, column=0, sticky="we")
 		self.waste_carriage_te = TextEntry(
 			platep, "  carriage position (cm, 0–15):",
 			textvariable=app.waste_bin_carriage_var,
 		)
-		self.waste_carriage_te.grid(row=7, column=0, sticky="we")
+		self.waste_carriage_te.grid(row=8, column=0, sticky="we")
 		Tooltip(
 			self.waste_table_te.entry,
 			"Waste-bin position used during the discard phase. "
@@ -876,14 +893,6 @@ class AutomatedFrame(tk.Frame):
 			"Longer waits improve volume consistency; shorter waits run faster.",
 		)
 
-		# JSON loader (own row, no LabelFrame to keep it compact)
-		tk.Label(self, text="Load well plate file: ").grid(row=4, column=0, columnspan=1, pady=(6, 0))
-		self.json_entry = tk.Entry(self)
-		self.json_entry.grid(row=4, column=1, columnspan=1, pady=(6, 0))
-		tk.Button(self, text="Load", command=self.load_json).grid(
-			row=4, column=2, columnspan=1, sticky="we", pady=(6, 0),
-		)
-
 		# Begin Fractionation -- the run-launch button. (The previous
 		# "Move (jog to Plate-start coords)" button was removed because the
 		# Return to Start Coords button in the run-controls row already
@@ -895,7 +904,7 @@ class AutomatedFrame(tk.Frame):
 		# Clicks on the tube canvas fall through to begin_clicked too so
 		# the entire region behaves like a single button.
 		begin_frame = tk.Frame(self, bg=PALETTE["accent"], bd=0, highlightthickness=0)
-		begin_frame.grid(row=5, column=0, columnspan=3, sticky="we", pady=(4, 0))
+		begin_frame.grid(row=4, column=0, columnspan=3, sticky="we", pady=(4, 0))
 		begin_frame.grid_columnconfigure(1, weight=1)
 		self.begin_tube_canvas = make_centrifuge_tube_canvas(begin_frame, size=40)
 		self.begin_tube_canvas.grid(row=0, column=0, padx=(8, 4), pady=4, sticky="w")
@@ -904,13 +913,22 @@ class AutomatedFrame(tk.Frame):
 			begin_frame, text="Begin Fractionation",
 			command=self.begin_clicked, anchor="w",
 		)
-		self.begin_btn.grid(row=0, column=1, sticky="we", padx=(0, 8), pady=4)
+		self.begin_btn.grid(row=0, column=1, sticky="we", padx=(0, 4), pady=4)
+		# Bimodal-distribution canvas on the right: the SIP-experiment
+		# readout (two density curves, one with a larger heavy-isotope
+		# peak). Also click-through to begin_clicked for symmetry with
+		# the tube canvas.
+		self.begin_dist_canvas = make_bimodal_distribution_canvas(
+			begin_frame, width=64, height=40,
+		)
+		self.begin_dist_canvas.grid(row=0, column=2, padx=(4, 8), pady=4, sticky="e")
+		self.begin_dist_canvas.bind("<Button-1>", lambda _e: self.begin_clicked())
 
 		# Progress view -- to-scale well plate, color-blind-safe palette,
 		# header showing current well + count + elapsed/remaining time.
 		self.progress = WellPlateProgress(self, min_width=500, min_height=300)
-		self.progress.grid(row=6, column=0, columnspan=3, sticky="nsew")
-		self.grid_rowconfigure(6, weight=1)
+		self.progress.grid(row=5, column=0, columnspan=3, sticky="nsew")
+		self.grid_rowconfigure(5, weight=1)
 
 		# Mirror Project/Sample ID entry text into state.project /
 		# state.current_sample_id on every keystroke (trace_add). Focus-out
