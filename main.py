@@ -69,35 +69,61 @@ class StepperMotor:
 		self.motor.release()
 
 	def move_relative(self, angle):
-		"""Turn the shaft a number of degrees relative to its current position."""
-		backlash = 0.3 / self.cm_per_deg
+		"""Turn the shaft so the slider moves by ``angle`` degrees' worth.
 
+		On a direction reversal, the motor must first rotate through the
+		lead-screw nut's mechanical play (backlash) before the slider
+		engages. We add that one-shot ``backlash`` rotation to what the
+		motor actually drives, but it produces no slider motion -- so
+		``self.angle`` (which tracks the slider's commanded position and
+		is read by ``move_absolute`` and the Manual-mode readout)
+		accumulates only the intended portion. Conflating motor-shaft
+		rotation with slider position used to make a 1 mm jog after a
+		direction change display as ~4 mm in the readout.
+
+		Intent steps and backlash steps are kept as separate integer
+		microstep counts so summing them is exact -- folding them into a
+		single float angle before flooring lost a microstep at certain
+		step sizes (e.g. ``floor(8.888… × 27.9°) = 247`` instead of 248).
+		"""
+		# Backlash takeup, expressed as an exact microstep count. For the
+		# stock geometry this evaluates to 240 microsteps (= 27°, = 0.3 cm
+		# of motor rotation that engages the nut before the slider moves).
+		backlash_steps = round(0.3 * self.steps_per_degree / self.cm_per_deg)
+
+		intent_steps = floor(self.steps_per_degree * angle)
+		extra_steps = 0
 		if self.forwards and angle < 0:
-			angle -= backlash
+			extra_steps = -backlash_steps
 			self.forwards = False
 		elif not self.forwards and angle > 0:
-			angle += backlash
+			extra_steps = backlash_steps
 			self.forwards = True
 
-		steps_needed = floor(self.steps_per_degree * angle)
+		total_steps = intent_steps + extra_steps
 
-		# FORWARD if positive angle and not reversed, or negative angle and reversed
+		# FORWARD if net motion is positive and motor not reversed, or
+		# negative and motor reversed. Sign of total_steps matches sign of
+		# ``angle`` since extra_steps is signed to match.
 		direction = (
 			hardware.FORWARD
-			if (angle > 0 and not self.reverse) or (angle < 0 and self.reverse)
+			if (total_steps > 0 and not self.reverse) or (total_steps < 0 and self.reverse)
 			else hardware.BACKWARD
 		)
 
 		logger.debug(
-			"%s move_relative angle=%.3f° steps=%d direction=%s",
-			self.name, angle, abs(steps_needed), direction,
+			"%s move_relative angle=%.3f° steps=%d (intent=%d + backlash=%d) direction=%s",
+			self.name, angle, abs(total_steps), intent_steps, extra_steps, direction,
 		)
 
-		for _ in range(0, abs(steps_needed)):
+		for _ in range(0, abs(total_steps)):
 			self.motor.onestep(direction=direction, style=hardware.MICROSTEP)
 			sleep(0.0001)
 
-		self.angle = self.angle + steps_needed / self.steps_per_degree
+		# Only the intent portion advanced the slider; the backlash portion
+		# took up gear play. Accumulate intent_steps so self.angle stays in
+		# lock-step with the slider's quantized physical position.
+		self.angle = self.angle + intent_steps / self.steps_per_degree
 
 		self.release()
 
@@ -492,6 +518,21 @@ class FractionatorState:
 	current_series_sequence: int = 0
 	well_records: list = field(default_factory=list)
 
+	# Multi-plate run support. ``current_plate_id`` updates on each plate
+	# swap. ``wells_on_current_plate`` resets to 0 on each swap so the
+	# plate-full detection works on the live plate, not historical totals.
+	# ``plate_full_with_sample_complete`` distinguishes the "both finished
+	# simultaneously" auto-pause from a plain plate-full auto-pause so the
+	# button matrix can enable Continue to Next Sample appropriately.
+	# ``plates_used`` is a chronological list of unique plate IDs.
+	# ``plate_swaps_done`` is a 1-based counter used for plate_swap_<N>
+	# breadcrumb naming.
+	current_plate_id: str = ""
+	wells_on_current_plate: int = 0
+	plate_full_with_sample_complete: bool = False
+	plates_used: list = field(default_factory=list)
+	plate_swaps_done: int = 0
+
 
 class HeaderFrame(tk.Frame):
 	"""Top bar: the Mode-cycle button.
@@ -643,6 +684,10 @@ class AutomatedFrame(tk.Frame):
 			ctrl, text="Continue to Next Sample",
 			command=app.continue_to_next_sample)
 		self.continue_btn.pack(side=tk.LEFT, padx=2)
+		self.continue_plate_btn = tk.Button(
+			ctrl, text="Continue to Next Plate",
+			command=app.continue_to_next_plate)
+		self.continue_plate_btn.pack(side=tk.LEFT, padx=2)
 		self.end_run_btn = tk.Button(ctrl, text="End Run", command=self.end_run_clicked)
 		self.end_run_btn.pack(side=tk.LEFT, padx=2)
 		# Default disabled-button bg used when the Pause button is disabled
@@ -672,15 +717,25 @@ class AutomatedFrame(tk.Frame):
 			"Identifies the source tube. Change during a pause when "
 			"swapping tubes.",
 		)
+		self.plate_id_te = TextEntry(runp, "Plate ID:")
+		self.plate_id_te.grid(row=2, column=0, sticky="we")
+		# First-launch default. last_used (loaded after frames build) will
+		# override this if the operator already used a different Plate ID.
+		self.plate_id_te.set("Plate-1")
+		Tooltip(
+			self.plate_id_te.entry,
+			"Identifies the physical plate currently on the stage. "
+			"Auto-incremented at each plate swap.",
+		)
 		self.n_fractions_te = TextEntry(runp, "Number of fractions:")
-		self.n_fractions_te.grid(row=2, column=0, sticky="we")
+		self.n_fractions_te.grid(row=3, column=0, sticky="we")
 		Tooltip(
 			self.n_fractions_te.entry,
 			"TOTAL fractions including discards. The first N–D fractions "
 			"that aren't discarded land on the plate; max = rows × cols.",
 		)
 		self.discard_te = TextEntry(runp, "Discard fractions:")
-		self.discard_te.grid(row=3, column=0, sticky="we")
+		self.discard_te.grid(row=4, column=0, sticky="we")
 		Tooltip(
 			self.discard_te.entry,
 			"Initial fractions pumped to a waste bin before plate collection "
@@ -688,7 +743,7 @@ class AutomatedFrame(tk.Frame):
 			"Set 0 to skip the discard phase.",
 		)
 		self.vol_text_entry = TextEntry(runp, "Volume per well (cc, e.g., 0.22):")
-		self.vol_text_entry.grid(row=4, column=0, sticky="we")
+		self.vol_text_entry.grid(row=5, column=0, sticky="we")
 
 		# ----- Plate Parameters (middle) ---------------------------------
 		# Plate geometry + the two coordinate pairs (plate-start and
@@ -763,6 +818,9 @@ class AutomatedFrame(tk.Frame):
 		self._project_last_committed = ""
 		self.project_te.var.trace_add("write", lambda *_: self._on_project_text_changed())
 		self.sample_id_te.var.trace_add("write", lambda *_: self._on_sample_id_text_changed())
+		# Plate ID changes mirror to state so the logger's get_current_run_id
+		# callback sees the latest value on every CSV write.
+		self.plate_id_te.var.trace_add("write", lambda *_: self._on_plate_id_text_changed())
 		self.project_te.entry.bind("<FocusOut>", self._on_project_focus_out, add="+")
 
 		# Persist field values to ~/.autosip/config.json on every focus-out
@@ -780,6 +838,7 @@ class AutomatedFrame(tk.Frame):
 		return {
 			"project": self.project_te,
 			"sample_id": self.sample_id_te,
+			"plate_id": self.plate_id_te,
 			"number_of_fractions": self.n_fractions_te,
 			"discard_fractions": self.discard_te,
 			"rows": self.rows_text_entry,
@@ -857,6 +916,14 @@ class AutomatedFrame(tk.Frame):
 		if ok:
 			self.sample_id_te.clear_error()
 
+	def _on_plate_id_text_changed(self):
+		"""Mirror the Plate ID entry into state on every keystroke."""
+		text = self.plate_id_te.get()
+		self.app.state.current_plate_id = text
+		ok, _ = validation.plate_id(text)
+		if ok:
+			self.plate_id_te.clear_error()
+
 	def _on_project_focus_out(self, _event=None):
 		"""If the Project changed mid-run, prompt for confirmation; revert
 		on No. Always falls through to the standard last_used save."""
@@ -892,7 +959,7 @@ class AutomatedFrame(tk.Frame):
 
 	def _clear_all_errors(self):
 		for te in (
-			self.project_te, self.sample_id_te,
+			self.project_te, self.sample_id_te, self.plate_id_te,
 			self.n_fractions_te, self.discard_te,
 			self.rows_text_entry, self.cols_text_entry, self.ws_text_entry,
 			self.pump_rate_text_entry, self.vol_text_entry,
@@ -1017,6 +1084,7 @@ class AutomatedFrame(tk.Frame):
 		fields = [
 			(self.project_te, validation.project),
 			(self.sample_id_te, validation.sample_id),
+			(self.plate_id_te, validation.plate_id),
 			(self.n_fractions_te, validation.number_of_fractions),
 			(self.discard_te, validation.discard_fractions),
 			(self.vol_text_entry, validation.volume),
@@ -1041,7 +1109,7 @@ class AutomatedFrame(tk.Frame):
 		# Cross-field checks (run only if all single-field parses passed --
 		# otherwise the comparisons would be against None/garbage).
 		if not errors:
-			(project_v, sample_v, n_v, d_v, vol_v,
+			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
 				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v) = parsed
 			capacity = rows_v * cols_v
 
@@ -1127,6 +1195,7 @@ class AutomatedFrame(tk.Frame):
 		self.app.start_run(
 			rows_v, cols_v, ws_v, rate_v, vol_v,
 			project=project_v, sample_id_at_start=sample_v,
+			plate_id_at_start=plate_v,
 			number_of_fractions=n_v, discard_fractions=d_v,
 			waste_bin_table=waste_x if waste_x is not None else 0.0,
 			waste_bin_carriage=waste_y if waste_y is not None else 0.0,
@@ -1174,8 +1243,11 @@ class ManualFrame(tk.Frame):
 
 	# Soft travel limits (matches validation.TABLE_POS_MAX / CARRIAGE_POS_MAX
 	# but enforced here on the jog path rather than at submit time).
+	# The Y range is [-15, 0] (not [0, 15]) so from home (motor=0) the
+	# down arrow (Y-) is the one that moves the needle into valid travel;
+	# the up arrow (Y+) is refused, matching the plate's upper-left origin.
 	_X_MIN, _X_MAX = 0.0, 20.0
-	_Y_MIN, _Y_MAX = 0.0, 15.0
+	_Y_MIN, _Y_MAX = -15.0, 0.0
 
 	def __init__(self, master, app):
 		super().__init__(master)
@@ -1237,28 +1309,57 @@ class ManualFrame(tk.Frame):
 		pump.grid_columnconfigure(0, weight=1)
 		pump.grid_columnconfigure(1, weight=1)
 
+		# Layout each pump button as a (button + hint) stack so the
+		# "(Space)" hint can be gridded immediately to the right of the
+		# button without shifting button widths. Only one hint is gridded
+		# at a time -- the one for app.last_pump_used.
+		frac_wrap = tk.Frame(pump)
+		frac_wrap.grid(row=0, column=0, sticky="we", padx=(0, 4), pady=4)
+		frac_wrap.grid_columnconfigure(0, weight=1)
 		self.fractionate_btn = tk.Button(
-			pump, text="Fractionate: OFF",
+			frac_wrap, text="Fractionate: OFF",
 			command=lambda: app._handle_pump_click("fractionate", parent=self),
 		)
-		self.fractionate_btn.grid(row=0, column=0, sticky="we", padx=(0, 4), pady=4)
+		self.fractionate_btn.grid(row=0, column=0, sticky="we")
+		self.fractionate_space_lbl = tk.Label(
+			frac_wrap, text="(Space)", fg="gray40",
+		)
+		# Not gridded by default; ``_set_space_hint`` decides which side
+		# is visible based on app.last_pump_used.
 
+		purge_wrap = tk.Frame(pump)
+		purge_wrap.grid(row=0, column=1, sticky="we", padx=(4, 0), pady=4)
+		purge_wrap.grid_columnconfigure(0, weight=1)
 		self.purge_btn = tk.Button(
-			pump, text="Purge: OFF",
+			purge_wrap, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
 		)
-		self.purge_btn.grid(row=0, column=1, sticky="we", padx=(4, 0), pady=4)
+		self.purge_btn.grid(row=0, column=0, sticky="we")
+		self.purge_space_lbl = tk.Label(
+			purge_wrap, text="(Space)", fg="gray40",
+		)
 
 	def refresh(self):
 		"""Re-sync the position readout and clear the per-visit pump-confirm
 		set so the first click on EACH pump (Fractionate, Purge) after
 		switching INTO Manual mode shows the relay-activation warning once
-		for that pump."""
+		for that pump. Also re-anchor the "(Space)" hint label next to the
+		currently-active pump so it's visible immediately on mode entry.
+		"""
 		self.app._manual_pumps_confirmed.clear()
-		self._update_position()
+		self.refresh_position_readout()
+		self._set_space_hint(self.app.last_pump_used)
 
 	def _jog(self, axis, sign):
-		"""Move one step in (axis, sign) direction; refuse if it would exceed limits."""
+		"""Move one step in (axis, sign) direction; refuse if it would exceed limits.
+
+		The step distance is read live from ``step_var`` (cm) and passed to
+		``motor.move_dist_relative``, the same entry point Automated mode's
+		Move button uses -- so a 10 mm jog and a 1.0 cm Automated move
+		travel identical physical distances. The prospective target is
+		computed from the *live* motor angle so the limit check is robust
+		even if the position label ever drifts from the motor state.
+		"""
 		step_cm = self.step_var.get() * sign
 		if axis == "x":
 			motor = self.app.table_motor
@@ -1277,16 +1378,42 @@ class ManualFrame(tk.Frame):
 			return
 
 		motor.move_dist_relative(step_cm)
-		self._update_position()
+		self.refresh_position_readout()
 
 	def _home_clicked(self):
+		"""Return both axes to physical home AND snap the software angle
+		counters to zero. The physical-home position is the ground truth;
+		taring after the move guarantees the readout reads exactly
+		``0.000 cm`` even if step-counting drift accumulated during the
+		session.
+		"""
 		self.app.carriage_return()
-		self._update_position()
+		self.app.table_motor.tare()
+		self.app.carriage_motor.tare()
+		self.refresh_position_readout()
 
-	def _update_position(self):
+	def refresh_position_readout(self):
+		"""Re-render the Position: X = ..., Y = ... label from live motor
+		angles. Called by ``_jog``, ``_home_clicked``, and ``refresh`` so
+		any motion the user can initiate from this frame updates the
+		display immediately.
+		"""
 		x = self.app.table_motor.get_angle() * self.app.table_motor.cm_per_deg
 		y = self.app.carriage_motor.get_angle() * self.app.carriage_motor.cm_per_deg
 		self.position_var.set(f"Position: X = {x:.3f} cm, Y = {y:.3f} cm")
+
+	def _set_space_hint(self, pump_name):
+		"""Show the "(Space)" hint label next to ``pump_name``'s button and
+		hide it next to the other one. Called on mode entry and any time
+		the operator clicks one of the pump buttons via the App-level
+		``_handle_pump_click`` (which writes ``last_pump_used``).
+		"""
+		if pump_name == "fractionate":
+			self.fractionate_space_lbl.grid(row=0, column=1, padx=(4, 0))
+			self.purge_space_lbl.grid_remove()
+		else:
+			self.purge_space_lbl.grid(row=0, column=1, padx=(4, 0))
+			self.fractionate_space_lbl.grid_remove()
 
 	def set_controls_enabled(self, enabled):
 		"""Disable jog + Home buttons after Terminate; pump buttons are
@@ -1390,6 +1517,10 @@ class App(tk.Tk):
 		# on its first activation; subsequent activations of THE SAME pump
 		# are suppressed. Switching to/from Manual clears the set.
 		self._manual_pumps_confirmed = set()
+		# Which pump the space-bar shortcut targets in Manual mode. Updated
+		# every time the user clicks (or space-activates) one of the two
+		# pump buttons, and persisted across launches via config_store.
+		self.last_pump_used = config_store.load_last_pump_used()
 		# Per-run on-disk logger. None when no run is active. Set on
 		# start_run, cleared on run end / terminate.
 		self.run_logger = None
@@ -1461,6 +1592,13 @@ class App(tk.Tk):
 		# Intercept window-close so a run in progress is recorded as
 		# "manual_abort" rather than just orphaned on disk.
 		self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+		# Space-bar shortcut: toggle the most-recently-used pump in Manual
+		# mode. Bound at root with ``bind_all`` so it fires regardless of
+		# which widget has focus, but the handler self-gates on mode and
+		# on the focused widget type (passes through to text-entry widgets
+		# so users can still type a space character there).
+		self.bind_all("<KeyPress-space>", self._on_space)
 
 		# Seed the run-control button row to its idle state.
 		self._update_run_control_buttons()
@@ -1684,7 +1822,9 @@ class App(tk.Tk):
 						self.state.x, self.state.y)
 			try:
 				snap = self.automated_frame.progress.snapshot()
-				self.run_logger.end("manual_abort", snapshot=snap)
+				self.run_logger.end("manual_abort", snapshot=snap,
+				plates_used=self.state.plates_used,
+				well_records=self.state.well_records)
 			except Exception as exc:
 				logger.warning("Run logger failed to close on window close: %s", exc)
 			self.run_logger = None
@@ -1784,7 +1924,9 @@ class App(tk.Tk):
 				else:
 					self.run_logger.well_emergency_stopped(pre_x, pre_y)
 			snap = self.automated_frame.progress.snapshot()
-			self.run_logger.end("emergency_stopped", snapshot=snap)
+			self.run_logger.end("emergency_stopped", snapshot=snap,
+				plates_used=self.state.plates_used,
+				well_records=self.state.well_records)
 			self.run_logger = None
 
 		# Run-control buttons reflect the new idle/estopped state.
@@ -1854,11 +1996,14 @@ class App(tk.Tk):
 	def _classify_ui_state(self):
 		"""Map (state.state, is_paused, _terminated) to a single UI bucket.
 
-		idle / running / paused_manual / paused_total / estopped
+		idle / running / paused_manual / paused_total / paused_plate_full /
+		estopped
 		"""
 		if self._terminated:
 			return "estopped"
 		s = self.state
+		if s.state == "plate_full":
+			return "paused_plate_full"
 		if s.state == "total_reached":
 			return "paused_total"
 		if s.is_paused:
@@ -1868,10 +2013,11 @@ class App(tk.Tk):
 		return "idle"
 
 	def _update_run_control_buttons(self):
-		"""Sync the four run-control buttons in AutomatedFrame to the current
+		"""Sync the five run-control buttons in AutomatedFrame to the current
 		state machine state. Called at every state transition so the user
 		sees an immediate response."""
 		af = self.automated_frame
+		s = self.state
 		bucket = self._classify_ui_state()
 
 		# Defaults; per-bucket overrides follow.
@@ -1880,6 +2026,7 @@ class App(tk.Tk):
 		pause_text = "Pause"
 		pause_bg = af._pause_default_bg
 		cont_state = tk.DISABLED
+		cont_plate_state = tk.DISABLED
 		end_state = tk.DISABLED
 
 		if bucket == "idle":
@@ -1899,11 +2046,25 @@ class App(tk.Tk):
 			pause_bg = self._PAUSE_PAUSED_BG
 			end_state = tk.NORMAL
 		elif bucket == "paused_total":
+			# Sample complete, plate not full -- next action is Continue
+			# to Next Sample (or End Run).
 			ret_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
 			pause_bg = af._pause_default_bg
 			cont_state = tk.NORMAL
+			end_state = tk.NORMAL
+		elif bucket == "paused_plate_full":
+			# Plate full -- Continue to Next Plate is the primary action.
+			# Continue to Next Sample becomes available only if the sample
+			# ALSO wrapped up on this well; otherwise it stays disabled
+			# until after the plate swap resolves.
+			ret_state = tk.DISABLED
+			pause_state = tk.DISABLED
+			pause_text = "Paused"
+			pause_bg = af._pause_default_bg
+			cont_plate_state = tk.NORMAL
+			cont_state = tk.NORMAL if s.plate_full_with_sample_complete else tk.DISABLED
 			end_state = tk.NORMAL
 		elif bucket == "estopped":
 			ret_state = tk.DISABLED
@@ -1917,6 +2078,7 @@ class App(tk.Tk):
 		# fg on Pause button: white on the colored bgs, default-dark on gray.
 		af.pause_btn["fg"] = "white" if pause_bg != af._pause_default_bg else "#222"
 		af.continue_btn["state"] = cont_state
+		af.continue_plate_btn["state"] = cont_plate_state
 		af.end_run_btn["state"] = end_state
 
 	def _set_controls_enabled(self, enabled):
@@ -1949,6 +2111,10 @@ class App(tk.Tk):
 		as a defensive fallback, then -- if turning ON -- shows the
 		home-position warning (Fractionate only, outside Cleaning) and the
 		"Activating the relay" confirmation before claiming + powering on.
+
+		In Manual mode, also records the click as the most-recently-used
+		pump for the space-bar shortcut (only after the click passes the
+		early-out guards so a no-op click doesn't move the hint).
 		"""
 		pc = self.pump_controller
 		parent = parent or self
@@ -1959,6 +2125,18 @@ class App(tk.Tk):
 		# Interlock: the opposite pump already holds the claim.
 		if not pc.is_available_for(name):
 			return
+
+		# Manual-mode UX: this click counts as user intent, so it becomes
+		# the new space-bar target. Save BEFORE the confirm prompt so even
+		# a cancelled activation still moves the hint -- the user clearly
+		# meant to operate this pump.
+		if self.mode == "Manual" and name != self.last_pump_used:
+			self.last_pump_used = name
+			try:
+				config_store.save_last_pump_used(name)
+			except OSError as exc:
+				logger.warning("Could not persist last_pump_used: %s", exc)
+			self.manual_frame._set_space_hint(name)
 
 		# We currently hold the claim with relay on -> click means turn off.
 		if pc.claimant == name and pc.relay_on:
@@ -1991,6 +2169,24 @@ class App(tk.Tk):
 		pc.set_relay(True)
 		if self.mode == "Cleaning" and name == "purge":
 			self.set_status("System purging.")
+
+	def _on_space(self, event):
+		"""Space-bar shortcut: toggle the last-used pump in Manual mode.
+
+		Self-gates on mode and on the type of widget currently holding
+		keyboard focus -- if the user is typing into an Entry or Text,
+		space is a literal character there and we must NOT consume it.
+		Returns ``"break"`` to prevent default activation on whichever
+		button might be focused (which would otherwise fire a second
+		toggle on the same key press).
+		"""
+		if self.mode != "Manual":
+			return None
+		focused = self.focus_get()
+		if isinstance(focused, (tk.Entry, tk.Text)):
+			return None
+		self._handle_pump_click(self.last_pump_used, parent=self.manual_frame)
+		return "break"
 
 	def _pump_confirm_text(self, name):
 		"""Body text for the relay-activation askyesno dialog."""
@@ -2097,7 +2293,7 @@ class App(tk.Tk):
 	# -- Automated fractionation flow ------------------------------------
 
 	def start_run(self, rows, cols, well_size, pump_rate, volume,
-			project, sample_id_at_start,
+			project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start):
@@ -2164,6 +2360,7 @@ class App(tk.Tk):
 			f"Begin fractionation:\n"
 			f"  • Project: {project}\n"
 			f"  • Sample ID: {sample_id_at_start}\n"
+			f"  • Plate ID: {plate_id_at_start}\n"
 			f"  • Total fractions: {number_of_fractions}\n"
 			f"{discard_lines}"
 			f"{plate_line}"
@@ -2203,6 +2400,11 @@ class App(tk.Tk):
 		s.volume_per_well = volume
 		s.project = project
 		s.current_sample_id = sample_id_at_start
+		s.current_plate_id = plate_id_at_start
+		s.plates_used = [plate_id_at_start]
+		s.plate_swaps_done = 0
+		s.wells_on_current_plate = 0
+		s.plate_full_with_sample_complete = False
 		s.number_of_fractions = number_of_fractions
 		s.discards_planned = discard_fractions
 		s.discards_done = 0
@@ -2214,7 +2416,7 @@ class App(tk.Tk):
 
 		# Start the on-disk per-run logger.
 		self._start_run_logger(rows, cols, well_size, pump_rate, volume,
-			pump_time, project, sample_id_at_start,
+			pump_time, project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, estimated_total_s)
@@ -2228,14 +2430,16 @@ class App(tk.Tk):
 		self._update_run_control_buttons()
 
 	def _start_run_logger(self, rows, cols, well_size, pump_rate, volume,
-			pump_time, project, sample_id_at_start,
+			pump_time, project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, estimated_total_s):
 		"""Build the run metadata and create a RunLogger directory."""
 		af = self.automated_frame
 		metadata = {
-			"timestamp_start": datetime.now().isoformat(timespec="seconds"),
+			# ms precision; matches run_logger._now_iso() so derived ranges
+			# (e.g. actual_total_time_s in end.json) line up cleanly.
+			"timestamp_start": datetime.now().isoformat(timespec="milliseconds"),
 			"software_version": __version__,
 			"project": project,
 			"sample_id_at_start": sample_id_at_start,
@@ -2254,13 +2458,18 @@ class App(tk.Tk):
 				"discard_fractions": discard_fractions,
 				"waste_bin_table_cm": waste_bin_table,
 				"waste_bin_carriage_cm": waste_bin_carriage,
+				"plate_id_at_start": plate_id_at_start,
 			},
 			"estimated_total_time_s": estimated_total_s,
 		}
+		# The logger reads project + sample_id + plate_id via this callback
+		# each time it writes a row, so mid-run edits flow into subsequent
+		# CSV rows (Sample ID on tube swap, Plate ID on plate swap).
 		def _current_run_id():
 			return {
 				"project": self.state.project,
 				"sample_id": self.state.current_sample_id,
+				"plate_id": self.state.current_plate_id,
 			}
 		self.run_logger = RunLogger(get_current_run_id=_current_run_id)
 		try:
@@ -2276,6 +2485,7 @@ class App(tk.Tk):
 		s = self.state
 		# Reset progress view and seed the plate dims.
 		self.automated_frame.begin_run(s.COLS, s.ROWS, s.volume_per_well, s.pump_time)
+		self.automated_frame.progress.set_plate_label(s.current_plate_id)
 		self.update()
 		s.carriage_forwards = True
 		s.x = 0
@@ -2410,6 +2620,7 @@ class App(tk.Tk):
 		record = {
 			"well_id": well_id,
 			"sample_id": s.current_sample_id,
+			"plate_id": s.current_plate_id,
 			"series_index": s.series_index,
 			"sequence_within_series": s.current_series_sequence,
 			"fraction_index_in_sample": fraction_index,
@@ -2427,11 +2638,21 @@ class App(tk.Tk):
 		if self.run_logger is not None:
 			self.run_logger.well_completed(s.x, s.y)
 		s.wells_collected += 1
+		s.wells_on_current_plate += 1
 		s.state = "move"
 
-		# Auto-pause if we've collected the per-series plate target.
+		# Detect "plate full" BEFORE the sample-target auto-pause so that
+		# end-of-plate AND end-of-sample at the same well surfaces the
+		# plate-swap action as the primary user choice. The sample-complete
+		# flag rides along so the button matrix can enable both Continue
+		# buttons.
+		plate_capacity = s.ROWS * s.COLS
 		plate_target = s.number_of_fractions - s.discards_at_series_start
-		if s.wells_collected >= plate_target:
+		sample_complete = s.wells_collected >= plate_target
+		if s.wells_on_current_plate >= plate_capacity:
+			self._auto_pause_plate_full(sample_complete)
+			return
+		if sample_complete:
 			self._auto_pause_total_reached()
 			return
 
@@ -2487,6 +2708,25 @@ class App(tk.Tk):
 		# "Paused"; Continue + End Run enabled).
 		self._update_run_control_buttons()
 
+	def _auto_pause_plate_full(self, sample_complete):
+		"""Hold the run at the last well of a now-full plate; await
+		Continue to Next Plate (and possibly Continue to Next Sample if the
+		sample also wrapped up on this well)."""
+		s = self.state
+		if s.taskId is not None:
+			self.after_cancel(s.taskId)
+			s.taskId = None
+		self.pump_controller.set_relay(False)
+		s.state = "plate_full"
+		s.is_paused = True
+		s.plate_full_with_sample_complete = bool(sample_complete)
+		self.set_status(
+			f"Plate {s.current_plate_id} is full. Click Continue to Next "
+			"Plate to swap plates and continue."
+		)
+		# Button row picks up the paused_plate_full layout.
+		self._update_run_control_buttons()
+
 	def end_run(self):
 		"""Handle the End Run button click. Finalizes whatever phase we're in."""
 		s = self.state
@@ -2537,7 +2777,9 @@ class App(tk.Tk):
 				else:
 					self.run_logger.well_emergency_stopped(pre_x, pre_y)
 			snap = self.automated_frame.progress.snapshot()
-			self.run_logger.end(final_status, snapshot=snap)
+			self.run_logger.end(final_status, snapshot=snap,
+				plates_used=self.state.plates_used,
+				well_records=self.state.well_records)
 			self.run_logger = None
 
 		# Reset UI: clear the plate view and refresh the button states.
@@ -2594,20 +2836,21 @@ class App(tk.Tk):
 			)
 			return
 
-		# Pre-flight 2: plate capacity check (hard block) using the NEW D.
-		wells_filled = len(s.well_records)
+		# Pre-flight 2: per-current-plate capacity check. With multi-plate
+		# support, a sample is ALLOWED to span plates -- so this is now an
+		# informational notice rather than a hard block. autoSIP will
+		# auto-pause for a plate swap when the current plate fills.
 		capacity = s.ROWS * s.COLS
-		remaining = capacity - wells_filled
+		remaining_on_plate = capacity - s.wells_on_current_plate
 		required = s.number_of_fractions - new_d_val
-		if required > remaining:
-			messagebox.showerror(
-				"Plate capacity exceeded",
-				f"This sample requires {required} wells but only {remaining} remain "
-				"on the plate. Reduce 'Number of fractions' or 'Discard fractions' "
-				"before continuing, or end the run.",
+		if required > remaining_on_plate:
+			messagebox.showinfo(
+				"Sample will span plates",
+				f"This sample requires {required} wells. Only {remaining_on_plate} "
+				f"remain on plate {s.current_plate_id}. autoSIP will prompt for "
+				"a plate swap when the current plate fills.",
 				parent=self,
 			)
-			return
 
 		# Start the new series. Snapshot the per-series D so labels and
 		# the discard-cycle count come from the value that was set when
@@ -2649,6 +2892,181 @@ class App(tk.Tk):
 			self.pump_liquid()
 
 		self._update_run_control_buttons()
+
+	def continue_to_next_plate(self):
+		"""Open the plate-swap dialog. The dialog walks the operator through
+		removing the full plate, optionally homing the needle, placing a new
+		plate, and entering its Plate ID. On Continue, we update state, emit
+		a plate_swap breadcrumb, safety-home if needed, move to A1 of the
+		new plate, and resume whichever phase was active when the plate
+		filled."""
+		s = self.state
+		if s.state != "plate_full":
+			return
+		suggested = validation.auto_increment_plate_id(s.current_plate_id)
+		new_plate_id = self._show_plate_swap_dialog(s.current_plate_id, suggested)
+		if not new_plate_id:
+			# User cancelled the dialog (clicked "Cancel Run" routes through
+			# end_run() inside the dialog and returns None here).
+			return
+		self._commit_plate_swap(new_plate_id)
+
+	def _show_plate_swap_dialog(self, old_plate_id, suggested_new_id):
+		"""Modal Toplevel for the plate-swap flow.
+
+		Returns the validated new Plate ID on Continue, or None if the user
+		cancels / aborts the run. The dialog's "Move Needle to Home" button
+		actually moves the carriage; the result dict keeps track of whether
+		the user took that step so the post-swap safety-home can be skipped
+		when redundant.
+		"""
+		result = {"plate_id": None, "needle_at_home": False}
+
+		dlg = tk.Toplevel(self)
+		dlg.title(f"Plate Full — {old_plate_id}")
+		dlg.transient(self)
+		dlg.grab_set()
+		dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # X disabled; force a choice
+
+		body = tk.Frame(dlg, padx=12, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body, anchor="w", justify="left",
+			text="The current plate is full. Follow these steps in order:",
+		).grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 8))
+
+		tk.Label(body, anchor="w", justify="left", wraplength=480,
+			text=f"  1. Remove the current plate ({old_plate_id}) from the "
+			"stage and store it for downstream processing.",
+		).grid(row=1, column=0, columnspan=2, sticky="we", pady=2)
+
+		tk.Label(body, anchor="w", justify="left",
+			text="  2. Return the dispensing needle to home position:",
+		).grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 2))
+
+		home_btn = tk.Button(body, text="Move Needle to Home")
+		def _home_click():
+			self.carriage_return()
+			result["needle_at_home"] = True
+			home_btn["text"] = "✓ Needle at home"
+			home_btn["state"] = tk.DISABLED
+		home_btn["command"] = _home_click
+		home_btn.grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+
+		tk.Label(body, anchor="w", justify="left",
+			text="  3. Place a new plate on the stage.",
+		).grid(row=4, column=0, columnspan=2, sticky="we", pady=(8, 2))
+
+		tk.Label(body, anchor="w", justify="left",
+			text="  4. Enter the new Plate ID:",
+		).grid(row=5, column=0, columnspan=2, sticky="we", pady=(8, 2))
+
+		plate_te = TextEntry(body, "  Plate ID:")
+		plate_te.grid(row=6, column=0, columnspan=2, sticky="we", padx=20)
+		plate_te.set(suggested_new_id)
+		tk.Label(body, anchor="w", text=f"  (suggested: {suggested_new_id})",
+			fg="#666",
+		).grid(row=7, column=0, columnspan=2, sticky="we", padx=20)
+
+		tk.Label(body, anchor="w", justify="left",
+			text="  5. Click Continue to resume fractionation.",
+		).grid(row=8, column=0, columnspan=2, sticky="we", pady=(8, 8))
+
+		btn_row = tk.Frame(body)
+		btn_row.grid(row=9, column=0, columnspan=2, sticky="we", pady=(8, 0))
+		btn_row.grid_columnconfigure(0, weight=1)
+		btn_row.grid_columnconfigure(1, weight=1)
+
+		def _continue():
+			ok, val = validation.plate_id(plate_te.get())
+			if not ok:
+				plate_te.show_error(val)
+				return
+			plate_te.clear_error()
+			result["plate_id"] = val
+			dlg.destroy()
+
+		def _cancel_run():
+			# Forward to End Run; it has its own confirmation dialog.
+			dlg.destroy()
+			self.end_run()
+
+		tk.Button(btn_row, text="Cancel Run", command=_cancel_run).grid(
+			row=0, column=0, sticky="w", padx=4)
+		tk.Button(btn_row, text="Continue", command=_continue).grid(
+			row=0, column=1, sticky="e", padx=4)
+
+		# Modal -- block until destroyed.
+		self.wait_window(dlg)
+		# Stash the home-clicked flag on self so _commit_plate_swap can read
+		# it without dragging another argument through the call chain.
+		self._plate_swap_pre_homed = result["needle_at_home"]
+		return result["plate_id"]
+
+	def _commit_plate_swap(self, new_plate_id):
+		"""Apply a confirmed Plate ID change: update state + plates_used,
+		emit breadcrumb, safety-home if the operator skipped step 2, move
+		to A1 of the new plate, and resume the appropriate phase."""
+		s = self.state
+		# State updates BEFORE the breadcrumb so the logger callback sees
+		# the new plate_id.
+		s.current_plate_id = new_plate_id
+		# Mirror to the entry box so subsequent CSV rows + the visible
+		# Plate ID field stay in sync.
+		self.automated_frame.plate_id_te.set(new_plate_id)
+		if new_plate_id not in s.plates_used:
+			s.plates_used.append(new_plate_id)
+		s.plate_swaps_done += 1
+
+		# Safety-home if the operator skipped step 2.
+		if not getattr(self, "_plate_swap_pre_homed", False):
+			self.carriage_return()
+
+		# Move to plate A1 (absolute) and reset snake position.
+		self.move_to_positions(
+			table_dist=s.table_start_cm,
+			carriage_dist=s.carriage_start_cm,
+		)
+		s.x = 0
+		s.y = 0
+		s.carriage_forwards = True
+		s.wells_on_current_plate = 0
+
+		# Breadcrumb -- recorded AFTER state.current_plate_id is updated
+		# so the row's plate_id column reflects the NEW plate.
+		if self.run_logger is not None:
+			self.run_logger.plate_swap_breadcrumb(s.plate_swaps_done)
+			# A new plate means well_ids restart -- the per-well dedup
+			# guard inside RunLogger must reset so e.g. a second "A1"
+			# row (on the new plate) actually gets written.
+			self.run_logger.reset_for_new_plate()
+
+		# Visual reset of the well-plate canvas for the new plate.
+		self.automated_frame.progress.reset_plate(new_plate_id)
+
+		# Decide what happens next:
+		# - If the sample ALSO completed on the now-full plate, transition
+		#   to total_reached so Continue to Next Sample is the next action.
+		# - Else continue the current sample's collection from this fresh
+		#   plate's well A1.
+		if s.plate_full_with_sample_complete:
+			s.plate_full_with_sample_complete = False
+			# Match the total_reached layout for the next user action.
+			s.state = "total_reached"
+			self.automated_frame.progress.set_total_reached(s.number_of_fractions)
+			self.set_status(
+				f"Plate swap to {new_plate_id} complete. Sample also finished — "
+				"click Continue to Next Sample or End Run."
+			)
+			self._update_run_control_buttons()
+		else:
+			# Resume same-sample collection on the new plate.
+			s.is_paused = False
+			s.plate_full_with_sample_complete = False
+			s.phase = "collect"
+			self.set_status(f"Resuming on plate {new_plate_id}...")
+			self.pump_liquid()
+			self._update_run_control_buttons()
 
 	def _snake_step(self):
 		"""Advance s.x/s.y one snake-step AND fire the corresponding motor

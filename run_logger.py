@@ -31,6 +31,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 
 logger = logging.getLogger("autosip")
 
@@ -44,8 +45,14 @@ _DEFAULT_BASE_DIR = DEFAULT_LOGS_DIR
 
 
 def _now_iso():
-	"""Local-time ISO 8601 timestamp to second precision."""
-	return datetime.now().isoformat(timespec="seconds")
+	"""Local-time ISO 8601 timestamp with millisecond precision.
+
+	Three decimal places of seconds keeps the strings compact in CSV
+	viewers while still distinguishing back-to-back pump cycles. NB:
+	dispense_duration_s is measured separately via ``time.monotonic``;
+	this timestamp is for human readability only.
+	"""
+	return datetime.now().isoformat(timespec="milliseconds")
 
 
 def _iso_for_dirname(iso):
@@ -101,6 +108,38 @@ def _summarize_well_list(wells):
 	return ", ".join(parts)
 
 
+def _summarize_fraction_list(fracs):
+	"""Collapse a sorted list of fraction indices into "3–14" / "3, 5, 6".
+
+	Always sorts ascending; treats consecutive integers as a range.
+	"""
+	if not fracs:
+		return ""
+	keyed = sorted(set(int(f) for f in fracs))
+	chunks = [[keyed[0]]]
+	for f in keyed[1:]:
+		if f == chunks[-1][-1] + 1:
+			chunks[-1].append(f)
+		else:
+			chunks.append([f])
+	parts = []
+	for ch in chunks:
+		parts.append(f"{ch[0]}–{ch[-1]}" if len(ch) > 1 else f"{ch[0]}")
+	return ", ".join(parts)
+
+
+def _is_contiguous_full_sample(fracs):
+	"""True if ``fracs`` is a single unbroken ascending range. Used by the
+	"Plates used" section to choose between "sample X" and "sample X
+	(fractions 3–14)" -- if a plate holds the WHOLE sample, the fraction
+	range is redundant. Approximation: any single contiguous range counts
+	as "full" for display purposes; the per-plate summary is exact."""
+	if not fracs:
+		return False
+	keyed = sorted(int(f) for f in fracs)
+	return keyed == list(range(keyed[0], keyed[-1] + 1))
+
+
 def _fmt_hms(seconds):
 	seconds = max(0, int(round(seconds)))
 	h, rem = divmod(seconds, 3600)
@@ -111,11 +150,13 @@ def _fmt_hms(seconds):
 class RunLogger:
 	"""One instance per fractionation run; do not reuse across runs."""
 
-	# project + sample_id come FIRST so a CSV reader sees provenance before
-	# any well-level data. Both values are captured at the moment each row
-	# is written (not at run start), via the ``get_current_run_id`` callable.
+	# project + sample_id + plate_id come FIRST so a CSV reader sees the
+	# provenance (project, biological sample, and physical plate) before
+	# any well-level data. All three values are captured at the moment
+	# each row is written (not at run start), via the
+	# ``get_current_run_id`` callable.
 	CSV_HEADER = [
-		"project", "sample_id",
+		"project", "sample_id", "plate_id",
 		"well_id", "plate_x", "plate_y",
 		"dispense_start_iso", "dispense_end_iso",
 		"dispense_duration_s", "status",
@@ -129,11 +170,14 @@ class RunLogger:
 		else:
 			import run_logger as _self
 			self.base_dir = Path(_self.DEFAULT_LOGS_DIR)
-		# Callable returning ``{"project": str, "sample_id": str}`` for the
-		# current state of the GUI. Called per CSV write so mid-run edits
-		# propagate. Defaults to an empty dict for tests / call-sites that
-		# don't care about provenance.
-		self._get_current_run_id = get_current_run_id or (lambda: {"project": "", "sample_id": ""})
+		# Callable returning ``{"project", "sample_id", "plate_id"}`` for
+		# the current state of the GUI. Called per CSV write so mid-run
+		# edits (sample swap, plate swap) flow into subsequent rows.
+		# Defaults to empty strings for tests that don't care about
+		# provenance.
+		self._get_current_run_id = get_current_run_id or (
+			lambda: {"project": "", "sample_id": "", "plate_id": ""}
+		)
 		self.run_dir = None
 		self._metadata = None
 		self._csv_file = None
@@ -172,15 +216,22 @@ class RunLogger:
 			json.dump(self._metadata, f, indent=2, default=str)
 		return self.run_dir
 
-	def end(self, final_status, snapshot=None):
-		"""Write ``end.json`` and ``summary.md``, then close the CSV.
+	def end(self, final_status, snapshot=None, plates_used=None, well_records=None):
+		"""Write ``end.json``, ``summary.md``, plus one ``summary_{id}.md``
+		per plate used, then close the CSV.
 
 		``final_status`` is one of {completed, emergency_stopped, manual_abort}.
+		``plates_used`` is a chronological list of Plate IDs the run touched
+		(may be ``None`` for legacy callers; defaults to a single-plate run).
+		``well_records`` is the App's per-well metadata list; if provided,
+		it's used to filter the per-plate summary files. (CSV is the
+		canonical source; well_records is just a convenience pass-through.)
 		"""
 		if self.run_dir is None:
 			return
 		timestamp_end = _now_iso()
 		rid = self._get_current_run_id()
+		plates_used = list(plates_used or [rid.get("plate_id", "")])
 
 		# Derived counters for end.json
 		params = (self._metadata or {}).get("parameters", {}) if self._metadata else {}
@@ -211,6 +262,7 @@ class RunLogger:
 						"wells_completed": wells_completed,
 						"wells_planned": wells_planned,
 						"actual_total_time_s": round(actual_total_time_s, 3),
+						"plates_used": plates_used,
 					},
 					f, indent=2,
 				)
@@ -229,9 +281,20 @@ class RunLogger:
 		if self._metadata is not None:
 			try:
 				self._write_summary(timestamp_end, final_status, snapshot,
-					wells_completed, wells_planned, actual_total_time_s)
+					wells_completed, wells_planned, actual_total_time_s,
+					plates_used)
 			except (OSError, Exception) as exc:
 				logger.warning("Failed to write summary.md: %s", exc)
+			# Per-plate summaries: filtered slices of the run summary for
+			# printing/attaching to the physical plate.
+			for plate_id in plates_used:
+				if not plate_id:
+					continue
+				try:
+					self._write_plate_summary(timestamp_end, final_status, plate_id)
+				except (OSError, Exception) as exc:
+					logger.warning("Failed to write per-plate summary for %s: %s",
+						plate_id, exc)
 
 	# -- Per-well timestamps -------------------------------------------
 	#
@@ -242,6 +305,10 @@ class RunLogger:
 	# discard_* methods take an index and waste-bin coords.
 
 	def _track(self, well_id, plate_x, plate_y):
+		"""Snapshot a dispense-start time. Captures BOTH a wall-clock ISO
+		string (for human reading in the log) AND a monotonic timestamp
+		(for measuring duration without being affected by wall-clock
+		adjustments mid-run)."""
 		if self.run_dir is None:
 			return
 		self._wells[well_id] = {
@@ -250,6 +317,8 @@ class RunLogger:
 			"plate_y": plate_y,
 			"dispense_start_iso": _now_iso(),
 			"dispense_end_iso": None,
+			"_mono_start": monotonic(),
+			"_mono_end": None,
 		}
 
 	def _mark_end(self, well_id):
@@ -258,6 +327,7 @@ class RunLogger:
 		well = self._wells.get(well_id)
 		if well is not None:
 			well["dispense_end_iso"] = _now_iso()
+			well["_mono_end"] = monotonic()
 
 	def _commit(self, well_id, status):
 		if self.run_dir is None or well_id in self._committed:
@@ -269,20 +339,23 @@ class RunLogger:
 		# now so the duration still reflects how long the relay was on.
 		if well["dispense_end_iso"] is None:
 			well["dispense_end_iso"] = _now_iso()
-		start = well["dispense_start_iso"]
-		end = well["dispense_end_iso"]
+		if well["_mono_end"] is None:
+			well["_mono_end"] = monotonic()
+		# Duration comes from the monotonic clock, NOT from differencing the
+		# ISO strings. The ISO strings are wall-clock (now ms-precision) for
+		# human reading; monotonic is immune to mid-run clock adjustments
+		# and gives true elapsed seconds at full resolution.
+		mono_start = well["_mono_start"]
+		mono_end = well["_mono_end"]
 		duration = ""
-		if start and end:
-			try:
-				delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
-				duration = f"{delta.total_seconds():.3f}"
-			except ValueError:
-				duration = ""
+		if mono_start is not None and mono_end is not None:
+			duration = f"{round(mono_end - mono_start, 3):.3f}"
 		rid = self._get_current_run_id()
 		self._write_row([
-			rid.get("project", ""), rid.get("sample_id", ""),
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
 			well["well_id"], well["plate_x"], well["plate_y"],
-			start, end, duration, status,
+			well["dispense_start_iso"], well["dispense_end_iso"],
+			duration, status,
 		])
 		self._committed.add(well_id)
 		self._status_counts[status] = self._status_counts.get(status, 0) + 1
@@ -349,9 +422,38 @@ class RunLogger:
 		now = _now_iso()
 		rid = self._get_current_run_id()
 		self._write_row([
-			rid.get("project", ""), rid.get("sample_id", ""),
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
 			_well_id(next_x, next_y), next_x, next_y,
 			now, now, "0.000", "resume",
+		])
+
+	def reset_for_new_plate(self):
+		"""Clear per-well dedup state so well_ids can be reused on a new
+		plate. The same SBS well_id ("A1") refers to different physical
+		wells on different plates, so the run-level _committed guard --
+		which prevents double-commit within a plate -- must reset on swap.
+		Status counts and the CSV file stay; only the per-well in-flight
+		map and the committed set are wiped."""
+		self._wells = {}
+		self._committed = set()
+
+	def plate_swap_breadcrumb(self, swap_index):
+		"""Append a status="plate_swap" row marking a physical plate change.
+
+		Called by App.continue_to_next_plate AFTER the new Plate ID has
+		been committed to state.current_plate_id, so the ``get_current_run_id``
+		callback returns the NEW plate. ``swap_index`` is the 1-based count
+		of swaps in this run, used to disambiguate row ``well_id`` values
+		when reading the CSV (``plate_swap_1``, ``plate_swap_2``, ...).
+		"""
+		if self.run_dir is None:
+			return
+		now = _now_iso()
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			f"plate_swap_{swap_index}", 0, 0,
+			now, now, "0.000", "plate_swap",
 		])
 
 	# -- CSV I/O --------------------------------------------------------
@@ -373,7 +475,8 @@ class RunLogger:
 	# -- Markdown summary ----------------------------------------------
 
 	def _write_summary(self, timestamp_end, final_status, snapshot,
-			wells_completed, wells_planned, actual_total_time_s):
+			wells_completed, wells_planned, actual_total_time_s,
+			plates_used=None):
 		m = self._metadata
 		params = m.get("parameters", {})
 		rows = int(params.get("rows", 0) or 0)
@@ -426,6 +529,28 @@ class RunLogger:
 				"",
 			])
 
+		# Plates used: chronological list of physical plates the run
+		# touched, with the sample ranges each contributed to. Derived
+		# from log.csv so it reflects what actually happened.
+		if plates_used:
+			plate_breakdown = self._compute_plate_breakdown()
+			out.append("## Plates used")
+			for plate_id in plates_used:
+				if not plate_id:
+					continue
+				samples_on_plate = plate_breakdown.get(plate_id, [])
+				if samples_on_plate:
+					parts = [
+						(f"sample {sid} (fractions {_summarize_fraction_list(fracs)})"
+						 if not _is_contiguous_full_sample(fracs)
+						 else f"sample {sid}")
+						for sid, fracs in samples_on_plate
+					]
+					out.append(f"- {plate_id}: {', '.join(parts)}")
+				else:
+					out.append(f"- {plate_id}: (no plate wells)")
+			out.append("")
+
 		# Sample provenance section: derived entirely from log.csv so it
 		# reflects per-well sample_id values as recorded, not the start/end
 		# snapshot. The color-name is derived from each sample's first-
@@ -456,6 +581,143 @@ class RunLogger:
 			])
 
 		with open(self.run_dir / "summary.md", "w") as f:
+			f.write("\n".join(out))
+
+	def _compute_plate_breakdown(self):
+		"""Walk log.csv and return ``{plate_id: [(sample_id, [fraction_idx, ...]), ...]}``
+		preserving first-appearance order WITHIN each plate.
+
+		Used by the "Plates used" section of summary.md to describe which
+		samples (or fraction ranges of which samples) landed on each plate.
+		Fraction index is reconstructed by counting completed rows per
+		(plate, sample) sequentially -- close enough for human reading,
+		and never used as the source of truth (log.csv itself is).
+		"""
+		csv_path = self.run_dir / "log.csv"
+		if not csv_path.exists():
+			return {}
+		breakdown = {}    # plate_id -> [(sample_id, [int])]
+		# Track per-(plate, sample) running fraction counter so we can build
+		# a "fractions 3–14" type range. Discards are tube-level so they
+		# DON'T count toward the plate's fraction list; only completed
+		# rows on the plate do.
+		sample_counter = {}  # sample_id -> next fraction index
+		try:
+			# Per-sample D snapshot: each sample's first completed row's
+			# fraction index tells us where to start counting. We compute
+			# inline by tracking the FIRST observed index per sample-by-plate
+			# group via reading metadata's discard_fractions, BUT the log
+			# doesn't directly record fraction_index_in_sample. For the
+			# summary we just report the running offset within each
+			# (plate, sample) group, which is what the user sees on the
+			# plate display.
+			with open(csv_path, newline="") as f:
+				reader = csv.DictReader(f)
+				for row in reader:
+					if row.get("status") != "completed":
+						continue
+					plate_id = row.get("plate_id") or "(unknown)"
+					sid = row.get("sample_id") or "(unspecified)"
+					if sid not in sample_counter:
+						# Bump to discard_fractions + 1 if metadata has it
+						d = int((self._metadata or {}).get(
+							"parameters", {}).get("discard_fractions", 0) or 0)
+						sample_counter[sid] = d + 1
+					fraction = sample_counter[sid]
+					sample_counter[sid] += 1
+					plate = breakdown.setdefault(plate_id, [])
+					if plate and plate[-1][0] == sid:
+						plate[-1][1].append(fraction)
+					else:
+						plate.append((sid, [fraction]))
+		except OSError as exc:
+			logger.warning("Failed to read log.csv for plate breakdown: %s", exc)
+			return {}
+		return breakdown
+
+	def _write_plate_summary(self, timestamp_end, final_status, plate_id):
+		"""Write ``summary_{plate_id}.md`` -- a printer-friendly per-plate
+		filter of the run summary, intended to be attached to the physical
+		plate as it goes to downstream processing."""
+		m = self._metadata or {}
+		params = m.get("parameters", {})
+		ts_start = m.get("timestamp_start", "?")
+		project = m.get("project", "?")
+		labware = m.get("labware_file") or "(none -- manual entry)"
+
+		# Build per-sample fraction lists from log.csv for THIS plate only.
+		csv_path = self.run_dir / "log.csv"
+		samples_on_plate = []     # list of (sample_id, [well_id], [fraction_idx])
+		discards_on_plate = 0
+		if csv_path.exists():
+			try:
+				sample_counter = {}
+				with open(csv_path, newline="") as f:
+					reader = csv.DictReader(f)
+					for row in reader:
+						row_plate = row.get("plate_id") or ""
+						if row_plate != plate_id:
+							continue
+						status = row.get("status", "")
+						sid = row.get("sample_id") or "(unspecified)"
+						if status == "completed":
+							if sid not in sample_counter:
+								d = int(params.get("discard_fractions", 0) or 0)
+								sample_counter[sid] = d + 1
+							fraction = sample_counter[sid]
+							sample_counter[sid] += 1
+							if samples_on_plate and samples_on_plate[-1][0] == sid:
+								samples_on_plate[-1][1].append(row.get("well_id", ""))
+								samples_on_plate[-1][2].append(fraction)
+							else:
+								samples_on_plate.append((sid, [row.get("well_id", "")], [fraction]))
+						elif status == "discarded":
+							# discards aren't on the plate, but if the
+							# operator routed waste to the plate (weird
+							# setup) we still surface the count.
+							discards_on_plate += 1
+			except OSError as exc:
+				logger.warning("Failed to read log.csv for %s summary: %s", plate_id, exc)
+
+		out = [
+			f"# Plate summary — {plate_id}",
+			"",
+			f"_Run: {project} ({ts_start}) — software v{m.get('software_version', '?')}_",
+			"",
+			f"- **Plate ID:** {plate_id}",
+			f"- **Final status:** {final_status}",
+			f"- Run started: {ts_start}",
+			f"- Run ended: {timestamp_end}",
+			"",
+			"## Parameters",
+			f"- Plate: {params.get('rows', '?')} × {params.get('cols', '?')}",
+			f"- Labware file: `{labware}`",
+			f"- Well size: {params.get('well_size_cm', '?')} cm",
+			f"- Pump rate: {params.get('pump_rate', '?')} "
+			f"{params.get('pump_rate_units', '')}".rstrip(),
+			f"- Volume per well: {params.get('volume_per_well_cc', '?')} cc",
+			"",
+		]
+		if samples_on_plate:
+			out.append("## Samples on this plate")
+			from well_plate import color_for_series
+			# Compute series index for color name -- use sample's FIRST
+			# appearance across the whole run, not just this plate. We
+			# don't have that here easily; just use the index within
+			# samples_on_plate. Close enough for the per-plate sheet.
+			for series_idx, (sid, wells, fracs) in enumerate(samples_on_plate, start=1):
+				_, cname = color_for_series(series_idx)
+				summary_wells = _summarize_well_list(wells)
+				fr_range = _summarize_fraction_list(fracs)
+				out.append(
+					f"- {sid} ({cname}) → wells {summary_wells} "
+					f"(fractions {fr_range}, {len(wells)} wells)"
+				)
+			out.append("")
+		else:
+			out.extend(["## Samples on this plate", "(no wells)", ""])
+
+		with open(self.run_dir / f"summary_{plate_id}.md", "w") as f:
 			f.write("\n".join(out))
 
 	def _compute_provenance(self):

@@ -188,25 +188,33 @@ class WellPlateProgress(tk.Frame):
 		# requested widths don't fluctuate as text changes -- otherwise the
 		# root window oscillates as e.g. "Well 9 of 96" -> "Well 10 of 96"
 		# shifts by one character and propagates up the geometry chain.
+		# Plate ID header line, updated on each plate swap. Lives above
+		# the per-well progress text so the plate-vs-sample distinction is
+		# the first thing the eye lands on.
+		self.plate_lbl = tk.Label(
+			self, text="", anchor="w", width=60,
+			font=("TkDefaultFont", 10, "italic"), fg="#555",
+		)
+		self.plate_lbl.grid(row=0, column=0, sticky="w", padx=4, pady=(2, 0))
 		self.current_lbl = tk.Label(
 			self, text="", anchor="w", justify="left", width=60,
 			font=("TkDefaultFont", 11, "bold"),
 		)
-		self.current_lbl.grid(row=0, column=0, sticky="w", padx=4, pady=(2, 0))
+		self.current_lbl.grid(row=1, column=0, sticky="w", padx=4, pady=(2, 0))
 		self.count_lbl = tk.Label(self, text="", anchor="w", width=40)
-		self.count_lbl.grid(row=1, column=0, sticky="w", padx=4)
+		self.count_lbl.grid(row=2, column=0, sticky="w", padx=4)
 		self.time_lbl = tk.Label(self, text="", anchor="w", width=60)
-		self.time_lbl.grid(row=2, column=0, sticky="w", padx=4, pady=(0, 4))
+		self.time_lbl.grid(row=3, column=0, sticky="w", padx=4, pady=(0, 4))
 
 		self.canvas = tk.Canvas(
 			self, bg="white", bd=0, highlightthickness=1,
 			highlightbackground="#bbbbbb",
 			width=min_width, height=min_height,
 		)
-		self.canvas.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 4))
+		self.canvas.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 4))
 
 		self.grid_columnconfigure(0, weight=1)
-		self.grid_rowconfigure(3, weight=1)
+		self.grid_rowconfigure(4, weight=1)
 
 		# Plate state
 		self.rows = 0
@@ -346,6 +354,25 @@ class WellPlateProgress(tk.Frame):
 			f"Total of {n_fractions} fractions reached. Click End Run to finalize."
 		)
 
+	def set_plate_label(self, plate_id):
+		"""Update the "Plate: {plate_id}" header line. Idempotent."""
+		self.plate_lbl["text"] = f"Plate: {plate_id}" if plate_id else ""
+
+	def reset_plate(self, plate_id):
+		"""Clear visible plate state for a swap WITHOUT touching elapsed-time
+		bookkeeping. Wipes status_grid + well_records (the per-plate render
+		cache); the App keeps the cross-plate well history in its own
+		state.well_records."""
+		self._stop_pulse()
+		self.dispensing_xy = None
+		self.status_grid = {(x, y): UNVISITED for x in range(self.cols) for y in range(self.rows)}
+		self.error_reasons = {}
+		self.well_records = {}
+		self.current_lbl["text"] = ""
+		self.set_plate_label(plate_id)
+		self._redraw()
+		self._update_header_count()
+
 	def reset(self):
 		"""Stop animations AND clear the plate back to empty.
 
@@ -362,6 +389,7 @@ class WellPlateProgress(tk.Frame):
 		self.well_records = {}
 		self.dispensing_xy = None
 		self._start_time = None
+		self.plate_lbl["text"] = ""
 		self.current_lbl["text"] = ""
 		self.count_lbl["text"] = ""
 		self.time_lbl["text"] = ""

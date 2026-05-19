@@ -133,6 +133,41 @@ def sample_id(text):
 	return _parse_identifier(text, "Sample ID")
 
 
+def plate_id(text):
+	"""Validate a Plate ID identifier (filesystem-safe, 1-64 chars).
+
+	Used both as the live plate name during a run AND as the filename
+	stem for the per-plate ``summary_{plate_id}.md`` written at run end,
+	hence the same filesystem-safe character class.
+	"""
+	return _parse_identifier(text, "Plate ID")
+
+
+def auto_increment_plate_id(current):
+	"""Suggest the next Plate ID from a current one.
+
+	If the string ends in an integer, increment it ("Plate-1" -> "Plate-2",
+	"MyPlate_03" -> "MyPlate_04", preserving zero-padding). Otherwise
+	append "_2" to the current string. Falls back to "Plate-1" for an
+	empty input so the first-ever swap suggestion is sensible.
+	"""
+	cur = (current or "").strip()
+	if not cur:
+		return "Plate-1"
+	# Trailing-integer match, with optional separator before it captured so
+	# zero-padding can be preserved.
+	import re as _re
+	m = _re.search(r"^(.*?)(\d+)$", cur)
+	if m:
+		prefix, num = m.group(1), m.group(2)
+		incremented = str(int(num) + 1)
+		# Preserve zero-padding (e.g. "03" -> "04", not "4").
+		if len(incremented) < len(num):
+			incremented = incremented.zfill(len(num))
+		return f"{prefix}{incremented}"
+	return f"{cur}_2"
+
+
 def number_of_fractions(text):
 	"""Validate total number of fractions: int in ``[N_FRACTIONS_MIN, N_FRACTIONS_MAX]``.
 

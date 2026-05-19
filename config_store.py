@@ -26,7 +26,7 @@ logger = logging.getLogger("autosip")
 # Fields persisted to ``last_used`` and to each profile. Listed here so the
 # GUI and this module agree on the keys.
 FIELDS = (
-	"project", "sample_id",
+	"project", "sample_id", "plate_id",
 	"number_of_fractions", "discard_fractions",
 	"rows", "cols", "well_size", "pump_rate", "volume_per_well",
 	"table_start", "carriage_start",
@@ -130,6 +130,52 @@ def delete_profile(name):
 	"""Delete ``profiles/{name}.json`` if it exists."""
 	path = _profile_path(name)
 	path.unlink(missing_ok=True)
+
+
+# -- last_pump_used ----------------------------------------------------
+
+# Stored at the top level of config.json (outside the ``last_used`` block
+# of FIELDS) because it is App-level UI state, not a profile field.
+
+def load_last_pump_used():
+	"""Return the persisted Manual-mode default pump for the space-bar
+	shortcut. ``"fractionate"`` or ``"purge"`` -- any other value (or a
+	missing/corrupt file) falls back to the safe default ``"fractionate"``.
+	"""
+	path = get_config_path()
+	if not path.exists():
+		return "fractionate"
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return "fractionate"
+	val = data.get("last_pump_used") if isinstance(data, dict) else None
+	return val if val in ("fractionate", "purge") else "fractionate"
+
+
+def save_last_pump_used(name):
+	"""Persist the Manual-mode default pump to config.json.
+
+	Preserves all other top-level keys. Silently ignores values that are
+	not ``"fractionate"`` or ``"purge"``.
+	"""
+	if name not in ("fractionate", "purge"):
+		return
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["last_pump_used"] = name
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
 
 
 # -- starter profiles --------------------------------------------------
