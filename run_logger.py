@@ -216,7 +216,8 @@ class RunLogger:
 			json.dump(self._metadata, f, indent=2, default=str)
 		return self.run_dir
 
-	def end(self, final_status, snapshot=None, plates_used=None, well_records=None):
+	def end(self, final_status, snapshot=None, plates_used=None, well_records=None,
+			file_suffix=None):
 		"""Write ``end.json``, ``summary.md``, plus one ``summary_{id}.md``
 		per plate used, then close the CSV.
 
@@ -226,11 +227,17 @@ class RunLogger:
 		``well_records`` is the App's per-well metadata list; if provided,
 		it's used to filter the per-plate summary files. (CSV is the
 		canonical source; well_records is just a convenience pass-through.)
+		``file_suffix`` is appended to the ``end`` / ``summary`` /
+		``summary_{plate_id}`` filenames so multiple End Runs across a session
+		never overwrite each other. A typical caller passes the End-Run
+		click's ISO timestamp with colons replaced by hyphens; legacy
+		callers can omit it for the original unsuffixed names.
 		"""
 		if self.run_dir is None:
 			return
 		timestamp_end = _now_iso()
 		rid = self._get_current_run_id()
+		suffix = f"_{file_suffix}" if file_suffix else ""
 		plates_used = list(plates_used or [rid.get("plate_id", "")])
 
 		# Derived counters for end.json
@@ -252,7 +259,7 @@ class RunLogger:
 				actual_total_time_s = 0.0
 
 		try:
-			with open(self.run_dir / "end.json", "w") as f:
+			with open(self.run_dir / f"end{suffix}.json", "w") as f:
 				json.dump(
 					{
 						"timestamp_end": timestamp_end,
@@ -282,7 +289,7 @@ class RunLogger:
 			try:
 				self._write_summary(timestamp_end, final_status, snapshot,
 					wells_completed, wells_planned, actual_total_time_s,
-					plates_used)
+					plates_used, suffix)
 			except (OSError, Exception) as exc:
 				logger.warning("Failed to write summary.md: %s", exc)
 			# Per-plate summaries: filtered slices of the run summary for
@@ -291,7 +298,7 @@ class RunLogger:
 				if not plate_id:
 					continue
 				try:
-					self._write_plate_summary(timestamp_end, final_status, plate_id)
+					self._write_plate_summary(timestamp_end, final_status, plate_id, suffix)
 				except (OSError, Exception) as exc:
 					logger.warning("Failed to write per-plate summary for %s: %s",
 						plate_id, exc)
@@ -427,6 +434,22 @@ class RunLogger:
 			now, now, "0.000", "resume",
 		])
 
+	def close_without_summary(self):
+		"""Close the CSV file without writing end.json / summary.md.
+
+		Used when the operator chooses Discard on End Run -- the
+		metadata.json and log.csv that were written during the run remain
+		on disk for forensic review, but no finalization files are produced.
+		Idempotent: safe to call after the file is already closed.
+		"""
+		if self._csv_file is not None:
+			try:
+				self._csv_file.close()
+			except OSError:
+				pass
+			self._csv_file = None
+			self._csv_writer = None
+
 	def reset_for_new_plate(self):
 		"""Clear per-well dedup state so well_ids can be reused on a new
 		plate. The same SBS well_id ("A1") refers to different physical
@@ -476,7 +499,7 @@ class RunLogger:
 
 	def _write_summary(self, timestamp_end, final_status, snapshot,
 			wells_completed, wells_planned, actual_total_time_s,
-			plates_used=None):
+			plates_used=None, suffix=""):
 		m = self._metadata
 		params = m.get("parameters", {})
 		rows = int(params.get("rows", 0) or 0)
@@ -580,7 +603,7 @@ class RunLogger:
 				"",
 			])
 
-		with open(self.run_dir / "summary.md", "w") as f:
+		with open(self.run_dir / f"summary{suffix}.md", "w") as f:
 			f.write("\n".join(out))
 
 	def _compute_plate_breakdown(self):
@@ -635,7 +658,7 @@ class RunLogger:
 			return {}
 		return breakdown
 
-	def _write_plate_summary(self, timestamp_end, final_status, plate_id):
+	def _write_plate_summary(self, timestamp_end, final_status, plate_id, suffix=""):
 		"""Write ``summary_{plate_id}.md`` -- a printer-friendly per-plate
 		filter of the run summary, intended to be attached to the physical
 		plate as it goes to downstream processing."""
@@ -717,7 +740,7 @@ class RunLogger:
 		else:
 			out.extend(["## Samples on this plate", "(no wells)", ""])
 
-		with open(self.run_dir / f"summary_{plate_id}.md", "w") as f:
+		with open(self.run_dir / f"summary_{plate_id}{suffix}.md", "w") as f:
 			f.write("\n".join(out))
 
 	def _compute_provenance(self):

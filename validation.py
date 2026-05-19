@@ -28,6 +28,10 @@ WELL_SIZE_MIN, WELL_SIZE_MAX = 0.1, 5.0  # cm
 PUMP_RATE_MIN, PUMP_RATE_MAX = 0.1, 600.0  # cc/hr
 VOLUME_MIN, VOLUME_MAX = 0.001, 5.0        # cc per well
 
+# Drip wait between dispense and move-to-next, seconds. Lower bound of 0 lets
+# the operator disable the wait entirely; upper bound is a sanity cap.
+DRIP_WAIT_MIN, DRIP_WAIT_MAX = 0.0, 60.0
+
 # Stage positions (lead-screw travel)
 TABLE_POS_MIN, TABLE_POS_MAX = 0.0, 20.0       # cm
 CARRIAGE_POS_MIN, CARRIAGE_POS_MAX = 0.0, 15.0  # cm
@@ -98,6 +102,11 @@ def pump_rate(text):
 def volume(text):
 	"""Validate per-well volume (cc): float in ``[VOLUME_MIN, VOLUME_MAX]``."""
 	return _parse_float(text, "Volume per well", VOLUME_MIN, VOLUME_MAX)
+
+
+def drip_wait_time(text):
+	"""Validate the post-pump drip wait (s): float in ``[DRIP_WAIT_MIN, DRIP_WAIT_MAX]``."""
+	return _parse_float(text, "Drip wait time", DRIP_WAIT_MIN, DRIP_WAIT_MAX)
 
 
 def table_pos(text, *, allow_empty=False):

@@ -28,7 +28,7 @@ logger = logging.getLogger("autosip")
 FIELDS = (
 	"project", "sample_id", "plate_id",
 	"number_of_fractions", "discard_fractions",
-	"rows", "cols", "well_size", "pump_rate", "volume_per_well",
+	"rows", "cols", "well_size", "pump_rate", "drip_wait_time", "volume_per_well",
 	"table_start", "carriage_start",
 	"waste_bin_table", "waste_bin_carriage",
 	"labware_file",

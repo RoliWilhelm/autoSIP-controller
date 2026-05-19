@@ -12,13 +12,20 @@ import os
 import subprocess
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog
 
 import hardware
+import styling
 import validation
 import config_store
+from styling import FONTS, PALETTE, apply_style, make_centrifuge_tube_canvas, primary_button
 from well_plate import WellPlateProgress, format_snapshot_log
 from run_logger import RunLogger, _fmt_hms
+
+# GitHub URL displayed (clickable) in the About dialog. Hard-coded here so
+# the About dialog has a single source of truth.
+_GITHUB_URL = "https://github.com/RoliWilhelm/autoSIP-controller"
 
 __version__ = "0.2.0"
 
@@ -212,11 +219,17 @@ class TextEntry(tk.Frame):
 	is managed inside this Frame.
 	"""
 
-	def __init__(self, parent, text):
+	def __init__(self, parent, text, *, textvariable=None):
+		"""Build a label + entry pair. If ``textvariable`` is provided, the
+		entry binds to that externally-owned StringVar so multiple TextEntry
+		instances in different frames can stay in sync (e.g. Cleaning mode's
+		waste-bin coords mirror Automated mode's). Otherwise a private
+		StringVar is created.
+		"""
 		super().__init__(parent)
 		self.label = tk.Label(self, text=text)
 		self.label.grid(row=0, column=0, sticky="w")
-		self.var = tk.StringVar()
+		self.var = textvariable if textvariable is not None else tk.StringVar()
 		self.entry = tk.Entry(self, textvariable=self.var)
 		self.entry.grid(row=0, column=1, sticky="we")
 
@@ -345,10 +358,31 @@ class PumpController:
 		return self.claimant is None or self.claimant == name
 
 
-# Pump-button color palette
-_PUMP_BTN_ON_BG = "#27a72c"     # green when ON
-_PUMP_BTN_OFF_BG = "#dddddd"    # neutral gray when OFF + available
-_PUMP_BTN_LOCKED_BG = "#cccccc" # dim gray when interlocked
+# Pump-button color palette.
+# OFF + available uses the primary accent so Fractionate/Purge read as
+# primary action buttons (consistent with Begin Fractionation / Move /
+# Home). ON flips to green for unmistakable "relay is live" feedback;
+# locked uses a dim gray so the interlocked state is visibly disabled.
+_PUMP_BTN_ON_BG = "#27a72c"
+_PUMP_BTN_OFF_BG = PALETTE["accent"]
+_PUMP_BTN_LOCKED_BG = "#bdbdbd"
+
+
+def _set_pump_btn_style(btn, bg):
+	"""Apply matching foreground + active styling whenever we flip a pump
+	button's background color, so contrast stays WCAG-compliant
+	(white on accent or green; dark on locked-gray)."""
+	if bg == _PUMP_BTN_LOCKED_BG:
+		fg = PALETTE["fg_text"]
+		active = "#a8a8a8"
+	else:
+		fg = PALETTE["accent_fg"]
+		active = PALETTE["accent_hover"] if bg == _PUMP_BTN_OFF_BG else "#1e7d20"
+	btn["bg"] = bg
+	btn["fg"] = fg
+	btn["activebackground"] = active
+	btn["activeforeground"] = fg
+	btn["disabledforeground"] = fg
 
 
 def _update_pump_button(btn, name, claimant, relay_on, in_run):
@@ -365,32 +399,32 @@ def _update_pump_button(btn, name, claimant, relay_on, in_run):
 		# State machine owns the pump for the entire run.
 		if claimant == name and relay_on:
 			btn["text"] = f"{display}: ON (run)"
-			btn["bg"] = _PUMP_BTN_ON_BG
+			_set_pump_btn_style(btn, _PUMP_BTN_ON_BG)
 		else:
 			btn["text"] = f"{display}: OFF"
-			btn["bg"] = _PUMP_BTN_OFF_BG
+			_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
 		btn["state"] = tk.DISABLED
 		return
 
 	if claimant is None:
 		btn["text"] = f"{display}: OFF"
-		btn["bg"] = _PUMP_BTN_OFF_BG
+		_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
 		btn["state"] = tk.NORMAL
 	elif claimant == name:
 		if relay_on:
 			btn["text"] = f"{display}: ON"
-			btn["bg"] = _PUMP_BTN_ON_BG
+			_set_pump_btn_style(btn, _PUMP_BTN_ON_BG)
 		else:
 			# Claim held by us with relay off -- only reachable through the
 			# state machine (paused-mid-run). User clicks always pair on/off
 			# with claim/release.
 			btn["text"] = f"{display}: OFF (claim held)"
-			btn["bg"] = _PUMP_BTN_OFF_BG
+			_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
 		btn["state"] = tk.NORMAL
 	else:
 		# Interlock: opposite pump has the claim, this button is locked out.
 		btn["text"] = f"{display}: OFF"
-		btn["bg"] = _PUMP_BTN_LOCKED_BG
+		_set_pump_btn_style(btn, _PUMP_BTN_LOCKED_BG)
 		btn["state"] = tk.DISABLED
 
 
@@ -466,6 +500,9 @@ class FractionatorState:
 	COLS: int = 0
 	well_size: float = 0.0
 	pump_time: float = 0.0
+	# Post-pump drip wait, seconds. Used to be coupled to pump_time;
+	# now operator-controlled via the Drip wait time entry.
+	drip_wait_time: float = 1.0
 	# Volume per well in cc -- displayed by the WellPlateProgress header
 	# ("Dispensing into B4 — 0.22 cc"). Stored explicitly because pump_time
 	# alone can't recover it without also knowing pump_rate.
@@ -535,12 +572,18 @@ class FractionatorState:
 
 
 class HeaderFrame(tk.Frame):
-	"""Top bar: the Mode-cycle button.
+	"""Top bar: three side-by-side mode tabs.
 
-	The Return-to-home / Pause / Continue-to-Next-Sample / End-Run buttons
-	all moved into AutomatedFrame's run-control row so the four are grouped
-	together AND so non-Automated modes don't have to hide-and-show them.
-	The big red STOP octagon still lives at the bottom right of the status
+	Each tab is a button labeled with one of the three modes (Automated,
+	Manual, Cleaning). The active mode is rendered in the accent color
+	so the current mode is obvious at a glance; the other two appear as
+	subdued secondary buttons that the operator can click to jump
+	directly to that mode (no cycling). The paused-run override prompt
+	still fires via ``App.request_mode_change``.
+
+	The Return-to-Start-Coords / Pause / Continue-to-Next-Sample /
+	End-Run buttons all live in AutomatedFrame's run-control row. The
+	big red STOP octagon still lives at the bottom-right of the status
 	bar.
 	"""
 
@@ -549,15 +592,46 @@ class HeaderFrame(tk.Frame):
 	_PAUSE_RUNNING_BG = "#27a72c"
 	_PAUSE_PAUSED_BG = "#6F4E37"
 
+	# Subdued styling for inactive tabs -- light gray bg, dark text;
+	# still high-contrast (>= 12:1) and visibly clickable.
+	_TAB_INACTIVE_BG = "#e0e0e0"
+	_TAB_INACTIVE_FG = PALETTE["fg_text"]
+	_TAB_INACTIVE_ACTIVE_BG = "#cfcfcf"
+
 	def __init__(self, master, app):
 		super().__init__(master)
 		self.app = app
+		self.configure(bg=PALETTE["bg_window"])
 
-		self.mode_btn = tk.Button(self, text="Mode: Automated", command=app.cycle_mode)
-		self.mode_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4, pady=2)
+		self._tab_buttons = {}
+		for col, name in enumerate(MODE_ORDER):
+			# Bind ``name`` at lambda-creation time so each button captures
+			# its own label rather than the loop's final value.
+			btn = tk.Button(
+				self, text=name,
+				command=lambda n=name: app.request_mode_change(n),
+				font=FONTS["bold"], relief="flat", borderwidth=0,
+				highlightthickness=0, padx=10, pady=8, cursor="hand2",
+			)
+			btn.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 4, 0), pady=2)
+			self.grid_columnconfigure(col, weight=1, uniform="modetabs")
+			self._tab_buttons[name] = btn
 
 	def set_mode_label(self, mode_name):
-		self.mode_btn["text"] = "Mode: " + mode_name
+		"""Highlight the active tab and subdue the others."""
+		for name, btn in self._tab_buttons.items():
+			if name == mode_name:
+				btn["bg"] = PALETTE["accent"]
+				btn["fg"] = PALETTE["accent_fg"]
+				btn["activebackground"] = PALETTE["accent_hover"]
+				btn["activeforeground"] = PALETTE["accent_fg"]
+				btn["disabledforeground"] = PALETTE["accent_fg"]
+			else:
+				btn["bg"] = self._TAB_INACTIVE_BG
+				btn["fg"] = self._TAB_INACTIVE_FG
+				btn["activebackground"] = self._TAB_INACTIVE_ACTIVE_BG
+				btn["activeforeground"] = self._TAB_INACTIVE_FG
+				btn["disabledforeground"] = self._TAB_INACTIVE_FG
 
 
 class StatusBarFrame(tk.Frame):
@@ -674,7 +748,7 @@ class AutomatedFrame(tk.Frame):
 		# so the four controls are the first thing visible.
 		ctrl = tk.Frame(self)
 		ctrl.grid(row=0, column=0, columnspan=3, sticky="e", pady=(0, 4))
-		self.return_btn = tk.Button(ctrl, text="Return to Home", command=app.return_to_home)
+		self.return_btn = tk.Button(ctrl, text="Return to Start Coords", command=app.return_to_home)
 		self.return_btn.pack(side=tk.LEFT, padx=2)
 		self.pause_btn = tk.Button(ctrl, text="Pause", command=app.toggle_pause,
 			bg="#27a72c", fg="white", activebackground="#3ac640", activeforeground="white",
@@ -756,22 +830,26 @@ class AutomatedFrame(tk.Frame):
 		self.rows_text_entry.grid(row=0, column=0, sticky="we")
 		self.cols_text_entry = TextEntry(platep, "Number of columns (1–24):")
 		self.cols_text_entry.grid(row=1, column=0, sticky="we")
-		self.ws_text_entry = TextEntry(platep, "Well size (cm, e.g., 0.9):")
+		self.ws_text_entry = TextEntry(platep, "Well width (cm):")
 		self.ws_text_entry.grid(row=2, column=0, sticky="we")
 
-		tk.Label(platep, text="Plate start:", anchor="w").grid(
-			row=3, column=0, sticky="w", pady=(6, 0))
-		self.table_te = TextEntry(platep, "  table position (cm, 0–20):")
-		self.table_te.grid(row=4, column=0, sticky="we")
-		self.carriage_te = TextEntry(platep, "  carriage position (cm, 0–15):")
-		self.carriage_te.grid(row=5, column=0, sticky="we")
+		self.table_te = TextEntry(platep, "Starting point (x-axis):")
+		self.table_te.grid(row=3, column=0, sticky="we")
+		self.carriage_te = TextEntry(platep, "Starting point (y-axis):")
+		self.carriage_te.grid(row=4, column=0, sticky="we")
 
 		tk.Label(platep, text="Waste bin:", anchor="w").grid(
-			row=6, column=0, sticky="w", pady=(6, 0))
-		self.waste_table_te = TextEntry(platep, "  table position (cm, 0–20):")
-		self.waste_table_te.grid(row=7, column=0, sticky="we")
-		self.waste_carriage_te = TextEntry(platep, "  carriage position (cm, 0–15):")
-		self.waste_carriage_te.grid(row=8, column=0, sticky="we")
+			row=5, column=0, sticky="w", pady=(6, 0))
+		self.waste_table_te = TextEntry(
+			platep, "  table position (cm, 0–20):",
+			textvariable=app.waste_bin_table_var,
+		)
+		self.waste_table_te.grid(row=6, column=0, sticky="we")
+		self.waste_carriage_te = TextEntry(
+			platep, "  carriage position (cm, 0–15):",
+			textvariable=app.waste_bin_carriage_var,
+		)
+		self.waste_carriage_te.grid(row=7, column=0, sticky="we")
 		Tooltip(
 			self.waste_table_te.entry,
 			"Waste-bin position used during the discard phase. "
@@ -783,12 +861,20 @@ class AutomatedFrame(tk.Frame):
 			"Ignored when Discard fractions = 0.",
 		)
 
-		# ----- Pump (one input) ------------------------------------------
+		# ----- Pump ------------------------------------------------------
 		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=4)
 		pumpp.grid(row=3, column=0, columnspan=3, sticky="we", padx=2, pady=(0, 2))
 		pumpp.grid_columnconfigure(0, weight=1)
 		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (cc/hr — see your syringe pump spec):")
 		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
+		self.drip_wait_te = TextEntry(pumpp, "Drip wait time (s):")
+		self.drip_wait_te.grid(row=1, column=0, sticky="we")
+		self.drip_wait_te.set("1.0")
+		Tooltip(
+			self.drip_wait_te.entry,
+			"Wait time between pump-off and moving to the next well. "
+			"Longer waits improve volume consistency; shorter waits run faster.",
+		)
 
 		# JSON loader (own row, no LabelFrame to keep it compact)
 		tk.Label(self, text="Load well plate file: ").grid(row=4, column=0, columnspan=1, pady=(6, 0))
@@ -798,19 +884,33 @@ class AutomatedFrame(tk.Frame):
 			row=4, column=2, columnspan=1, sticky="we", pady=(6, 0),
 		)
 
-		# Manual Move (jogs to specific positions) -- preserved for ad-hoc use
-		self.move_btn = tk.Button(self, text="Move (jog to Plate-start coords)", command=self.move_clicked)
-		self.move_btn.grid(row=5, column=0, columnspan=3, sticky="we")
-
-		# Begin Fractionation -- the run-launch button.
-		self.begin_btn = tk.Button(self, text="Begin fractionation", command=self.begin_clicked)
-		self.begin_btn.grid(row=6, column=0, columnspan=3, sticky="we")
+		# Begin Fractionation -- the run-launch button. (The previous
+		# "Move (jog to Plate-start coords)" button was removed because the
+		# Return to Start Coords button in the run-controls row already
+		# moves to the same position.)
+		#
+		# Visually this is a composite: a small Canvas drawing a 45-deg
+		# ultracentrifuge tube on the left, and the action button on the
+		# right, both sharing the accent color so they read as one unit.
+		# Clicks on the tube canvas fall through to begin_clicked too so
+		# the entire region behaves like a single button.
+		begin_frame = tk.Frame(self, bg=PALETTE["accent"], bd=0, highlightthickness=0)
+		begin_frame.grid(row=5, column=0, columnspan=3, sticky="we", pady=(4, 0))
+		begin_frame.grid_columnconfigure(1, weight=1)
+		self.begin_tube_canvas = make_centrifuge_tube_canvas(begin_frame, size=40)
+		self.begin_tube_canvas.grid(row=0, column=0, padx=(8, 4), pady=4, sticky="w")
+		self.begin_tube_canvas.bind("<Button-1>", lambda _e: self.begin_clicked())
+		self.begin_btn = primary_button(
+			begin_frame, text="Begin Fractionation",
+			command=self.begin_clicked, anchor="w",
+		)
+		self.begin_btn.grid(row=0, column=1, sticky="we", padx=(0, 8), pady=4)
 
 		# Progress view -- to-scale well plate, color-blind-safe palette,
 		# header showing current well + count + elapsed/remaining time.
 		self.progress = WellPlateProgress(self, min_width=500, min_height=300)
-		self.progress.grid(row=7, column=0, columnspan=3, sticky="nsew")
-		self.grid_rowconfigure(7, weight=1)
+		self.progress.grid(row=6, column=0, columnspan=3, sticky="nsew")
+		self.grid_rowconfigure(6, weight=1)
 
 		# Mirror Project/Sample ID entry text into state.project /
 		# state.current_sample_id on every keystroke (trace_add). Focus-out
@@ -845,6 +945,7 @@ class AutomatedFrame(tk.Frame):
 			"cols": self.cols_text_entry,
 			"well_size": self.ws_text_entry,
 			"pump_rate": self.pump_rate_text_entry,
+			"drip_wait_time": self.drip_wait_te,
 			"volume_per_well": self.vol_text_entry,
 			"table_start": self.table_te,
 			"carriage_start": self.carriage_te,
@@ -962,7 +1063,7 @@ class AutomatedFrame(tk.Frame):
 			self.project_te, self.sample_id_te, self.plate_id_te,
 			self.n_fractions_te, self.discard_te,
 			self.rows_text_entry, self.cols_text_entry, self.ws_text_entry,
-			self.pump_rate_text_entry, self.vol_text_entry,
+			self.pump_rate_text_entry, self.drip_wait_te, self.vol_text_entry,
 			self.table_te, self.carriage_te,
 			self.waste_table_te, self.waste_carriage_te,
 		):
@@ -972,7 +1073,6 @@ class AutomatedFrame(tk.Frame):
 		"""Enable/disable buttons that command motion or start a run."""
 		state = tk.NORMAL if enabled else tk.DISABLED
 		self.begin_btn["state"] = state
-		self.move_btn["state"] = state
 
 	def load_json(self):
 		"""Pop a file dialog, load the Opentrons-format JSON, populate inputs.
@@ -1063,18 +1163,6 @@ class AutomatedFrame(tk.Frame):
 		self._loaded_labware_path = path
 		self._loaded_labware_data = data
 
-	def move_clicked(self):
-		"""Validate table/carriage positions; move whichever fields are valid+non-empty."""
-		t_ok, t_val = validation.table_pos(self.table_te.get(), allow_empty=True)
-		c_ok, c_val = validation.carriage_pos(self.carriage_te.get(), allow_empty=True)
-
-		(self.table_te.clear_error if t_ok else lambda: self.table_te.show_error(t_val))()
-		(self.carriage_te.clear_error if c_ok else lambda: self.carriage_te.show_error(c_val))()
-
-		if not (t_ok and c_ok):
-			return
-		self.app.move_to_positions(table_dist=t_val, carriage_dist=c_val)
-
 	def begin_clicked(self):
 		"""Validate every Begin-time input; show inline + summary errors on
 		failure; cross-check N/D and plate capacity; warn on waste/plate
@@ -1094,6 +1182,7 @@ class AutomatedFrame(tk.Frame):
 			(self.table_te, validation.table_pos),
 			(self.carriage_te, validation.carriage_pos),
 			(self.pump_rate_text_entry, validation.pump_rate),
+			(self.drip_wait_te, validation.drip_wait_time),
 		]
 		parsed = []
 		errors = []
@@ -1110,7 +1199,8 @@ class AutomatedFrame(tk.Frame):
 		# otherwise the comparisons would be against None/garbage).
 		if not errors:
 			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
-				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v) = parsed
+				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v,
+				drip_v) = parsed
 			capacity = rows_v * cols_v
 
 			# N must fit on the plate
@@ -1200,6 +1290,7 @@ class AutomatedFrame(tk.Frame):
 			waste_bin_table=waste_x if waste_x is not None else 0.0,
 			waste_bin_carriage=waste_y if waste_y is not None else 0.0,
 			table_start=table_v, carriage_start=carriage_v,
+			drip_wait_time=drip_v,
 		)
 
 	# -- WellPlateProgress shortcuts (called by App's state machine) ----
@@ -1294,8 +1385,9 @@ class ManualFrame(tk.Frame):
 				step_row, text=label, variable=self.step_var, value=value,
 			).pack(side=tk.LEFT, padx=2)
 
-		# Home button -- drives carriage_return()
-		self.home_btn = tk.Button(jog, text="Home", command=self._home_clicked)
+		# Home button -- drives carriage_return(). Primary action: the
+		# operator's calibration anchor for Manual jogging.
+		self.home_btn = primary_button(jog, text="Home", command=self._home_clicked)
 		self.home_btn.grid(row=2, column=0, sticky="we", pady=(0, 6))
 
 		# Position readout
@@ -1319,6 +1411,8 @@ class ManualFrame(tk.Frame):
 		self.fractionate_btn = tk.Button(
 			frac_wrap, text="Fractionate: OFF",
 			command=lambda: app._handle_pump_click("fractionate", parent=self),
+			font=FONTS["bold"], relief="flat", borderwidth=0,
+			highlightthickness=0, padx=10, pady=6, cursor="hand2",
 		)
 		self.fractionate_btn.grid(row=0, column=0, sticky="we")
 		self.fractionate_space_lbl = tk.Label(
@@ -1333,6 +1427,8 @@ class ManualFrame(tk.Frame):
 		self.purge_btn = tk.Button(
 			purge_wrap, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
+			font=FONTS["bold"], relief="flat", borderwidth=0,
+			highlightthickness=0, padx=10, pady=6, cursor="hand2",
 		)
 		self.purge_btn.grid(row=0, column=0, sticky="we")
 		self.purge_space_lbl = tk.Label(
@@ -1431,32 +1527,50 @@ class ManualFrame(tk.Frame):
 
 
 class CleaningFrame(tk.Frame):
-	"""Cleaning mode: jog the carriage (pre-filled to 14.0) and run the Purge
-	pump to flush the lines."""
+	"""Cleaning mode: move the needle to the waste bin and run the Purge
+	pump to flush the lines. The waste-bin coords are the SAME ones the
+	operator entered in Automated mode (shared via App-level StringVars),
+	so the waste container's physical position is configured once."""
 
 	def __init__(self, master, app):
 		super().__init__(master)
 		self.app = app
 
-		for i in range(3):
-			self.grid_columnconfigure(i, weight=1, uniform="clean")
+		self.grid_columnconfigure(0, weight=1)
+		self.grid_columnconfigure(1, weight=0)
 
-		self.carriage_te = TextEntry(self, "Move carriage to (cm, 0–15):")
-		self.carriage_te.grid(row=0, column=0, columnspan=2, sticky="we")
-		self.move_btn = tk.Button(self, text="Move", command=self.move_clicked)
-		self.move_btn.grid(row=0, column=2, columnspan=1, sticky="we")
+		# Waste-bin coords -- bound to the same App-level StringVars as
+		# Automated mode's Waste bin entries, so an edit in either mode
+		# propagates automatically.
+		bin_frame = tk.LabelFrame(self, text="Waste bin", padx=8, pady=4)
+		bin_frame.grid(row=0, column=0, columnspan=2, sticky="we", padx=2, pady=(2, 4))
+		bin_frame.grid_columnconfigure(0, weight=1)
+		self.waste_table_te = TextEntry(
+			bin_frame, "Waste bin: table position (cm):",
+			textvariable=app.waste_bin_table_var,
+		)
+		self.waste_table_te.grid(row=0, column=0, sticky="we")
+		self.waste_carriage_te = TextEntry(
+			bin_frame, "Waste bin: carriage position (cm):",
+			textvariable=app.waste_bin_carriage_var,
+		)
+		self.waste_carriage_te.grid(row=1, column=0, sticky="we")
+
+		self.move_btn = primary_button(
+			self, text="Move to Waste Bin", command=self.move_clicked,
+		)
+		self.move_btn.grid(row=1, column=0, columnspan=2, sticky="we", padx=2, pady=2)
 		self.purge_btn = tk.Button(
 			self, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
+			font=FONTS["bold"], relief="flat", borderwidth=0,
+			highlightthickness=0, padx=10, pady=6, cursor="hand2",
 		)
-		self.purge_btn.grid(row=1, column=0, columnspan=3, sticky="we")
+		self.purge_btn.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
 
 	def refresh(self):
-		# Pre-fill the carriage position each time Cleaning becomes active so
-		# the user starts from the documented "raise carriage clear of the tube"
-		# spot, even if they edited the value last visit.
-		self.carriage_te.set("14.0")
-		self.carriage_te.clear_error()
+		self.waste_table_te.clear_error()
+		self.waste_carriage_te.clear_error()
 		s = self.app.state
 		s.carriage_forwards = True
 		self.app.set_status("System idle.")
@@ -1468,13 +1582,18 @@ class CleaningFrame(tk.Frame):
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
 
 	def move_clicked(self):
-		ok, val = validation.carriage_pos(self.carriage_te.get(), allow_empty=True)
-		if not ok:
-			self.carriage_te.show_error(val)
+		"""Move the needle to the waste-bin position. Both coords are
+		validated; either being out-of-range surfaces inline + halts the move.
+		Empty fields are allowed (only the populated axis moves)."""
+		t_ok, t_val = validation.table_pos(self.waste_table_te.get(), allow_empty=True)
+		c_ok, c_val = validation.carriage_pos(self.waste_carriage_te.get(), allow_empty=True)
+		(self.waste_table_te.clear_error if t_ok else lambda: self.waste_table_te.show_error(t_val))()
+		(self.waste_carriage_te.clear_error if c_ok else lambda: self.waste_carriage_te.show_error(c_val))()
+		if not (t_ok and c_ok):
 			return
-		self.carriage_te.clear_error()
-		if val is not None:
-			self.app.move_to_positions(carriage_dist=val)
+		if t_val is None and c_val is None:
+			return
+		self.app.move_to_positions(table_dist=t_val, carriage_dist=c_val)
 
 
 class App(tk.Tk):
@@ -1488,14 +1607,19 @@ class App(tk.Tk):
 
 	def __init__(self, backends):
 		super().__init__()
-		self.title("Robotic Fractionator GUI v0.1")
+		# Apply the unified style BEFORE constructing any widgets --
+		# option_add defaults inside apply_style are consulted at widget
+		# creation time, not retroactively, so this must come first.
+		apply_style(self)
+		# Title is updated dynamically in set_mode; this initial value
+		# matches the format the user sees the moment the GUI paints.
+		self.title(f"autoSIP Controller v{__version__} — Automated Mode")
 		# Lock in a stable initial size so Tk doesn't auto-resize as label
 		# text widths fluctuate ("Well 9 of 96" → "Well 10 of 96", clock
 		# ticks, etc.). Without this, the WellPlateProgress header labels
 		# can drive the root window into a width-oscillation feedback loop.
-		# Minsize prevents collapse if the user tries to shrink below useful.
+		# (apply_style also enforces a font-derived minsize floor.)
 		self.geometry("900x950")
-		self.minsize(640, 700)
 		self.backends = backends
 
 		# Hardware wrappers -- constructed once, reused across mode switches.
@@ -1526,6 +1650,16 @@ class App(tk.Tk):
 		self.run_logger = None
 		# Path of the most recent run's folder, for "Open last run folder".
 		self._last_run_path = None
+
+		# Shared Tk variables for fields that appear in more than one frame.
+		# Both Automated mode's Waste bin entries and Cleaning mode's Waste
+		# bin entries bind to these via TextEntry's textvariable= argument,
+		# so an edit in either mode propagates automatically -- the waste
+		# container's physical position is one fact, not a per-mode setting.
+		# Must be created BEFORE the frames so each frame can reference
+		# them in its constructor.
+		self.waste_bin_table_var = tk.StringVar()
+		self.waste_bin_carriage_var = tk.StringVar()
 
 		# Root layout: 3 rows (header / mode body / status) in a single column
 		# that expands with the window.
@@ -1624,18 +1758,75 @@ class App(tk.Tk):
 		menubar.add_cascade(label="Tools", menu=tools)
 
 		help_menu = tk.Menu(menubar, tearoff=False)
-		help_menu.add_command(
-			label="About",
-			command=lambda: messagebox.showinfo(
-				"About autoSIP",
-				f"autoSIP version {__version__}\n"
-				"Robotic gradient fractionator GUI.",
-				parent=self,
-			),
-		)
+		help_menu.add_command(label="About", command=self._show_about_dialog)
 		menubar.add_cascade(label="Help", menu=help_menu)
 
 		self.config(menu=menubar)
+
+	def _show_about_dialog(self):
+		"""Custom About window: version + clickable GitHub link + the
+		citation reminder. Uses a Toplevel (not ``messagebox.showinfo``)
+		because the citation text needs to read as a distinct section
+		and the repo URL needs to be clickable."""
+		win = tk.Toplevel(self)
+		win.title("About autoSIP")
+		win.configure(bg=PALETTE["bg_frame"])
+		win.resizable(False, False)
+		win.transient(self)
+
+		container = tk.Frame(win, bg=PALETTE["bg_frame"], padx=24, pady=20)
+		container.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(container, text="autoSIP Controller",
+			font=FONTS["heading"], bg=PALETTE["bg_frame"],
+			fg=PALETTE["fg_text"]).pack(anchor="w")
+		tk.Label(container, text=f"Version {__version__}",
+			font=FONTS["body"], bg=PALETTE["bg_frame"],
+			fg=PALETTE["fg_muted"]).pack(anchor="w", pady=(0, 12))
+		tk.Label(container,
+			text="Open-source Raspberry-Pi-controlled robotic gradient\n"
+			     "fractionator for stable isotope probing experiments.",
+			font=FONTS["body"], bg=PALETTE["bg_frame"],
+			fg=PALETTE["fg_text"], justify="left",
+		).pack(anchor="w", pady=(0, 12))
+
+		# Repository link -- clickable, underlined, accent-colored.
+		repo_section = tk.Frame(container, bg=PALETTE["bg_frame"])
+		repo_section.pack(anchor="w", pady=(0, 12), fill=tk.X)
+		tk.Label(repo_section, text="Source: ", font=FONTS["body"],
+			bg=PALETTE["bg_frame"], fg=PALETTE["fg_text"],
+		).pack(side=tk.LEFT)
+		link = tk.Label(repo_section, text=_GITHUB_URL,
+			font=(FONTS["family"], FONTS["size"], "underline"),
+			bg=PALETTE["bg_frame"], fg=PALETTE["accent"], cursor="hand2")
+		link.pack(side=tk.LEFT)
+		link.bind("<Button-1>", lambda _e: webbrowser.open(_GITHUB_URL))
+
+		# Citation reminder -- its own LabelFrame so the text is set
+		# apart from the link block above. Wording is exact per spec.
+		citation_box = tk.LabelFrame(
+			container, text="Citation",
+			font=FONTS["bold"], bg=PALETTE["bg_frame"],
+			fg=PALETTE["fg_text"], padx=12, pady=10,
+		)
+		citation_box.pack(fill=tk.X, pady=(4, 12))
+		tk.Label(citation_box,
+			text="If you use autoSIP, please cite\n"
+			     "Laud et al. 2026 (in preparation, HardwareX).",
+			font=FONTS["body"], bg=PALETTE["bg_frame"],
+			fg=PALETTE["fg_text"], justify="left",
+		).pack(anchor="w")
+
+		primary_button(container, text="Close", command=win.destroy,
+		).pack(anchor="e")
+
+		# Center over the main window. Done after pack so the requested
+		# size is known.
+		win.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 3
+		win.geometry(f"+{max(0, x)}+{max(0, y)}")
+		win.grab_set()
 
 	# -- Profile menu handlers ------------------------------------------
 
@@ -1845,19 +2036,23 @@ class App(tk.Tk):
 		frame.grid(row=1, column=0, sticky="nsew")
 		self._active_frame = frame
 		self.mode = name
+		self.title(f"autoSIP Controller v{__version__} — {name} Mode")
 		self.header.set_mode_label(name)
 		self.status_bar.set_mode(name)
 		self.status_bar.set_terminate_visible(name == "Automated")
 		frame.refresh()
 		logger.debug("Switched to %s mode", name)
 
-	def cycle_mode(self):
-		"""Cycle Automated -> Manual -> Cleaning -> Automated.
+	def request_mode_change(self, name):
+		"""Switch to mode ``name`` after confirming any paused-run override.
 
-		If a fractionation is paused mid-run, ask the user to confirm before
-		switching (mode switching resets x/y/carriage_forwards via the new
-		frame's refresh()).
+		Both the header tabs and ``cycle_mode`` route through here so the
+		"Fractionation is paused. Switching modes will lose progress"
+		prompt fires regardless of which mechanic triggered the change.
+		No-op when ``name`` matches the current mode.
 		"""
+		if name == self.mode:
+			return
 		if self.state.is_paused and self.state.state != "idle":
 			if not messagebox.askyesno(
 				"Switch modes while paused?",
@@ -1865,8 +2060,17 @@ class App(tk.Tk):
 				parent=self,
 			):
 				return
+		self.set_mode(name)
+
+	def cycle_mode(self):
+		"""Cycle Automated -> Manual -> Cleaning -> Automated.
+
+		Retained for keyboard-shortcut / programmatic callers; the header
+		tabs use ``request_mode_change`` directly. Both paths share the
+		paused-confirm dialog.
+		"""
 		next_idx = (MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)
-		self.set_mode(MODE_ORDER[next_idx])
+		self.request_mode_change(MODE_ORDER[next_idx])
 
 	# -- Terminate run ---------------------------------------------------
 
@@ -1968,7 +2172,7 @@ class App(tk.Tk):
 		# its e-stopped layout (everything disabled).
 		self._set_controls_enabled(False)
 		self.set_status(
-			"Run terminated — click Return to home to re-enable controls.",
+			"Run terminated — click Return to Start Coords to re-enable controls.",
 		)
 		self._terminated = True
 		self._update_run_control_buttons()
@@ -1979,13 +2183,17 @@ class App(tk.Tk):
 
 		Always available, not gated on a prior Terminate. Useful both as
 		the recovery action after a Terminate AND as a "recenter the rig"
-		convenience between runs.
+		convenience between runs. Despite the method name (kept for
+		backward compatibility), in Automated mode this is the
+		"Return to Start Coords" button -- it ends up at the operator's
+		plate-start position only because the App always tares the
+		motor counters at run start, so motor 0 == plate-start coords.
 		"""
-		logger.info("Returning to home position")
+		logger.info("Returning to start coords")
 		self.carriage_return()
 		self._set_controls_enabled(True)
 		self._terminated = False
-		self.set_status("Returned to home position.")
+		self.set_status("Returned to start coords.")
 		self._update_run_control_buttons()
 
 	# -- Run-control button state machine -------------------------------
@@ -2296,7 +2504,7 @@ class App(tk.Tk):
 			project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
-			table_start, carriage_start):
+			table_start, carriage_start, drip_wait_time):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
 		Cross-field rules (N ≤ rows·cols, D < N, waste-bin coords required
@@ -2323,15 +2531,17 @@ class App(tk.Tk):
 			return
 
 		pump_time = volume / (pump_rate / 3600)
-		# Runtime estimate: D discards (2*pump_time each, in place) plus
-		# (N-D) plate fractions (2*pump_time + per-well move). One extra
+		# Runtime estimate: each fraction = pump_time + drip_wait_time
+		# (per-well wait is now operator-controlled, not coupled to pump_time)
+		# plus, for plate fractions, an estimated per-well move. One extra
 		# move at start of each phase (to waste bin and to A1).
 		from well_plate import ESTIMATED_MOVE_TIME_S
 		plate_count = number_of_fractions - discard_fractions
-		discard_seconds = discard_fractions * (2 * pump_time) + (
+		per_dispense = pump_time + drip_wait_time
+		discard_seconds = discard_fractions * per_dispense + (
 			ESTIMATED_MOVE_TIME_S if discard_fractions > 0 else 0
 		)
-		plate_seconds = plate_count * (2 * pump_time + ESTIMATED_MOVE_TIME_S) + (
+		plate_seconds = plate_count * (per_dispense + ESTIMATED_MOVE_TIME_S) + (
 			ESTIMATED_MOVE_TIME_S if discard_fractions > 0 else 0
 		)
 		estimated_total_s = discard_seconds + plate_seconds
@@ -2366,6 +2576,7 @@ class App(tk.Tk):
 			f"{plate_line}"
 			f"  • Volume per fraction: {volume:g} cc\n"
 			f"  • Pump rate: {pump_rate:g} cc/hr\n"
+			f"  • Drip wait: {drip_wait_time:g} s\n"
 			f"  • Estimated total runtime: {_fmt_hms(estimated_total_s)}\n"
 			f"{runtime_breakdown}\n"
 			"\n"
@@ -2397,6 +2608,7 @@ class App(tk.Tk):
 		s.COLS = cols
 		s.well_size = well_size
 		s.pump_time = pump_time
+		s.drip_wait_time = drip_wait_time
 		s.volume_per_well = volume
 		s.project = project
 		s.current_sample_id = sample_id_at_start
@@ -2419,7 +2631,8 @@ class App(tk.Tk):
 			pump_time, project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
-			table_start, carriage_start, estimated_total_s)
+			table_start, carriage_start, estimated_total_s,
+			drip_wait_time)
 
 		# Remember the Sample ID at this series's start so Continue-to-Next-
 		# Sample can prompt if the operator forgot to update it.
@@ -2433,7 +2646,8 @@ class App(tk.Tk):
 			pump_time, project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
-			table_start, carriage_start, estimated_total_s):
+			table_start, carriage_start, estimated_total_s,
+			drip_wait_time):
 		"""Build the run metadata and create a RunLogger directory."""
 		af = self.automated_frame
 		metadata = {
@@ -2451,6 +2665,7 @@ class App(tk.Tk):
 				"well_size_cm": well_size,
 				"pump_rate": pump_rate,
 				"pump_rate_units": "cc/hr",
+				"drip_wait_time_s": drip_wait_time,
 				"volume_per_well_cc": volume,
 				"table_start_cm": table_start,
 				"carriage_start_cm": carriage_start,
@@ -2564,7 +2779,8 @@ class App(tk.Tk):
 			self.set_status(
 				f"Drip wait at well (col {s.x + 1}, row {s.y + 1}) before next move..."
 			)
-		s.taskId = self.after(round(s.pump_time * 1000), self.move)
+		# Post-pump drip wait is operator-controlled, not coupled to pump_time.
+		s.taskId = self.after(round(s.drip_wait_time * 1000), self.move)
 
 	def move(self):
 		"""Advance to the next cycle. In discard phase: increment the counter
@@ -2728,22 +2944,35 @@ class App(tk.Tk):
 		self._update_run_control_buttons()
 
 	def end_run(self):
-		"""Handle the End Run button click. Finalizes whatever phase we're in."""
+		"""Handle the End Run button click.
+
+		Asks the operator to choose Save (finalize with timestamped files)
+		or Discard (skip finalization; leave metadata.json + log.csv on disk
+		untouched). Either way the run transitions to idle: motors released,
+		pump claim cleared, visuals reset, FractionatorState run counters
+		zeroed so a fresh Begin Fractionation starts from a clean slate.
+
+		There is no Cancel path -- this is a one-way exit. Operators who
+		clicked End Run by mistake can re-enter inputs and click Begin
+		Fractionation again.
+		"""
 		s = self.state
 		# Nothing to end if no run is active.
 		if self.run_logger is None and s.state == "idle":
 			return
 
-		plate_target = s.number_of_fractions - s.discards_at_series_start
-		confirm = messagebox.askyesno(
-			"End run?",
-			f"End the current run? {s.wells_collected} of {plate_target} planned "
-			"wells have been collected in the current series. The run log "
-			"and summary will be finalized.\n\nContinue?",
+		project_at_click = s.project or "(unset)"
+		sample_at_click = s.current_sample_id or "(unset)"
+		save = messagebox.askyesno(
+			"End Run",
+			f"Save the run logs for project '{project_at_click}' / "
+			f"sample '{sample_at_click}'?\n\n"
+			"Yes: finalize and write end_*.json + summary*.md with a "
+			"timestamp suffix.\n"
+			"No: discard finalization (metadata.json + log.csv remain "
+			"on disk; delete manually if not needed).",
 			parent=self,
 		)
-		if not confirm:
-			return
 
 		# Cancel any pending after()
 		if s.taskId is not None:
@@ -2766,7 +2995,11 @@ class App(tk.Tk):
 		self.table_motor.release()
 		self.carriage_motor.release()
 
-		# Close out the run logger.
+		# Close out the run logger. On Save: finalize with a timestamped
+		# suffix so multiple End Runs in one session don't overwrite each
+		# other. On Discard: drop the logger reference without writing
+		# end/summary; the run dir keeps metadata.json + log.csv as-is.
+		discarded_run_dir = None
 		if self.run_logger is not None:
 			# If we ended mid-dispense/wait of a plate well or discard, commit
 			# that in-flight entry as emergency_stopped so log.csv has a row.
@@ -2776,16 +3009,57 @@ class App(tk.Tk):
 						s.series_index, s.discards_done + 1)
 				else:
 					self.run_logger.well_emergency_stopped(pre_x, pre_y)
-			snap = self.automated_frame.progress.snapshot()
-			self.run_logger.end(final_status, snapshot=snap,
-				plates_used=self.state.plates_used,
-				well_records=self.state.well_records)
+			if save:
+				# Filesystem-safe ISO timestamp (colons -> hyphens) so the
+				# suffix is portable across Windows/macOS/Linux.
+				end_ts = datetime.now().isoformat(timespec="seconds").replace(":", "-")
+				snap = self.automated_frame.progress.snapshot()
+				self.run_logger.end(final_status, snapshot=snap,
+					plates_used=self.state.plates_used,
+					well_records=self.state.well_records,
+					file_suffix=end_ts)
+			else:
+				discarded_run_dir = self._last_run_path
+				# Close the CSV cleanly so the partial log is well-formed
+				# even though we're not writing the summary.
+				self.run_logger.close_without_summary()
 			self.run_logger = None
 
-		# Reset UI: clear the plate view and refresh the button states.
-		self.automated_frame.stop_progress_view()
+		# Reset run-flow counters so a fresh Begin Fractionation starts
+		# clean. Persistent fields (project/sample/plate IDs, plate geometry,
+		# waste-bin, drip wait, etc.) are kept -- they'll be reused or
+		# updated from the entry boxes on the next Begin.
+		s.x = 0
+		s.y = 0
+		s.carriage_forwards = True
+		s.number_of_fractions = 0
+		s.discards_planned = 0
+		s.discards_at_series_start = 0
+		s.discards_done = 0
+		s.wells_collected = 0
+		s.series_index = 0
+		s.current_series_sequence = 0
+		s.well_records = []
+		s.wells_on_current_plate = 0
+		s.plate_full_with_sample_complete = False
+		s.plates_used = []
+		s.plate_swaps_done = 0
+
+		# Reset visuals: plate canvas to UNVISITED, plate label to the
+		# current Plate ID input, header text to the ready message.
+		af = self.automated_frame
+		plate_id = af.plate_id_te.get().strip() or "Plate-1"
+		af.progress.reset()
+		af.progress.set_plate_label(plate_id)
+		af.progress.current_lbl["text"] = "Ready. Click Begin Fractionation to start."
 		self._update_run_control_buttons()
-		self.set_status(f"Run ended ({final_status}).")
+		if save:
+			self.set_status(f"Run ended ({final_status}). Logs saved.")
+		else:
+			self.set_status(
+				f"Run discarded. Partial log files at {discarded_run_dir} "
+				"may be deleted manually."
+			)
 
 	def continue_to_next_sample(self):
 		"""Start a new series within the current run. Used after auto-pause-
