@@ -47,6 +47,17 @@ PALETTE = {
 	"accent_fg":      "#ffffff",
 	"button_bg":      "#e8e8e8",
 	"button_active":  "#d8d8d8",
+	"button_border":  "#888888",
+	"danger":         "#C0392B",
+	"danger_hover":   "#922B21",
+	"danger_active":  "#6B1F18",
+	"pump_on":        "#27a72c",
+	"pump_on_hover":  "#1e7d20",
+	"pump_locked":    "#bdbdbd",
+	"pause_running": "#27a72c",
+	"pause_paused":  "#6F4E37",
+	"mode_inactive": "#e0e0e0",
+	"mode_inactive_hover": "#cfcfcf",
 }
 
 # ----- Typography -----------------------------------------------------
@@ -148,6 +159,7 @@ def apply_style(root):
 		pass
 
 	style.configure("TFrame", background=PALETTE["bg_frame"])
+	style.configure("TSeparator", background=PALETTE["border_frame"])
 	style.configure("TLabel",
 		background=PALETTE["bg_frame"], foreground=PALETTE["fg_text"], font=body)
 	style.configure("Heading.TLabel",
@@ -159,23 +171,109 @@ def apply_style(root):
 		relief="solid", borderwidth=1)
 	style.configure("TLabelframe.Label",
 		background=PALETTE["bg_frame"], foreground=PALETTE["fg_text"], font=bold)
+
+	# Entries: white field, dark text, thin border. Both ``fieldbackground``
+	# (the editable area) and ``background`` (the wider widget frame) get
+	# set because some themes paint each.
 	style.configure("TEntry",
-		fieldbackground="#ffffff", foreground=PALETTE["fg_text"], font=body)
+		fieldbackground="#ffffff", background="#ffffff",
+		foreground=PALETTE["fg_text"],
+		bordercolor=PALETTE["button_border"], lightcolor=PALETTE["button_border"],
+		darkcolor=PALETTE["button_border"],
+		borderwidth=1, relief="solid", padding=(4, 2),
+		font=body)
+	style.map("TEntry",
+		fieldbackground=[("disabled", "#f0f0f0")],
+		foreground=[("disabled", PALETTE["fg_muted"])])
+
+	# Single uniform button typography. Every role style below INHERITS
+	# this font/padding/border. Only color and weight may vary per role.
 	style.configure("TButton",
-		font=body, padding=4,
-		background=PALETTE["button_bg"], foreground=PALETTE["fg_text"])
+		font=body,
+		padding=(8, 4),
+		relief="solid",
+		borderwidth=1,
+		bordercolor=PALETTE["button_border"],
+		lightcolor=PALETTE["button_border"],
+		darkcolor=PALETTE["button_border"],
+		background=PALETTE["button_bg"],
+		foreground=PALETTE["fg_text"],
+		focuscolor=PALETTE["accent"])
 	style.map("TButton",
 		background=[("active", PALETTE["button_active"]),
-			("disabled", "#cccccc")],
-		foreground=[("disabled", "#888888")])
-	style.configure("Primary.TButton",
-		font=bold, padding=8,
-		background=PALETTE["accent"], foreground=PALETTE["accent_fg"])
-	style.map("Primary.TButton",
-		background=[("active", PALETTE["accent_hover"]),
-			("pressed", PALETTE["accent_active"]),
-			("disabled", "#a0a0a0")],
-		foreground=[("disabled", "#ffffff")])
+			("disabled", "#dddddd")],
+		foreground=[("disabled", "#9a9a9a")])
+
+	# Role styles. Each one only overrides what's different from TButton --
+	# font, padding, and border are inherited so all buttons read uniformly.
+	def _role(name, *, bg, hover, active=None, pressed=None,
+			fg=PALETTE["accent_fg"], font_override=None, disabled_bg=None,
+			disabled_fg=None, padding=None):
+		opts = {"background": bg, "foreground": fg}
+		if font_override is not None:
+			opts["font"] = font_override
+		if padding is not None:
+			opts["padding"] = padding
+		style.configure(name, **opts)
+		map_opts = {"background": [("active", hover)]}
+		if pressed is not None:
+			map_opts["background"].append(("pressed", pressed))
+		if disabled_bg is not None:
+			map_opts["background"].append(("disabled", disabled_bg))
+		if disabled_fg is not None:
+			map_opts["foreground"] = [("disabled", disabled_fg)]
+		style.map(name, **map_opts)
+
+	# Primary: Begin Fractionation, Move to Waste Bin, Home, About/Close.
+	_role("Primary.TButton",
+		bg=PALETTE["accent"], hover=PALETTE["accent_hover"],
+		pressed=PALETTE["accent_active"],
+		font_override=bold, padding=(10, 6),
+		disabled_bg="#a0a0a0", disabled_fg="#ffffff")
+
+	# Danger: End Run. Same typography as TButton; red bg.
+	_role("Danger.TButton",
+		bg=PALETTE["danger"], hover=PALETTE["danger_hover"],
+		pressed=PALETTE["danger_active"],
+		disabled_bg="#dddddd", disabled_fg="#9a9a9a")
+
+	# Pump-button role styles. _update_pump_button switches the button's
+	# style name based on (claimant, relay_on, in_run) instead of mutating
+	# bg/fg directly (which ttk.Button doesn't support).
+	_role("PumpOff.TButton",
+		bg=PALETTE["accent"], hover=PALETTE["accent_hover"],
+		font_override=bold,
+		disabled_bg=PALETTE["accent"], disabled_fg=PALETTE["accent_fg"])
+	_role("PumpOn.TButton",
+		bg=PALETTE["pump_on"], hover=PALETTE["pump_on_hover"],
+		font_override=bold,
+		disabled_bg=PALETTE["pump_on"], disabled_fg=PALETTE["accent_fg"])
+	_role("PumpLocked.TButton",
+		bg=PALETTE["pump_locked"], hover=PALETTE["pump_locked"],
+		fg=PALETTE["fg_text"],
+		font_override=bold,
+		disabled_bg=PALETTE["pump_locked"], disabled_fg=PALETTE["fg_text"])
+
+	# Pause/Resume role styles -- swapped by _update_run_control_buttons.
+	# Pause-Idle is the default TButton style; running / paused get colors.
+	_role("PauseRunning.TButton",
+		bg=PALETTE["pause_running"], hover="#1e7d20",
+		disabled_bg=PALETTE["pause_running"], disabled_fg=PALETTE["accent_fg"])
+	_role("PausePaused.TButton",
+		bg=PALETTE["pause_paused"], hover="#553a29",
+		disabled_bg=PALETTE["pause_paused"], disabled_fg=PALETTE["accent_fg"])
+
+	# Mode-tab styles: active mode wears Primary; others use ModeInactive.
+	# Both inherit the standard TButton typography.
+	_role("ModeActive.TButton",
+		bg=PALETTE["accent"], hover=PALETTE["accent_hover"],
+		font_override=bold, padding=(10, 8),
+		disabled_bg=PALETTE["accent"], disabled_fg=PALETTE["accent_fg"])
+	_role("ModeInactive.TButton",
+		bg=PALETTE["mode_inactive"], hover=PALETTE["mode_inactive_hover"],
+		fg=PALETTE["fg_text"],
+		font_override=bold, padding=(10, 8),
+		disabled_bg=PALETTE["mode_inactive"], disabled_fg=PALETTE["fg_text"])
 
 	# --- Minimum window size ---
 	# Compute from the line height so the floor scales with HiDPI font
@@ -188,31 +286,20 @@ def apply_style(root):
 
 
 def primary_button(parent, **kwargs):
-	"""Build a ``tk.Button`` styled as a primary action (accent bg, white
-	fg, bold font, increased padding). All ``kwargs`` are forwarded to
-	the ``tk.Button`` constructor; the style options below take precedence
-	if the caller passes conflicting values for them.
+	"""Build a ``ttk.Button`` carrying the ``Primary.TButton`` style.
 
-	Stays as ``tk.Button`` (rather than ``ttk.Button``) so callers that
-	mutate ``btn["bg"]`` / ``btn["text"]`` at runtime (e.g. the
-	Fractionate / Purge pump buttons that flip green on relay-on) keep
-	working.
+	Used for clearly-primary actions (Begin Fractionation, Move to Waste
+	Bin, Home, About/Close). All buttons in the GUI -- primary, danger,
+	pump, pause, mode tab, plain -- are ``ttk.Button`` widgets and share
+	the same font family/size; only color (and weight, for primaries)
+	differs by role.
+
+	Kwargs are forwarded to the constructor; ``style`` defaults to
+	``Primary.TButton`` if the caller doesn't override it.
 	"""
-	style_opts = dict(
-		bg=PALETTE["accent"],
-		fg=PALETTE["accent_fg"],
-		activebackground=PALETTE["accent_hover"],
-		activeforeground=PALETTE["accent_fg"],
-		disabledforeground="#dde6f5",
-		relief="flat",
-		borderwidth=0,
-		highlightthickness=0,
-		font=FONTS["bold"],
-		padx=10, pady=6,
-		cursor="hand2",
-	)
-	style_opts.update(kwargs)
-	return tk.Button(parent, **style_opts)
+	kwargs.setdefault("style", "Primary.TButton")
+	kwargs.setdefault("cursor", "hand2")
+	return ttk.Button(parent, **kwargs)
 
 
 def make_centrifuge_tube_canvas(parent, size=36, bg=None, tube_color=None):

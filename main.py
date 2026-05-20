@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tkinter as tk
 import webbrowser
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import hardware
 import styling
@@ -234,7 +234,7 @@ class TextEntry(tk.Frame):
 		self.label = tk.Label(self, text=text)
 		self.label.grid(row=0, column=0, sticky="w")
 		self.var = textvariable if textvariable is not None else tk.StringVar()
-		self.entry = tk.Entry(self, textvariable=self.var)
+		self.entry = ttk.Entry(self, textvariable=self.var)
 		self.entry.grid(row=0, column=1, sticky="we")
 
 		# Stays unmapped until show_error() grids it; takes no vertical
@@ -260,31 +260,6 @@ class TextEntry(tk.Frame):
 	def clear_error(self):
 		self.error_label["text"] = ""
 		self.error_label.grid_remove()
-
-
-class StringVarLogHandler(logging.Handler):
-	"""Push each log record's first line into a Tk ``StringVar``.
-
-	A Label bound to that variable shows the most recent ``autosip`` log
-	line in the status bar without polling. Multi-line messages are
-	truncated to the first line; long lines are truncated to ``max_len``.
-	"""
-
-	def __init__(self, string_var, max_len=140):
-		super().__init__()
-		self.string_var = string_var
-		self.max_len = max_len
-
-	def emit(self, record):
-		try:
-			msg = record.getMessage().split("\n", 1)[0]
-			if len(msg) > self.max_len:
-				msg = msg[: self.max_len - 3] + "..."
-			self.string_var.set(f"{record.levelname}: {msg}")
-		except Exception:
-			# StringVar can raise TclError if the Tk root has been destroyed
-			# (shutdown). Suppress so we don't break the logging system.
-			self.handleError(record)
 
 
 class PumpController:
@@ -362,73 +337,51 @@ class PumpController:
 		return self.claimant is None or self.claimant == name
 
 
-# Pump-button color palette.
-# OFF + available uses the primary accent so Fractionate/Purge read as
-# primary action buttons (consistent with Begin Fractionation / Move /
-# Home). ON flips to green for unmistakable "relay is live" feedback;
-# locked uses a dim gray so the interlocked state is visibly disabled.
-_PUMP_BTN_ON_BG = "#27a72c"
-_PUMP_BTN_OFF_BG = PALETTE["accent"]
-_PUMP_BTN_LOCKED_BG = "#bdbdbd"
-
-
-def _set_pump_btn_style(btn, bg):
-	"""Apply matching foreground + active styling whenever we flip a pump
-	button's background color, so contrast stays WCAG-compliant
-	(white on accent or green; dark on locked-gray)."""
-	if bg == _PUMP_BTN_LOCKED_BG:
-		fg = PALETTE["fg_text"]
-		active = "#a8a8a8"
-	else:
-		fg = PALETTE["accent_fg"]
-		active = PALETTE["accent_hover"] if bg == _PUMP_BTN_OFF_BG else "#1e7d20"
-	btn["bg"] = bg
-	btn["fg"] = fg
-	btn["activebackground"] = active
-	btn["activeforeground"] = fg
-	btn["disabledforeground"] = fg
-
-
 def _update_pump_button(btn, name, claimant, relay_on, in_run):
-	"""Sync a Fractionate/Purge button's label, color, and enabled state.
+	"""Sync a Fractionate/Purge button's label, role-style, and enabled
+	state.
 
 	``in_run`` disables BOTH pump buttons across the UI: the state machine
 	owns the relay during an automated run, so direct user clicks would
 	interfere. Outside a run, the standard interlock applies: only the
 	currently-claiming button is clickable; the opposite-name button is
 	greyed out until the claim is released.
+
+	The button is a ``ttk.Button``; color changes happen by swapping its
+	``style`` (PumpOff/PumpOn/PumpLocked.TButton) rather than mutating
+	``btn["bg"]`` directly, which ttk doesn't support.
 	"""
 	display = name.title()
 	if in_run:
 		# State machine owns the pump for the entire run.
 		if claimant == name and relay_on:
 			btn["text"] = f"{display}: ON (run)"
-			_set_pump_btn_style(btn, _PUMP_BTN_ON_BG)
+			btn.configure(style="PumpOn.TButton")
 		else:
 			btn["text"] = f"{display}: OFF"
-			_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
+			btn.configure(style="PumpOff.TButton")
 		btn["state"] = tk.DISABLED
 		return
 
 	if claimant is None:
 		btn["text"] = f"{display}: OFF"
-		_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
+		btn.configure(style="PumpOff.TButton")
 		btn["state"] = tk.NORMAL
 	elif claimant == name:
 		if relay_on:
 			btn["text"] = f"{display}: ON"
-			_set_pump_btn_style(btn, _PUMP_BTN_ON_BG)
+			btn.configure(style="PumpOn.TButton")
 		else:
 			# Claim held by us with relay off -- only reachable through the
 			# state machine (paused-mid-run). User clicks always pair on/off
 			# with claim/release.
 			btn["text"] = f"{display}: OFF (claim held)"
-			_set_pump_btn_style(btn, _PUMP_BTN_OFF_BG)
+			btn.configure(style="PumpOff.TButton")
 		btn["state"] = tk.NORMAL
 	else:
 		# Interlock: opposite pump has the claim, this button is locked out.
 		btn["text"] = f"{display}: OFF"
-		_set_pump_btn_style(btn, _PUMP_BTN_LOCKED_BG)
+		btn.configure(style="PumpLocked.TButton")
 		btn["state"] = tk.DISABLED
 
 
@@ -471,13 +424,20 @@ class StopSignButton(tk.Canvas):
 		self._octagon = self.create_polygon(
 			verts, fill="#cc0000", outline="white", width=2,
 		)
-		# Default font scales with size; longer-text callers (e.g. multi-line
-		# labels) can pass an explicit font_size to fit.
+		# Use the application body-font family so the Terminate Run text
+		# reads in the same typeface as every ttk.Button in the GUI; only
+		# the size shrinks to fit inside the octagon and the weight stays
+		# bold (allowed for the Danger role per the visual spec).
+		body_family = FONTS.get("family", "DejaVu Sans")
+		body_size = FONTS.get("size", 11)
 		if font_size is None:
 			font_size = max(8, int(size / 5))
+		# Cap at body size so the octagon never types LARGER than ordinary
+		# UI buttons; floor at 9 so multi-line labels stay legible.
+		font_size = min(body_size, max(9, font_size))
 		self._text_id = self.create_text(
 			cx, cy, text=text, fill="white", justify="center",
-			font=("TkDefaultFont", font_size, "bold"),
+			font=(body_family, font_size, "bold"),
 		)
 		# Hit-test only on the polygon and its text -- dead corners ignore
 		# stray clicks. Cursor change on hover signals clickability.
@@ -596,12 +556,6 @@ class HeaderFrame(tk.Frame):
 	_PAUSE_RUNNING_BG = "#27a72c"
 	_PAUSE_PAUSED_BG = "#6F4E37"
 
-	# Subdued styling for inactive tabs -- light gray bg, dark text;
-	# still high-contrast (>= 12:1) and visibly clickable.
-	_TAB_INACTIVE_BG = "#e0e0e0"
-	_TAB_INACTIVE_FG = PALETTE["fg_text"]
-	_TAB_INACTIVE_ACTIVE_BG = "#cfcfcf"
-
 	def __init__(self, master, app):
 		super().__init__(master)
 		self.app = app
@@ -610,12 +564,13 @@ class HeaderFrame(tk.Frame):
 		self._tab_buttons = {}
 		for col, name in enumerate(MODE_ORDER):
 			# Bind ``name`` at lambda-creation time so each button captures
-			# its own label rather than the loop's final value.
-			btn = tk.Button(
-				self, text=name,
+			# its own label rather than the loop's final value. Styles
+			# ModeActive.TButton / ModeInactive.TButton are configured in
+			# styling.apply_style and swapped per click.
+			btn = ttk.Button(
+				self, text=name, style="ModeInactive.TButton",
 				command=lambda n=name: app.request_mode_change(n),
-				font=FONTS["bold"], relief="flat", borderwidth=0,
-				highlightthickness=0, padx=10, pady=8, cursor="hand2",
+				cursor="hand2",
 			)
 			btn.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 4, 0), pady=2)
 			self.grid_columnconfigure(col, weight=1, uniform="modetabs")
@@ -624,18 +579,8 @@ class HeaderFrame(tk.Frame):
 	def set_mode_label(self, mode_name):
 		"""Highlight the active tab and subdue the others."""
 		for name, btn in self._tab_buttons.items():
-			if name == mode_name:
-				btn["bg"] = PALETTE["accent"]
-				btn["fg"] = PALETTE["accent_fg"]
-				btn["activebackground"] = PALETTE["accent_hover"]
-				btn["activeforeground"] = PALETTE["accent_fg"]
-				btn["disabledforeground"] = PALETTE["accent_fg"]
-			else:
-				btn["bg"] = self._TAB_INACTIVE_BG
-				btn["fg"] = self._TAB_INACTIVE_FG
-				btn["activebackground"] = self._TAB_INACTIVE_ACTIVE_BG
-				btn["activeforeground"] = self._TAB_INACTIVE_FG
-				btn["disabledforeground"] = self._TAB_INACTIVE_FG
+			btn.configure(style="ModeActive.TButton" if name == mode_name
+				else "ModeInactive.TButton")
 
 
 class StatusBarFrame(tk.Frame):
@@ -679,14 +624,11 @@ class StatusBarFrame(tk.Frame):
 		self.pump_state_lbl = tk.Label(self, text="Pump: idle", anchor="w")
 		self.pump_state_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
-		# Last log line (right of status, left of the STOP button) -- bound
-		# to a StringVar that StringVarLogHandler updates from the autosip
-		# logger.
-		self.log_var = tk.StringVar(value="")
-		self.log_lbl = tk.Label(self, textvariable=self.log_var, anchor="e", fg="#555")
-		self.log_lbl.pack(side=tk.RIGHT, padx=(8, 6))
-
-		# Per-phase status (kept from the previous version) fills the middle.
+		# Per-phase status fills the middle of the bar. The previous
+		# diagnostic-log mirror (status_var fed by StringVarLogHandler) has
+		# been removed -- the `autosip` logger continues writing to stdout
+		# and per-run log files; only the in-window line is gone, which
+		# also frees vertical space for the well-plate canvas above.
 		self.status_lbl = tk.Label(self, text="System idle.", anchor="w")
 		self.status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -701,10 +643,7 @@ class StatusBarFrame(tk.Frame):
 		"""Show/hide the stop-sign Terminate Run button. Hidden outside
 		Automated mode since terminate only makes sense for runs."""
 		if visible:
-			# `before=log_lbl` puts terminate back in the rightmost slot
-			# (log_lbl was originally packed AFTER terminate, so it sits to
-			# the left of it -- pack-before reclaims the same position).
-			self.terminate_btn.pack(side=tk.RIGHT, padx=4, pady=2, before=self.log_lbl)
+			self.terminate_btn.pack(side=tk.RIGHT, padx=4, pady=2)
 		else:
 			self.terminate_btn.pack_forget()
 
@@ -744,33 +683,41 @@ class AutomatedFrame(tk.Frame):
 		self._loaded_labware_path = None
 		self._loaded_labware_data = None
 
-		for i in range(3):
+		# Two columns so Run Parameters (left) and Plate Parameters (right)
+		# can sit SIDE BY SIDE in the same row -- the stacked layout used
+		# ~640 px of natural vertical space, which left the progress
+		# canvas with only ~200 px on a maximized 1080p screen. The
+		# side-by-side layout cuts the upper section's height roughly
+		# in half so the canvas absorbs the bulk of the window's
+		# vertical real estate.
+		for i in range(2):
 			self.grid_columnconfigure(i, weight=1, uniform="auto")
 
 		# Run-control button row: always visible from app startup, state-
 		# driven enable/disable. Placed at row 0 (top-right of the frame)
 		# so the four controls are the first thing visible.
 		ctrl = tk.Frame(self)
-		ctrl.grid(row=0, column=0, columnspan=3, sticky="e", pady=(0, 4))
-		self.return_btn = tk.Button(ctrl, text="Return to Start Coords", command=app.return_to_home)
+		ctrl.grid(row=0, column=0, columnspan=2, sticky="e", pady=(0, 4))
+		self.return_btn = ttk.Button(ctrl, text="Return to Start Coords",
+			command=app.return_to_home)
 		self.return_btn.pack(side=tk.LEFT, padx=2)
-		self.pause_btn = tk.Button(ctrl, text="Pause", command=app.toggle_pause,
-			bg="#27a72c", fg="white", activebackground="#3ac640", activeforeground="white",
-			font=("TkDefaultFont", 10, "bold"))
+		# Pause button starts in the default TButton style; toggle_pause /
+		# _update_run_control_buttons swap it to PauseRunning.TButton or
+		# PausePaused.TButton as the run state changes.
+		self.pause_btn = ttk.Button(ctrl, text="Pause", command=app.toggle_pause,
+			style="PauseRunning.TButton")
 		self.pause_btn.pack(side=tk.LEFT, padx=2)
-		self.continue_btn = tk.Button(
+		self.continue_btn = ttk.Button(
 			ctrl, text="Continue to Next Sample",
 			command=app.continue_to_next_sample)
 		self.continue_btn.pack(side=tk.LEFT, padx=2)
-		self.continue_plate_btn = tk.Button(
+		self.continue_plate_btn = ttk.Button(
 			ctrl, text="Continue to Next Plate",
 			command=app.continue_to_next_plate)
 		self.continue_plate_btn.pack(side=tk.LEFT, padx=2)
-		self.end_run_btn = tk.Button(ctrl, text="End Run", command=self.end_run_clicked)
+		self.end_run_btn = ttk.Button(ctrl, text="End Run",
+			command=self.end_run_clicked, style="Danger.TButton")
 		self.end_run_btn.pack(side=tk.LEFT, padx=2)
-		# Default disabled-button bg used when the Pause button is disabled
-		# (its custom green/brown bgs override the system disabled style).
-		self._pause_default_bg = "#d9d9d9"
 
 		# ----- Run Parameters (top) --------------------------------------
 		# Project + Sample ID stay user-editable while a run is in progress
@@ -778,8 +725,12 @@ class AutomatedFrame(tk.Frame):
 		# Resume after a tube swap. Number of fractions / discards are
 		# frozen at run start. Volume per well moved here from the old
 		# pump-and-volume row because it's per-fraction metadata.
-		runp = tk.LabelFrame(self, text="Run Parameters", padx=8, pady=4)
-		runp.grid(row=1, column=0, columnspan=3, sticky="we", padx=2, pady=(0, 2))
+		runp = tk.LabelFrame(self, text="Run Parameters", padx=8, pady=2)
+		# Row 1 col 0: Run Parameters. Pump LabelFrame stacks directly
+		# beneath it in row 2 col 0 (flush, no double-padding) to fill
+		# the gap that would otherwise sit below this frame; the taller
+		# Plate Parameters LabelFrame spans both rows in col 1.
+		runp.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		runp.grid_columnconfigure(0, weight=1)
 		self.project_te = TextEntry(runp, "Project name:")
 		self.project_te.grid(row=0, column=0, sticky="we")
@@ -827,8 +778,11 @@ class AutomatedFrame(tk.Frame):
 		# Plate geometry + the two coordinate pairs (plate-start and
 		# waste-bin). The plate-start fields used to live in the table/carriage
 		# move row; they're now part of plate definition.
-		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=4)
-		platep.grid(row=2, column=0, columnspan=3, sticky="we", padx=2, pady=(0, 2))
+		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=2)
+		# Row 1 col 1, spanning rows 1+2 so the Plate Parameters frame
+		# (which is taller because of the Waste bin sub-section) sits
+		# alongside the Run Parameters + Pump stack on the left.
+		platep.grid(row=1, column=1, rowspan=2, sticky="new", padx=(4, 2), pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
 		# JSON loader -- first row of Plate Parameters because loading a
 		# file populates the rows/cols/well-width/starting-point entries
@@ -838,9 +792,9 @@ class AutomatedFrame(tk.Frame):
 		loader_row.grid_columnconfigure(1, weight=1)
 		tk.Label(loader_row, text="Load well plate file:").grid(
 			row=0, column=0, sticky="w", padx=(0, 6))
-		self.json_entry = tk.Entry(loader_row)
+		self.json_entry = ttk.Entry(loader_row)
 		self.json_entry.grid(row=0, column=1, sticky="we")
-		tk.Button(loader_row, text="Load", command=self.load_json).grid(
+		ttk.Button(loader_row, text="Load", command=self.load_json).grid(
 			row=0, column=2, sticky="we", padx=(6, 0))
 
 		self.rows_text_entry = TextEntry(platep, "Number of rows (1–16):")
@@ -879,8 +833,11 @@ class AutomatedFrame(tk.Frame):
 		)
 
 		# ----- Pump ------------------------------------------------------
-		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=4)
-		pumpp.grid(row=3, column=0, columnspan=3, sticky="we", padx=2, pady=(0, 2))
+		# Sits in column 0 below Run Parameters, flush against it so the
+		# two LabelFrames read as a single visual stack alongside
+		# Plate Parameters in column 1.
+		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=2)
+		pumpp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
 		pumpp.grid_columnconfigure(0, weight=1)
 		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (cc/hr — see your syringe pump spec):")
 		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
@@ -904,7 +861,7 @@ class AutomatedFrame(tk.Frame):
 		# Clicks on the tube canvas fall through to begin_clicked too so
 		# the entire region behaves like a single button.
 		begin_frame = tk.Frame(self, bg=PALETTE["accent"], bd=0, highlightthickness=0)
-		begin_frame.grid(row=4, column=0, columnspan=3, sticky="we", pady=(4, 0))
+		begin_frame.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
 		# Outer empty columns expand so the [tube | button | distribution]
 		# trio sits centered as a group, with the icons bookending the
 		# centered text immediately on either side of the button.
@@ -930,9 +887,13 @@ class AutomatedFrame(tk.Frame):
 
 		# Progress view -- to-scale well plate, color-blind-safe palette,
 		# header showing current well + count + elapsed/remaining time.
-		self.progress = WellPlateProgress(self, min_width=500, min_height=300)
-		self.progress.grid(row=5, column=0, columnspan=3, sticky="nsew")
-		self.grid_rowconfigure(5, weight=1)
+		# min_height bumped so the canvas claims a fair share of the
+		# vertical budget at default window size -- otherwise the
+		# LabelFrames above it shrink the canvas to ~70 px tall and the
+		# plate clamps to its 12-px-per-well floor.
+		self.progress = WellPlateProgress(self, min_width=500, min_height=400)
+		self.progress.grid(row=4, column=0, columnspan=2, sticky="nsew")
+		self.grid_rowconfigure(4, weight=1)
 
 		# Mirror Project/Sample ID entry text into state.project /
 		# state.current_sample_id on every keystroke (trace_add). Focus-out
@@ -1376,22 +1337,22 @@ class ManualFrame(tk.Frame):
 		# Plus-pad of directional buttons. Corners empty.
 		pad = tk.Frame(jog)
 		pad.grid(row=0, column=0, pady=(0, 8))
-		self.y_plus_btn = tk.Button(
+		self.y_plus_btn = ttk.Button(
 			pad, text="▲ Y+", width=8,
 			command=lambda: self._jog("y", +1),
 		)
 		self.y_plus_btn.grid(row=0, column=1, padx=2, pady=2)
-		self.x_minus_btn = tk.Button(
+		self.x_minus_btn = ttk.Button(
 			pad, text="◀ X−", width=8,
 			command=lambda: self._jog("x", -1),
 		)
 		self.x_minus_btn.grid(row=1, column=0, padx=2, pady=2)
-		self.x_plus_btn = tk.Button(
+		self.x_plus_btn = ttk.Button(
 			pad, text="X+ ▶", width=8,
 			command=lambda: self._jog("x", +1),
 		)
 		self.x_plus_btn.grid(row=1, column=2, padx=2, pady=2)
-		self.y_minus_btn = tk.Button(
+		self.y_minus_btn = ttk.Button(
 			pad, text="Y− ▼", width=8,
 			command=lambda: self._jog("y", -1),
 		)
@@ -1430,11 +1391,10 @@ class ManualFrame(tk.Frame):
 		frac_wrap = tk.Frame(pump)
 		frac_wrap.grid(row=0, column=0, sticky="we", padx=(0, 4), pady=4)
 		frac_wrap.grid_columnconfigure(0, weight=1)
-		self.fractionate_btn = tk.Button(
+		self.fractionate_btn = ttk.Button(
 			frac_wrap, text="Fractionate: OFF",
 			command=lambda: app._handle_pump_click("fractionate", parent=self),
-			font=FONTS["bold"], relief="flat", borderwidth=0,
-			highlightthickness=0, padx=10, pady=6, cursor="hand2",
+			style="PumpOff.TButton", cursor="hand2",
 		)
 		self.fractionate_btn.grid(row=0, column=0, sticky="we")
 		self.fractionate_space_lbl = tk.Label(
@@ -1446,11 +1406,10 @@ class ManualFrame(tk.Frame):
 		purge_wrap = tk.Frame(pump)
 		purge_wrap.grid(row=0, column=1, sticky="we", padx=(4, 0), pady=4)
 		purge_wrap.grid_columnconfigure(0, weight=1)
-		self.purge_btn = tk.Button(
+		self.purge_btn = ttk.Button(
 			purge_wrap, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
-			font=FONTS["bold"], relief="flat", borderwidth=0,
-			highlightthickness=0, padx=10, pady=6, cursor="hand2",
+			style="PumpOff.TButton", cursor="hand2",
 		)
 		self.purge_btn.grid(row=0, column=0, sticky="we")
 		self.purge_space_lbl = tk.Label(
@@ -1582,11 +1541,10 @@ class CleaningFrame(tk.Frame):
 			self, text="Move to Waste Bin", command=self.move_clicked,
 		)
 		self.move_btn.grid(row=1, column=0, columnspan=2, sticky="we", padx=2, pady=2)
-		self.purge_btn = tk.Button(
+		self.purge_btn = ttk.Button(
 			self, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
-			font=FONTS["bold"], relief="flat", borderwidth=0,
-			highlightthickness=0, padx=10, pady=6, cursor="hand2",
+			style="PumpOff.TButton", cursor="hand2",
 		)
 		self.purge_btn.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
 
@@ -1641,7 +1599,12 @@ class App(tk.Tk):
 		# ticks, etc.). Without this, the WellPlateProgress header labels
 		# can drive the root window into a width-oscillation feedback loop.
 		# (apply_style also enforces a font-derived minsize floor.)
-		self.geometry("900x950")
+		# Default window sized to fit comfortably on a 1080p screen with
+		# room for window-manager chrome and a taskbar. The side-by-side
+		# Run/Plate Parameters layout in AutomatedFrame means the upper
+		# section only needs ~350 px, so this leaves ~600 px for the
+		# progress canvas at default size.
+		self.geometry("1200x1000")
 		self.backends = backends
 
 		# Hardware wrappers -- constructed once, reused across mode switches.
@@ -1683,13 +1646,18 @@ class App(tk.Tk):
 		self.waste_bin_table_var = tk.StringVar()
 		self.waste_bin_carriage_var = tk.StringVar()
 
-		# Root layout: 3 rows (header / mode body / status) in a single column
-		# that expands with the window.
+		# Root layout: 4 rows (header / separator / mode body / status) in
+		# a single column that expands with the window. The separator
+		# between the mode tabs (header) and the mode body's run-control
+		# row keeps the two clickable rows visually distinct.
 		self.grid_columnconfigure(0, weight=1)
-		self.grid_rowconfigure(1, weight=1)
+		self.grid_rowconfigure(2, weight=1)
 
 		self.header = HeaderFrame(self, self)
-		self.header.grid(row=0, column=0, sticky="we")
+		self.header.grid(row=0, column=0, sticky="we", padx=4, pady=(4, 0))
+
+		self._mode_separator = ttk.Separator(self, orient="horizontal")
+		self._mode_separator.grid(row=1, column=0, sticky="we", padx=4, pady=(6, 4))
 
 		self.automated_frame = AutomatedFrame(self, self)
 		self.manual_frame = ManualFrame(self, self)
@@ -1701,7 +1669,7 @@ class App(tk.Tk):
 		}
 
 		self.status_bar = StatusBarFrame(self, self)
-		self.status_bar.grid(row=2, column=0, sticky="we")
+		self.status_bar.grid(row=3, column=0, sticky="we")
 
 		# Pump goes through PumpController so every state change updates both
 		# the status-bar indicator and the per-frame pump buttons. The state
@@ -1710,10 +1678,6 @@ class App(tk.Tk):
 		# raw relay backend.
 		self.pump_controller = PumpController(backends.relay)
 		self.pump_controller.subscribe(self._on_pump_state_change)
-
-		# Mirror autosip log lines into the status bar's right-hand label.
-		self._log_handler = StringVarLogHandler(self.status_bar.log_var)
-		logging.getLogger("autosip").addHandler(self._log_handler)
 
 		self.set_mode("Automated")
 		# Sync every frame's pump button to the controller's initial idle state.
@@ -1970,8 +1934,8 @@ class App(tk.Tk):
 
 		btn_row = tk.Frame(dlg)
 		btn_row.pack(pady=(0, 6))
-		tk.Button(btn_row, text=action_label, command=_ok).pack(side=tk.LEFT, padx=4)
-		tk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text=action_label, command=_ok).pack(side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
 		# Enter activates OK; double-click in the list also activates.
 		dlg.bind("<Return>", lambda e: _ok())
 		dlg.bind("<Escape>", lambda e: _cancel())
@@ -2055,7 +2019,7 @@ class App(tk.Tk):
 		if self._active_frame is not None:
 			self._active_frame.grid_remove()
 		frame = self._frames[name]
-		frame.grid(row=1, column=0, sticky="nsew")
+		frame.grid(row=2, column=0, sticky="nsew")
 		self._active_frame = frame
 		self.mode = name
 		self.title(f"autoSIP Controller v{__version__} — {name} Mode")
@@ -2220,9 +2184,6 @@ class App(tk.Tk):
 
 	# -- Run-control button state machine -------------------------------
 
-	_PAUSE_RUNNING_BG = "#27a72c"
-	_PAUSE_PAUSED_BG = "#6F4E37"
-
 	def _classify_ui_state(self):
 		"""Map (state.state, is_paused, _terminated) to a single UI bucket.
 
@@ -2245,7 +2206,13 @@ class App(tk.Tk):
 	def _update_run_control_buttons(self):
 		"""Sync the five run-control buttons in AutomatedFrame to the current
 		state machine state. Called at every state transition so the user
-		sees an immediate response."""
+		sees an immediate response.
+
+		The Pause button's color is varied by swapping its ttk style
+		(PauseRunning.TButton / PausePaused.TButton / TButton); the
+		typography and border are inherited from TButton so all role
+		styles read uniformly with the other run-control buttons.
+		"""
 		af = self.automated_frame
 		s = self.state
 		bucket = self._classify_ui_state()
@@ -2254,26 +2221,24 @@ class App(tk.Tk):
 		ret_state = tk.NORMAL
 		pause_state = tk.DISABLED
 		pause_text = "Pause"
-		pause_bg = af._pause_default_bg
+		pause_style = "TButton"
 		cont_state = tk.DISABLED
 		cont_plate_state = tk.DISABLED
 		end_state = tk.DISABLED
 
 		if bucket == "idle":
-			ret_state = tk.NORMAL
-			pause_state = tk.DISABLED
-			pause_bg = af._pause_default_bg
+			pass  # Default values above.
 		elif bucket == "running":
 			ret_state = tk.DISABLED
 			pause_state = tk.NORMAL
 			pause_text = "Pause"
-			pause_bg = self._PAUSE_RUNNING_BG
+			pause_style = "PauseRunning.TButton"
 			end_state = tk.NORMAL
 		elif bucket == "paused_manual":
 			ret_state = tk.DISABLED
 			pause_state = tk.NORMAL
 			pause_text = "Resume"
-			pause_bg = self._PAUSE_PAUSED_BG
+			pause_style = "PausePaused.TButton"
 			end_state = tk.NORMAL
 		elif bucket == "paused_total":
 			# Sample complete, plate not full -- next action is Continue
@@ -2281,7 +2246,6 @@ class App(tk.Tk):
 			ret_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
-			pause_bg = af._pause_default_bg
 			cont_state = tk.NORMAL
 			end_state = tk.NORMAL
 		elif bucket == "paused_plate_full":
@@ -2292,21 +2256,17 @@ class App(tk.Tk):
 			ret_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
-			pause_bg = af._pause_default_bg
 			cont_plate_state = tk.NORMAL
 			cont_state = tk.NORMAL if s.plate_full_with_sample_complete else tk.DISABLED
 			end_state = tk.NORMAL
 		elif bucket == "estopped":
 			ret_state = tk.DISABLED
 			pause_state = tk.DISABLED
-			pause_bg = af._pause_default_bg
 
 		af.return_btn["state"] = ret_state
 		af.pause_btn["state"] = pause_state
 		af.pause_btn["text"] = pause_text
-		af.pause_btn["bg"] = pause_bg
-		# fg on Pause button: white on the colored bgs, default-dark on gray.
-		af.pause_btn["fg"] = "white" if pause_bg != af._pause_default_bg else "#222"
+		af.pause_btn.configure(style=pause_style)
 		af.continue_btn["state"] = cont_state
 		af.continue_plate_btn["state"] = cont_plate_state
 		af.end_run_btn["state"] = end_state
@@ -3240,7 +3200,7 @@ class App(tk.Tk):
 			text="  2. Return the dispensing needle to home position:",
 		).grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 2))
 
-		home_btn = tk.Button(body, text="Move Needle to Home")
+		home_btn = ttk.Button(body, text="Move Needle to Home", style="Primary.TButton")
 		def _home_click():
 			self.carriage_return()
 			result["needle_at_home"] = True
@@ -3287,10 +3247,10 @@ class App(tk.Tk):
 			dlg.destroy()
 			self.end_run()
 
-		tk.Button(btn_row, text="Cancel Run", command=_cancel_run).grid(
-			row=0, column=0, sticky="w", padx=4)
-		tk.Button(btn_row, text="Continue", command=_continue).grid(
-			row=0, column=1, sticky="e", padx=4)
+		ttk.Button(btn_row, text="Cancel Run", command=_cancel_run,
+			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
+		ttk.Button(btn_row, text="Continue", command=_continue,
+			style="Primary.TButton").grid(row=0, column=1, sticky="e", padx=4)
 
 		# Modal -- block until destroyed.
 		self.wait_window(dlg)

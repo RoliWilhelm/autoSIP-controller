@@ -19,8 +19,11 @@ Color palette is ColorBrewer Set2-style (color-blind safe). Each state also
 encodes a Unicode glyph so the view doesn't rely on color alone (WCAG).
 """
 
+import logging
 from time import monotonic
 import tkinter as tk
+
+logger = logging.getLogger("autosip")
 
 # TODO: calibrate from real motor data. On the mock, ``move()`` does a
 # ~0.2-0.4 s motor move per step plus the carriage_return at end-of-run;
@@ -246,8 +249,11 @@ class WellPlateProgress(tk.Frame):
 		self._tooltip = None
 		self._tooltip_xy = None
 
-		# Resize + hover
-		self.canvas.bind("<Configure>", lambda e: self._redraw())
+		# Resize + hover. ``_on_resize`` logs the new canvas dimensions
+		# (visible under ``--debug``) and re-renders the plate at the new
+		# size; both call paths route through ``_redraw`` so the cell-size
+		# math lives in exactly one place.
+		self.canvas.bind("<Configure>", self._on_resize)
 		self.canvas.bind("<Motion>", self._on_motion)
 		self.canvas.bind("<Leave>", lambda e: self._hide_tooltip())
 
@@ -419,8 +425,31 @@ class WellPlateProgress(tk.Frame):
 		self.status_grid[(x, y)] = status
 		self._redraw_well(x, y)
 
+	# Per-well rendering bounds. Tracks the spec: at least 12 px so wells
+	# stay visible at the smallest sensible window size; at most 80 px so
+	# extreme aspect ratios don't blow up to absurd circles.
+	_WELL_PX_MIN = 12
+	_WELL_PX_MAX = 80
+	# Fraction of cell width given over to between-well spacing. Matches
+	# the spec's "1.1 accounts for spacing" formula.
+	_CELL_SPACING_FRAC = 0.10
+
+	def _on_resize(self, event):
+		"""``<Configure>`` callback. Logs the new size (for ``--debug``)
+		and re-renders the plate; the cell-size math lives in ``_redraw``."""
+		logger.debug("canvas resize: %d x %d", event.width, event.height)
+		self._redraw()
+
 	def _redraw(self):
-		"""Recompute layout (cell sizes, margins, label positions) + redraw."""
+		"""Recompute layout (cell sizes, margins, label positions) + redraw.
+
+		Cell size is derived from the LIVE canvas dimensions so the plate
+		grows and shrinks with the window. Wells render at a diameter of
+		(1 - spacing) * cell_size, clamped to ``[_WELL_PX_MIN,
+		_WELL_PX_MAX]`` so they stay legible at extreme aspect ratios.
+		The plate is centered within the usable area when one axis runs
+		out of room before the other.
+		"""
 		self.canvas.delete("all")
 		self._well_items.clear()
 		self._well_text_items.clear()
@@ -436,25 +465,46 @@ class WellPlateProgress(tk.Frame):
 			self._geom = None
 			return
 
-		avail_w = w - self._LEFT_MARGIN - self._RIGHT_MARGIN
-		avail_h = h - self._TOP_MARGIN - self._BOTTOM_MARGIN
-		cell_size = max(8, min(avail_w / self.cols, avail_h / self.rows))
-		well_radius = cell_size * 0.40
-		icon_font_size = max(7, int(well_radius * 0.9))
+		usable_w = w - self._LEFT_MARGIN - self._RIGHT_MARGIN
+		usable_h = h - self._TOP_MARGIN - self._BOTTOM_MARGIN
+
+		# Largest cell that fits in the usable area, accounting for the
+		# inter-well gap. Width-limited and height-limited candidates --
+		# the constrained axis wins.
+		spacing = 1.0 + self._CELL_SPACING_FRAC
+		cell_from_w = usable_w / (self.cols * spacing)
+		cell_from_h = usable_h / (self.rows * spacing)
+		cell_size = min(cell_from_w, cell_from_h)
+		cell_size = max(self._WELL_PX_MIN, min(self._WELL_PX_MAX, cell_size))
+
+		# Well diameter inside each cell (rest of the cell is the gap).
+		well_radius = (cell_size * (1.0 - self._CELL_SPACING_FRAC)) / 2.0
+		# Tie the per-well sequence-number font to cell size so the digits
+		# scale with the wells.
+		icon_font_size = max(8, int(cell_size // 3))
 
 		# Center the plate horizontally/vertically in the available area so
-		# the plate doesn't drift left/up when the window is wider than tall.
-		plate_w = cell_size * self.cols
-		plate_h = cell_size * self.rows
-		x_offset = self._LEFT_MARGIN + (avail_w - plate_w) / 2
-		y_offset = self._TOP_MARGIN + (avail_h - plate_h) / 2
+		# the plate doesn't drift left/up when the window is wider than
+		# tall. ``plate_w/h`` subtract the trailing-cell gap so the
+		# centering accounts for the rightmost/bottommost well actually
+		# not needing extra spacing after it.
+		gap_correction = cell_size * self._CELL_SPACING_FRAC
+		plate_w = cell_size * self.cols - gap_correction
+		plate_h = cell_size * self.rows - gap_correction
+		x_offset = self._LEFT_MARGIN + max(0, (usable_w - plate_w) / 2)
+		y_offset = self._TOP_MARGIN + max(0, (usable_h - plate_h) / 2)
+
+		# Row/column label font scales with cell size, capped so the
+		# labels don't crowd small wells (min 8 pt) or shout on big ones
+		# (cap a few pts below the in-well sequence font).
+		label_font_size = max(8, min(int(cell_size // 4), icon_font_size - 1))
 
 		# Column numbers across the top
 		for c in range(self.cols):
 			cx = x_offset + cell_size * (c + 0.5)
 			self.canvas.create_text(
 				cx, y_offset - self._TOP_MARGIN / 2,
-				text=str(c + 1), font=("TkDefaultFont", 8),
+				text=str(c + 1), font=("TkDefaultFont", label_font_size),
 			)
 
 		# Row letters down the left
@@ -462,7 +512,7 @@ class WellPlateProgress(tk.Frame):
 			cy = y_offset + cell_size * (r + 0.5)
 			self.canvas.create_text(
 				x_offset - self._LEFT_MARGIN / 2, cy,
-				text=chr(ord("A") + r), font=("TkDefaultFont", 8),
+				text=chr(ord("A") + r), font=("TkDefaultFont", label_font_size),
 			)
 
 		# Wells
