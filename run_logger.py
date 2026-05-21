@@ -217,7 +217,7 @@ class RunLogger:
 		return self.run_dir
 
 	def end(self, final_status, snapshot=None, plates_used=None, well_records=None,
-			file_suffix=None):
+			file_suffix=None, waste_context=None):
 		"""Write ``end.json``, ``summary.md``, plus one ``summary_{id}.md``
 		per plate used, then close the CSV.
 
@@ -232,6 +232,15 @@ class RunLogger:
 		never overwrite each other. A typical caller passes the End-Run
 		click's ISO timestamp with colons replaced by hyphens; legacy
 		callers can omit it for the original unsuffixed names.
+		``waste_context`` (optional) is a dict carrying waste-bin
+		bookkeeping that end.json + the Estimated-waste summary section
+		need:
+		  * waste_volume_ml_at_run_start
+		  * waste_volume_ml_at_run_end
+		  * max_waste_volume_ml
+		  * waste_warnings_fired (int)
+		  * waste_shutoffs_fired (int)
+		  * waste_resets_during_run (int)
 		"""
 		if self.run_dir is None:
 			return
@@ -258,21 +267,39 @@ class RunLogger:
 			except (ValueError, TypeError):
 				actual_total_time_s = 0.0
 
+		end_payload = {
+			"timestamp_end": timestamp_end,
+			"final_status": final_status,
+			"project_at_end": rid.get("project", ""),
+			"final_sample_id": rid.get("sample_id", ""),
+			"wells_completed": wells_completed,
+			"wells_planned": wells_planned,
+			"actual_total_time_s": round(actual_total_time_s, 3),
+			"plates_used": plates_used,
+		}
+		if waste_context:
+			# Compute waste added during this run (accounting for any
+			# mid-run resets that subtracted from the running tally).
+			start_v = float(waste_context.get("waste_volume_ml_at_run_start") or 0.0)
+			end_v = float(waste_context.get("waste_volume_ml_at_run_end") or 0.0)
+			resets = int(waste_context.get("waste_resets_during_run") or 0)
+			# Approximation: when a Reset fires mid-run, we conservatively
+			# treat the value-at-reset as "added during this run since the
+			# previous bookmark"; we don't track per-reset deltas precisely.
+			# The simple formula end - start understates if there were
+			# resets; the explicit reset count is shown alongside.
+			added = end_v - start_v
+			end_payload.update({
+				"waste_volume_ml_at_run_start": start_v,
+				"waste_volume_ml_at_run_end": end_v,
+				"waste_added_this_run_ml": round(added, 3),
+				"waste_warnings_fired": int(waste_context.get("waste_warnings_fired") or 0),
+				"waste_shutoffs_fired": int(waste_context.get("waste_shutoffs_fired") or 0),
+				"waste_resets_during_run": resets,
+			})
 		try:
 			with open(self.run_dir / f"end{suffix}.json", "w") as f:
-				json.dump(
-					{
-						"timestamp_end": timestamp_end,
-						"final_status": final_status,
-						"project_at_end": rid.get("project", ""),
-						"final_sample_id": rid.get("sample_id", ""),
-						"wells_completed": wells_completed,
-						"wells_planned": wells_planned,
-						"actual_total_time_s": round(actual_total_time_s, 3),
-						"plates_used": plates_used,
-					},
-					f, indent=2,
-				)
+				json.dump(end_payload, f, indent=2)
 		except OSError as exc:
 			logger.warning("Failed to write end.json: %s", exc)
 
@@ -289,7 +316,7 @@ class RunLogger:
 			try:
 				self._write_summary(timestamp_end, final_status, snapshot,
 					wells_completed, wells_planned, actual_total_time_s,
-					plates_used, suffix)
+					plates_used, suffix, waste_context)
 			except (OSError, Exception) as exc:
 				logger.warning("Failed to write summary.md: %s", exc)
 			# Per-plate summaries: filtered slices of the run summary for
@@ -460,6 +487,58 @@ class RunLogger:
 		self._wells = {}
 		self._committed = set()
 
+	def waste_event(self, kind, count):
+		"""Append a status="waste_warning" / "waste_shutoff" / "waste_reset"
+		row marking a waste-bin threshold or reset event.
+
+		``count`` is a 1-based counter (incremented in App-level state)
+		so log.csv readers can distinguish individual events; it shows
+		up in the row's well_id as e.g. ``warning_1``, ``shutoff_1``,
+		``reset_3``.
+		"""
+		if self.run_dir is None:
+			return
+		if kind not in ("waste_warning", "waste_shutoff", "waste_reset"):
+			logger.warning("Unknown waste-event kind %r", kind)
+			return
+		# Short suffix for the well_id column.
+		suffix = {"waste_warning": "warning",
+			"waste_shutoff": "shutoff",
+			"waste_reset": "reset"}[kind]
+		now = _now_iso()
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			f"{suffix}_{count}", 0, 0,
+			now, now, "0.000", kind,
+		])
+		self._status_counts[kind] = self._status_counts.get(kind, 0) + 1
+
+	def purge_committed(self, phase, series_index,
+			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s):
+		"""Append a status="purge_wash" or "purge_clear" row marking one
+		inter-sample purge pump phase.
+
+		``phase`` is ``"wash"`` or ``"clear"``. ``series_index`` is the
+		1-based index of the NEW sample series (so ``purge_wash_2`` means
+		"the purge run between sample 1 and sample 2"). Coordinates are
+		the waste-bin position; the needle is parked there during all
+		three phases of the purge workflow.
+		"""
+		if self.run_dir is None:
+			return
+		if phase not in ("wash", "clear"):
+			logger.warning("Unknown purge phase %r; skipping log row", phase)
+			return
+		status = f"purge_{phase}"
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			f"{status}_{series_index}", waste_x_cm, waste_y_cm,
+			start_iso, end_iso, f"{duration_s:.3f}", status,
+		])
+		self._status_counts[status] = self._status_counts.get(status, 0) + 1
+
 	def plate_swap_breadcrumb(self, swap_index):
 		"""Append a status="plate_swap" row marking a physical plate change.
 
@@ -499,7 +578,7 @@ class RunLogger:
 
 	def _write_summary(self, timestamp_end, final_status, snapshot,
 			wells_completed, wells_planned, actual_total_time_s,
-			plates_used=None, suffix=""):
+			plates_used=None, suffix="", waste_context=None):
 		m = self._metadata
 		params = m.get("parameters", {})
 		rows = int(params.get("rows", 0) or 0)
@@ -528,7 +607,7 @@ class RunLogger:
 			f"- Well size: {params.get('well_size_cm', '?')} cm",
 			f"- Pump rate: {params.get('pump_rate', '?')} "
 			f"{params.get('pump_rate_units', '')}".rstrip(),
-			f"- Volume per well: {params.get('volume_per_well_cc', '?')} cc",
+			f"- Volume per well: {params.get('volume_per_well_ml', '?')} mL",
 			f"- Starting position: "
 			f"table = {params.get('table_start_cm', 0):.3f} cm, "
 			f"carriage = {params.get('carriage_start_cm', 0):.3f} cm",
@@ -572,6 +651,47 @@ class RunLogger:
 					out.append(f"- {plate_id}: {', '.join(parts)}")
 				else:
 					out.append(f"- {plate_id}: (no plate wells)")
+			out.append("")
+
+		# Estimated waste: bin-tracking bookkeeping. The volume figures
+		# are estimates (pump_rate × pump_on_time) and may diverge from
+		# physical reality if the configured rate doesn't match the
+		# actual pump. Reset events shown so the operator can reconcile.
+		if waste_context:
+			start_v = float(waste_context.get("waste_volume_ml_at_run_start") or 0.0)
+			end_v = float(waste_context.get("waste_volume_ml_at_run_end") or 0.0)
+			max_v = float(waste_context.get("max_waste_volume_ml") or 0.0)
+			added = end_v - start_v
+			# Per-status volume sums for the breakdown.
+			discard_ml, discard_n, purge_ml, purge_n = (
+				self._compute_waste_breakdown(
+					params.get("volume_per_well_ml"),
+					params.get("peristaltic_rate_ml_per_min"),
+				)
+			)
+			out.append("## Estimated waste")
+			out.append(f"- At run start: {start_v:.1f} mL")
+			out.append(f"- Added during run: {added:.1f} mL")
+			out.append(f"  - Discards: {discard_ml:.1f} mL across {discard_n} cycles")
+			out.append(f"  - Purges: {purge_ml:.1f} mL across {purge_n} phases")
+			cap_str = f" (of {max_v:.0f} mL bin capacity)" if max_v else ""
+			out.append(f"- At run end: {end_v:.1f} mL{cap_str}")
+			out.append(f"- Warnings fired: {int(waste_context.get('waste_warnings_fired') or 0)}")
+			out.append(f"- Auto-shutoffs: {int(waste_context.get('waste_shutoffs_fired') or 0)}")
+			out.append(f"- Resets during run: {int(waste_context.get('waste_resets_during_run') or 0)}")
+			out.append("")
+
+		# Inter-sample purges: list each transition with its measured
+		# wash + clear durations. Omitted entirely when no purge rows
+		# were written (Skip checked, or single-sample run).
+		purges = self._compute_intersample_purges()
+		if purges:
+			out.append("## Inter-sample purges")
+			for prev_sid, next_sid, wash_s, clear_s in purges:
+				out.append(
+					f"- Between {prev_sid} → {next_sid}: "
+					f"{wash_s:.1f} s wash + {clear_s:.1f} s clear"
+				)
 			out.append("")
 
 		# Sample provenance section: derived entirely from log.csv so it
@@ -718,7 +838,7 @@ class RunLogger:
 			f"- Well size: {params.get('well_size_cm', '?')} cm",
 			f"- Pump rate: {params.get('pump_rate', '?')} "
 			f"{params.get('pump_rate_units', '')}".rstrip(),
-			f"- Volume per well: {params.get('volume_per_well_cc', '?')} cc",
+			f"- Volume per well: {params.get('volume_per_well_ml', '?')} mL",
 			"",
 		]
 		if samples_on_plate:
@@ -742,6 +862,106 @@ class RunLogger:
 
 		with open(self.run_dir / f"summary_{plate_id}{suffix}.md", "w") as f:
 			f.write("\n".join(out))
+
+	def _compute_waste_breakdown(self, volume_per_well_ml, peristaltic_rate_ml_per_min):
+		"""Sum waste contributions per category from log.csv.
+
+		Returns ``(discard_ml, discard_count, purge_ml, purge_count)``.
+		Discard volume per row equals ``volume_per_well_ml`` (each
+		discard cycle dispenses one configured volume to waste). Purge
+		volume per row equals ``dispense_duration_s × rate / 60``.
+		"""
+		csv_path = self.run_dir / "log.csv"
+		if not csv_path.exists():
+			return 0.0, 0, 0.0, 0
+		try:
+			vol_per_well = float(volume_per_well_ml or 0.0)
+		except (TypeError, ValueError):
+			vol_per_well = 0.0
+		try:
+			peri_rate = float(peristaltic_rate_ml_per_min or 0.0)
+		except (TypeError, ValueError):
+			peri_rate = 0.0
+		discard_ml = 0.0
+		discard_n = 0
+		purge_ml = 0.0
+		purge_n = 0
+		try:
+			with open(csv_path) as f:
+				for row in csv.DictReader(f):
+					st = row.get("status", "")
+					if st == "discarded":
+						discard_ml += vol_per_well
+						discard_n += 1
+					elif st in ("purge_wash", "purge_clear"):
+						try:
+							dur = float(row.get("dispense_duration_s") or 0.0)
+						except (TypeError, ValueError):
+							dur = 0.0
+						purge_ml += dur * (peri_rate / 60.0)
+						purge_n += 1
+		except OSError as exc:
+			logger.warning("Failed to read log.csv for waste breakdown: %s", exc)
+			return 0.0, 0, 0.0, 0
+		return discard_ml, discard_n, purge_ml, purge_n
+
+	def _compute_intersample_purges(self):
+		"""Walk log.csv and return a list of
+		``(prev_sample_id, next_sample_id, wash_s, clear_s)`` tuples,
+		one per inter-sample transition that wrote purge rows.
+
+		The purge rows themselves carry the NEW sample's sample_id (the
+		``get_current_run_id`` callback is read at write time, after the
+		Sample ID entry has been updated for the new sample). To
+		reconstruct the previous sample, we walk the CSV in order and
+		track the last seen ``completed`` row's sample_id.
+		"""
+		csv_path = self.run_dir / "log.csv"
+		if not csv_path.exists():
+			return []
+		out = []
+		last_completed_sid = ""
+		# Pending dict keyed by series_index (parsed from well_id suffix)
+		# so a wash row followed later by a clear row can pair up even
+		# if they're not strictly adjacent in the file.
+		pending = {}
+		try:
+			with open(csv_path) as f:
+				reader = csv.DictReader(f)
+				for row in reader:
+					status = row.get("status", "")
+					if status == "completed":
+						last_completed_sid = row.get("sample_id", "") or last_completed_sid
+						continue
+					if status not in ("purge_wash", "purge_clear"):
+						continue
+					try:
+						duration = float(row.get("dispense_duration_s") or 0.0)
+					except (TypeError, ValueError):
+						duration = 0.0
+					next_sid = row.get("sample_id", "") or "(unset)"
+					# series_index comes after the underscore in the well_id.
+					well = row.get("well_id", "")
+					try:
+						idx = int(well.rsplit("_", 1)[-1])
+					except ValueError:
+						idx = len(pending)
+					entry = pending.setdefault(
+						idx,
+						{"prev": last_completed_sid or "(unset)",
+							"next": next_sid, "wash": 0.0, "clear": 0.0},
+					)
+					entry["next"] = next_sid  # in case wash and clear disagree
+					if status == "purge_wash":
+						entry["wash"] = duration
+					else:
+						entry["clear"] = duration
+		except OSError as exc:
+			logger.warning("Failed to read log.csv for purge breakdown: %s", exc)
+			return []
+		for _, e in sorted(pending.items()):
+			out.append((e["prev"], e["next"], e["wash"], e["clear"]))
+		return out
 
 	def _compute_provenance(self):
 		"""Walk log.csv and return [(sample_id, [well_ids]), …] preserving

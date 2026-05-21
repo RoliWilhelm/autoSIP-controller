@@ -84,7 +84,7 @@ five run-control buttons sits at the top-right of the frame.
 - **Discard fractions** — number of initial fractions sent to the waste
   bin before plate collection begins. Bounded `[0, N − 1]`. Set to `0`
   to skip the discard phase entirely.
-- **Volume per well (cc)** — float in `[0.001, 5.0]`. The pump runs for
+- **Volume per well (mL)** — float in `[0.1, 2.0]`. The pump runs for
   `volume / pump_rate` seconds per well.
 
 **Plate Parameters.** Labware geometry and positions:
@@ -96,26 +96,45 @@ five run-control buttons sits at the top-right of the frame.
 - **Number of rows** — 1–16.
 - **Number of columns** — 1–24.
 - **Well width (cm)** — center-to-center well spacing, `[0.1, 5.0]`.
-- **Starting point (x-axis)** — X position of well A1 in cm,
+- **Starting well position (x-axis)** — X position of well A1 in cm,
   `[0.0, 20.0]`.
-- **Starting point (y-axis)** — Y position of well A1 in cm,
+- **Starting well position (y-axis)** — Y position of well A1 in cm,
   `[0.0, 15.0]`.
-- **Waste bin: table position** — X position of the waste container in
-  cm, `[0.0, 20.0]`. Required when Discard fractions > 0. The
+- **Waste bin position (x-axis)** — X position of the waste container
+  in cm, `[0.0, 20.0]`. Required when Discard fractions > 0. The
   application warns at run start if this position appears to fall
   inside the plate footprint.
-- **Waste bin: carriage position** — Y position of the waste container
+- **Waste bin position (y-axis)** — Y position of the waste container
   in cm, `[0.0, 15.0]`.
 
 **Pump.** Flow control:
 
-- **Pump rate (cc/hr)** — float in `[0.1, 600.0]`. Match the value to
+- **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
   the syringe pump's gear-set or the peristaltic pump's calibration.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`, default `1.0`. The
   dwell time *after* the pump shuts off and *before* the carriage moves
   to the next well, so a dispensed drop has time to detach cleanly.
   Longer waits improve volume consistency; shorter waits speed up the
   run.
+- **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
+  per-phase duration of the inter-sample purge (see §6.3.2). Use
+  Cleaning mode's *Purge Time Calibration* panel (§6.2.3) to measure
+  the right value for your tubing geometry.
+- **Skip inter-sample purge** (checkbox) — when checked, Continue to
+  Next Sample bypasses the three-phase purge workflow and goes
+  directly to the new sample's discard + collection. Leave unchecked
+  for multi-sample runs to prevent carryover between samples.
+- **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
+  default `100.0`. Used by the waste-bin estimator (see §6.5) to
+  convert purge-phase pump-on time into a volume contribution.
+  Calibrate this against your physical hardware for accurate
+  estimates.
+- **Max waste bin volume (mL)** — float in `[10.0, 5000.0]`, default
+  `250.0`. Capacity of your waste container. autoSIP warns at 80 %
+  and halts all pump activity at 100 % to prevent overflow. The
+  estimate is based on configured pump rates × pump-on time, not a
+  real measurement; the *Reset* button in the status bar is the
+  ground-truth mechanism after a physical empty.
 
 **Run controls** (top-right of the Automated frame):
 
@@ -166,7 +185,7 @@ those live in Automated mode.
 - **Step** selector — three radio buttons: `0.1 mm`, `1 mm`, `10 mm`
   (default `1 mm`). The step size translates directly into the cm
   units used in Automated mode (a 10 mm jog covers the same physical
-  distance as typing `1.0` cm into a Starting point field).
+  distance as typing `1.0` cm into a Starting well position field).
 - **Home** — moves both motors to origin `(0, 0)` and re-zeros the
   software's tracked angle counters. The Position readout then
   reads exactly `Position: X = 0.000 cm, Y = 0.000 cm`. Stepper
@@ -210,8 +229,8 @@ for flushing the fluid path between sample types.
 
 ![Figure: Cleaning mode panel](figures/cleaning_mode.png)
 
-- **Waste bin: table position (cm)** and **Waste bin: carriage position
-  (cm)** — the same two values that appear in Automated mode's Plate
+- **Waste bin position (x-axis)** and **Waste bin position (y-axis)**
+  — the same two values that appear in Automated mode's Plate
   Parameters → Waste bin section. Edits in either mode propagate
   automatically via shared App-level variables.
 - **Move to Waste Bin** — jogs the needle to the waste-bin coordinates.
@@ -221,6 +240,25 @@ for flushing the fluid path between sample types.
 A typical cleaning cycle: switch to Cleaning mode, click **Move to
 Waste Bin**, click **Purge**, run the pump until the fluid path is
 clear, then click **Purge** again to stop.
+
+**Purge Time Calibration** — a sub-panel below the manual Purge
+controls measures how long wash takes to fully replace one tubing
+volume so the Automated mode *Purge time* parameter (§6.2.1) reflects
+your actual hardware:
+
+1. Place the inlet line in your wash solution container.
+2. Click **Start**. The pump powers on (after the standard
+   confirmation dialog) and an *Elapsed* timer ticks every 100 ms.
+3. Watch the outlet. Click **Stop** the moment wash solution first
+   appears at the outlet — this represents one full tubing volume.
+   The measured value is shown next to *Measured*.
+4. Click **Save as Purge Time** to write the measured value to
+   Automated mode's Purge time entry. The Save button is enabled
+   only when the measured value falls within `[1.0, 600.0]` s.
+
+Use **Reset** to clear the measurement state between attempts. The
+calibration measurement is *not* recorded in `log.csv` — it is a
+setup operation, not a fractionation event.
 
 ## 6.3 Common Workflows
 
@@ -276,15 +314,15 @@ well A1 and to the waste container.
 
 7. **Enter the absolute (positive) values in Automated mode.** Switch
    to **Automated** and enter the magnitudes from step 6 in Plate
-   Parameters → `Starting point (x-axis)` and `Starting point
-   (y-axis)`. Automated mode's Y validator accepts values in
+   Parameters → `Starting well position (x-axis)` and `Starting well
+   position (y-axis)`. Automated mode's Y validator accepts values in
    `[0.0, 15.0]` cm.
 
 8. **Repeat the jog process for the waste container.** Return to
    Manual mode, jog the needle until it sits above the waste
    container's opening, and record the magnitudes. Enter them in
-   Automated mode under `Waste bin: table position` and
-   `Waste bin: carriage position`. (Cleaning mode shares these two
+   Automated mode under `Waste bin position (x-axis)` and
+   `Waste bin position (y-axis)`. (Cleaning mode shares these two
    fields, so editing in either mode updates both.)
 
 9. **Save the calibration.** File → *Save current as profile…* writes
@@ -319,7 +357,7 @@ two discard fractions each, total 100 dispense cycles = 90 collected
    - **Plate ID** — e.g., `Plate-1`.
    - **Number of fractions** — `20` (= 2 discards + 18 plate wells).
    - **Discard fractions** — `2`.
-   - **Volume per well** — your per-fraction volume in cc, e.g., `0.22`.
+   - **Volume per well** — your per-fraction volume in mL, e.g., `0.22`.
 
 2. **Verify Plate Parameters and Pump parameters** are correct from
    your calibration (§6.3.1) and your pump's gear-set or calibration
@@ -354,13 +392,43 @@ two discard fractions each, total 100 dispense cycles = 90 collected
    ID, the application prompts: *"Sample ID is still 'Tube-A12'. Did
    you mean to update it for the new sample? Continue anyway?"*
 
-10. The new sample's discard phase runs at the waste bin, then
+10. **The inter-sample purge workflow runs** (unless *Skip inter-sample
+    purge* is checked in the Pump section). The needle first moves to
+    the waste bin, then the application opens a three-step modal
+    sequence:
+
+    1. **Step 1 of 3 — wash.** Disconnect the inlet line from the
+       previous sample tube and place it in the wash solution
+       container. Click **Start Purge** to run the pump for
+       *Purge time* seconds, drawing wash through the tubing. A
+       remaining-time label ticks down once per second; the modal
+       auto-advances to Step 2 when the pump shuts off.
+    2. **Step 2 of 3 — clear.** Remove the inlet line from the wash
+       container, leaving it in air. Click **Continue** to run the
+       pump for another *Purge time* seconds, pushing air through
+       the tubing to clear residual wash. The modal auto-advances
+       to Step 3 when finished.
+    3. **Step 3 of 3 — connect new sample.** Connect the inlet line
+       to the new sample tube. Click **Begin Fractionation** to
+       proceed.
+
+    Each modal has a **Cancel** button that aborts the workflow and
+    returns the run to the auto-paused state (you can click
+    *Continue to Next Sample* again to restart from Step 1). The
+    measured wash and clear durations are recorded in `log.csv` as
+    `purge_wash` and `purge_clear` rows.
+
+    If *Skip inter-sample purge* was checked, this workflow is
+    bypassed entirely — the new sample's discard phase starts
+    immediately after the pre-flight dialogs.
+
+11. **The new sample's discard phase runs at the waste bin**, then
     collection resumes at the next available plate well in a
     **different color** (Okabe–Ito index 2 instead of 1).
 
-11. Repeat steps 6–10 for each additional sample.
+12. Repeat steps 6–11 for each additional sample.
 
-12. **When the last sample finishes, click End Run.** The save/discard
+13. **When the last sample finishes, click End Run.** The save/discard
     confirmation appears: *"Save the run logs for project '…' /
     sample '…'?"* Click **Yes** to write `end_*.json`,
     `summary_*.md`, and `summary_Plate-1_*.md` to the run directory.
@@ -623,3 +691,64 @@ does not write any `emergency_stopped` rows.
 There is no global keyboard shortcut for Terminate Run; the only
 keyboard shortcut in the application is **Space**, which toggles the
 most-recently-used pump in Manual mode.
+
+### 6.5.1 Waste-bin overflow protection
+
+autoSIP maintains an internal estimate of how full the waste container
+is and locks down pump activity before it overflows. The right side
+of the status bar shows an Erlenmeyer flask icon (green → amber →
+orange → red as it fills), a numeric readout (`{volume} / {max} mL
+({pct}%)`), and a **Reset** button.
+
+The estimate is computed by multiplying every recorded pump-on
+duration by the matching pump rate:
+
+- Each Automated-mode discard cycle adds `volume_per_well` mL
+  (configured Volume per well — by construction one full per-well
+  dispense lands in the waste bin during the discard phase).
+- Each inter-sample purge phase (wash and clear) adds
+  `phase_duration_s × peristaltic_rate_ml_per_min / 60` mL.
+- Manual-mode Purge button on→off, Cleaning-mode Purge button
+  on→off, and Purge Time Calibration Start→Stop each add the same
+  peristaltic-rate-based contribution. Manual-mode *Fractionate* is
+  **not** tracked (its dispense location is ambiguous).
+
+Because the estimate depends on the configured pump rates matching
+the physical hardware, it can drift over time. Treat it as
+"approximate" rather than "measured."
+
+**80 % warning.** When the running estimate reaches 80 % of the
+configured *Max waste bin volume*, a one-shot warning dialog fires
+and a `waste_warning` row is appended to `log.csv`. The warning
+fires once per fill cycle (it re-arms after a Reset).
+
+**100 % auto-shutoff.** When the running estimate reaches the
+configured maximum:
+
+- All pump activity halts immediately.
+- All run-control buttons are disabled except **End Run**.
+- If a Cleaning operation or Purge Time Calibration was running, its
+  controls are disabled too.
+- If an inter-sample purge phase was mid-pump, its modal stays open
+  showing a "HALTED" message; re-click the modal's action button
+  after Reset to retry the phase from the start.
+- A blocking modal appears with the recovery instructions.
+- A `waste_shutoff` row is appended to `log.csv`.
+
+**Reset workflow.** After physically emptying the waste container,
+click **Reset** in the status bar. The application asks for
+confirmation, then:
+
+- Resets `waste_volume_ml` to 0 and re-arms the 80 % warning.
+- Appends a `waste_reset` row to `log.csv` (if a run is active).
+- Clears the auto-shutoff lockdown if one was active, re-enabling
+  the run-control buttons.
+
+Reset should follow a physical empty, not precede one — the
+application has no way to verify the container is actually empty.
+
+The counter resets to 0 on every app launch as well: if you empty
+the bin between sessions and start a fresh process, the counter
+reflects the empty state automatically. If you empty mid-session,
+use Reset; if you close and reopen the app instead, the new process
+starts fresh either way.

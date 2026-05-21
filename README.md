@@ -80,14 +80,14 @@ meaning.
 Two consequences follow from that convention:
 
 - **Plate-start coordinates** (Automated mode's Plate Parameters →
-  *Starting point (x-axis)* / *Starting point (y-axis)*) are the X, Y
+  *Starting well position (x-axis)* / *Starting well position (y-axis)*) are the X, Y
   position of well **A1** of the labware on the stage, measured in cm
   from the origin. You determine these once for a given stage layout
   by jogging the needle in Manual mode (see
   [Operation Instructions §6.3.1](docs/operation_instructions.md#631-calibrating-plate-start-and-waste-bin-coordinates)).
 
-- **Waste bin position** (Plate Parameters → *Waste bin: table
-  position* / *Waste bin: carriage position*) is the X, Y position of
+- **Waste bin position** (Plate Parameters → *Waste bin position
+  (x-axis)* / *Waste bin position (y-axis)*) is the X, Y position of
   the waste container. These same two values are mirrored in
   Cleaning mode — editing them in either mode updates the other.
 
@@ -151,7 +151,7 @@ move:
   waste bin before plate collection begins (0 to N−1). Useful for
   bleeding off low-density buffer above the band of interest. Set
   to `0` to skip the discard phase entirely.
-- **Volume per well (cc)** — float in `[0.001, 5.0]`, e.g. `0.22`.
+- **Volume per well (mL)** — float in `[0.1, 2.0]`, e.g. `0.22`.
   The pump runs for `volume / pump_rate` seconds per well.
 
 **Plate Parameters** — what the labware looks like and where it sits:
@@ -163,24 +163,45 @@ move:
 - **Number of rows** — 1–16.
 - **Number of columns** — 1–24.
 - **Well width (cm)** — center-to-center well spacing, `[0.1, 5.0]`.
-- **Starting point (x-axis)** — X position of well A1, `[0.0, 20.0]` cm.
-- **Starting point (y-axis)** — Y position of well A1, `[0.0, 15.0]` cm.
-- **Waste bin: table position** — X position of the waste container
+- **Starting well position (x-axis)** — X position of well A1, `[0.0, 20.0]` cm.
+- **Starting well position (y-axis)** — Y position of well A1, `[0.0, 15.0]` cm.
+- **Waste bin position (x-axis)** — X position of the waste container
   in the same coordinate frame, `[0.0, 20.0]` cm. Required when
   Discard fractions > 0. autoSIP warns if this position appears to
   fall inside the plate footprint.
-- **Waste bin: carriage position** — Y position of the waste
+- **Waste bin position (y-axis)** — Y position of the waste
   container, `[0.0, 15.0]` cm.
 
 **Pump** — flow rate and per-well drip wait:
 
-- **Pump rate (cc/hr)** — float in `[0.1, 600.0]`. Match the value to
+- **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
   your syringe pump's gear-set or peristaltic-pump calibration.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`. The dwell time
   *after* the pump shuts off, *before* the carriage moves to the next
   well, so the dispensed drop has time to detach cleanly. Default
   `1.0`. Longer waits improve volume consistency; shorter waits
   speed up the run.
+- **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
+  duration of each of two pump phases run between samples: one
+  flushing wash solution through the tubing, one pushing air through
+  to clear the wash. Use Cleaning mode's *Purge Time Calibration*
+  panel to measure the right value for your tubing.
+- **Skip inter-sample purge** (checkbox) — when checked, Continue to
+  Next Sample goes straight to the new sample's discard phase with
+  no tubing flush. Leave unchecked for multi-sample runs to prevent
+  carryover.
+- **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
+  default `100.0`. Used by the waste-bin estimator to convert
+  purge-phase pump-on time into a volume contribution.
+- **Max waste bin volume (mL)** — float in `[10.0, 5000.0]`, default
+  `250.0`. autoSIP's waste-bin estimator warns when the running
+  estimate reaches 80 % of this capacity and **halts all pump
+  activity** at 100 %. The estimate is based on configured pump rates
+  × pump-on time, not a real measurement; the *Reset* button in the
+  status bar is the ground-truth mechanism after a physical empty.
+  The counter resets to 0 on every app launch (so closing and
+  reopening the app produces a fresh counter — empty the bin first
+  if you want the new counter to reflect reality).
 
 **Run controls** (top-right of the Automated frame):
 
@@ -233,7 +254,7 @@ the fraction's position within that sample.
 - **Step** selector — `0.1 mm`, `1 mm`, or `10 mm`. The step size
   translates directly to the cm units used in Automated mode (a
   10 mm jog covers the same distance as typing `1.0` cm into a
-  Starting point field).
+  Starting well position field).
 - **Home** — moves both motors to origin `(0, 0)` and re-zeros the
   software's tracked angle counters.
 - **Position readout** — `Position: X = 0.000 cm, Y = 0.000 cm`,
@@ -271,8 +292,8 @@ persists across application restarts.
 Cleaning mode strips Automated mode down to two inputs and two
 actions:
 
-- **Waste bin: table position (cm)** and **Waste bin: carriage
-  position (cm)** — the same two values that appear in Automated
+- **Waste bin position (x-axis)** and **Waste bin position
+  (y-axis)** — the same two values that appear in Automated
   mode's Plate Parameters → Waste bin section. Edits propagate
   in both directions automatically.
 - **Move to Waste Bin** — jogs the needle to the waste-bin

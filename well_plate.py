@@ -616,7 +616,7 @@ class WellPlateProgress(tk.Frame):
 
 	def _update_current_label(self, x, y):
 		self.current_lbl["text"] = (
-			f"Dispensing into {_well_id(x, y)} — {self.volume_per_well:g} cc"
+			f"Dispensing into {_well_id(x, y)} — {self.volume_per_well:g} mL"
 		)
 
 	def _update_header_count(self):

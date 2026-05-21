@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from time import sleep, strftime
+from time import monotonic, sleep, strftime
 from math import floor
 import argparse
 import json
@@ -467,9 +467,24 @@ class FractionatorState:
 	# Post-pump drip wait, seconds. Used to be coupled to pump_time;
 	# now operator-controlled via the Drip wait time entry.
 	drip_wait_time: float = 1.0
-	# Volume per well in cc -- displayed by the WellPlateProgress header
-	# ("Dispensing into B4 — 0.22 cc"). Stored explicitly because pump_time
-	# alone can't recover it without also knowing pump_rate.
+	# Inter-sample purge: each of two pump phases (wash, then air-clear)
+	# runs for this many seconds between samples. Bypassed when
+	# skip_intersample_purge is True.
+	purge_time: float = 30.0
+	skip_intersample_purge: bool = False
+	# Peristaltic-pump flow rate (mL/min) for purge-claim pumping (Manual
+	# Purge, Cleaning Purge, Purge Time Calibration, inter-sample purges).
+	# Frozen at run start so mid-run edits don't retroactively recompute
+	# waste deltas for in-flight pumps.
+	peristaltic_rate_ml_per_min: float = 100.0
+	# Max waste-bin capacity in mL. Auto-shutoff fires when the estimated
+	# waste volume reaches this number.
+	max_waste_volume_ml: float = 250.0
+	# Volume per well in mL -- displayed by the WellPlateProgress header
+	# ("Dispensing into B4 — 0.22 mL"). Stored explicitly because pump_time
+	# alone can't recover it without also knowing pump_rate. 1 mL = 1 cm^3
+	# = 1 cc; the unit label was updated for clarity but every numerical
+	# value is unchanged.
 	volume_per_well: float = 0.0
 
 	# Current needle position in the well grid
@@ -624,6 +639,33 @@ class StatusBarFrame(tk.Frame):
 		self.pump_state_lbl = tk.Label(self, text="Pump: idle", anchor="w")
 		self.pump_state_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
+		# Waste-bin fill indicator + Reset button. Packed AFTER terminate
+		# with side=RIGHT so they appear to its LEFT in the final layout
+		# (pack-RIGHT items stack right-to-left in order of packing).
+		# Reset is rightmost-of-the-trio, then readout, then flask canvas.
+		self.waste_reset_btn = ttk.Button(self, text="Reset",
+			command=app.reset_waste_counter)
+		self.waste_reset_btn.pack(side=tk.RIGHT, padx=(4, 6), pady=2)
+		Tooltip(self.waste_reset_btn,
+			"Reset waste counter (click after physically emptying the "
+			"waste container).")
+		self.waste_readout_lbl = tk.Label(self, text="0 / 250 mL (0%)",
+			anchor="e", fg="#4CAF50")
+		self.waste_readout_lbl.pack(side=tk.RIGHT, padx=(2, 4))
+		self.waste_canvas = tk.Canvas(self, width=28, height=42,
+			highlightthickness=0, bd=0)
+		self.waste_canvas.pack(side=tk.RIGHT, padx=(4, 2), pady=1)
+		# Build the flask geometry once; _draw_flask updates fill height
+		# and color on every set_waste_state call without recreating items.
+		self._flask_fill_item = None
+		self._flask_outline_item = None
+		self._flask_pulse_thick = False
+		self._flask_pulse_after = None
+		self._flask_outline_pts = self._compute_flask_outline()
+		self._build_flask()
+		# Initial paint (0% green).
+		self.set_waste_state(0.0, 250.0)
+
 		# Per-phase status fills the middle of the bar. The previous
 		# diagnostic-log mirror (status_var fed by StringVarLogHandler) has
 		# been removed -- the `autosip` logger continues writing to stdout
@@ -666,6 +708,120 @@ class StatusBarFrame(tk.Frame):
 			text = f"Pump: {claimant.title()} (OFF)"
 		self.pump_canvas.itemconfig(self._pump_dot, fill=color)
 		self.pump_state_lbl["text"] = text
+
+	# -- Waste-bin indicator -----------------------------------------
+
+	_FLASK_W = 28
+	_FLASK_H = 42
+	# Coordinates are tuned for the 28x42 canvas. The flask is a closed
+	# polygon: lip (top), neck (narrow), shoulders (slanted), body (wide),
+	# base (bottom).
+	_FLASK_NECK_HALF = 4    # half-width of the neck
+	_FLASK_BODY_HALF = 11   # half-width of the body
+	_FLASK_LIP_Y = 4        # top of the neck
+	_FLASK_NECK_BOT_Y = 12  # bottom of the neck / top of the shoulder
+	_FLASK_SHOULDER_BOT_Y = 22  # bottom of the slanted shoulder / top of body
+	_FLASK_BODY_BOT_Y = 38  # bottom of the body
+	# Fill threshold colors (Material Design swatches).
+	_FILL_GREEN = "#4CAF50"
+	_FILL_AMBER = "#FFC107"
+	_FILL_ORANGE = "#FF9800"
+	_FILL_RED = "#F44336"
+
+	def _compute_flask_outline(self):
+		"""Return the closed flask-outline polygon points."""
+		cx = self._FLASK_W / 2
+		return [
+			(cx - self._FLASK_NECK_HALF, self._FLASK_LIP_Y),
+			(cx + self._FLASK_NECK_HALF, self._FLASK_LIP_Y),
+			(cx + self._FLASK_NECK_HALF, self._FLASK_NECK_BOT_Y),
+			(cx + self._FLASK_BODY_HALF, self._FLASK_SHOULDER_BOT_Y),
+			(cx + self._FLASK_BODY_HALF, self._FLASK_BODY_BOT_Y),
+			(cx - self._FLASK_BODY_HALF, self._FLASK_BODY_BOT_Y),
+			(cx - self._FLASK_BODY_HALF, self._FLASK_SHOULDER_BOT_Y),
+			(cx - self._FLASK_NECK_HALF, self._FLASK_NECK_BOT_Y),
+		]
+
+	def _build_flask(self):
+		"""Create the flask Canvas items (outline + fill placeholder).
+		``set_waste_state`` mutates them on every update."""
+		flat = [v for p in self._flask_outline_pts for v in p]
+		# Fill rectangle drawn BEFORE outline so the outline overlays it.
+		self._flask_fill_item = self.waste_canvas.create_rectangle(
+			0, 0, 0, 0, fill=self._FILL_GREEN, outline="",
+		)
+		self._flask_outline_item = self.waste_canvas.create_polygon(
+			flat, fill="", outline="#333333", width=1.5,
+		)
+
+	def _fill_color_for(self, pct):
+		"""Material-style traffic-light color by percentage (0..1+)."""
+		if pct < 0.60:
+			return self._FILL_GREEN
+		if pct < 0.80:
+			return self._FILL_AMBER
+		if pct < 0.95:
+			return self._FILL_ORANGE
+		return self._FILL_RED
+
+	def set_waste_state(self, volume_ml, max_ml):
+		"""Repaint the flask + readout with the new volume."""
+		max_ml = max_ml if max_ml > 0 else 1.0
+		pct = max(0.0, min(1.0, volume_ml / max_ml))
+		color = self._fill_color_for(pct)
+
+		# Fill rectangle clipped within the flask BODY (we don't try to
+		# follow the angled shoulders for the fill; just paint the wide
+		# body region proportionally). Anything above SHOULDER_BOT_Y is
+		# the "neck" zone and stays empty for visual cleanliness.
+		body_top = self._FLASK_SHOULDER_BOT_Y
+		body_bot = self._FLASK_BODY_BOT_Y
+		body_h = body_bot - body_top
+		fill_h = body_h * pct
+		fill_top = body_bot - fill_h
+		cx = self._FLASK_W / 2
+		self.waste_canvas.coords(
+			self._flask_fill_item,
+			cx - self._FLASK_BODY_HALF + 1, fill_top,
+			cx + self._FLASK_BODY_HALF - 1, body_bot - 1,
+		)
+		self.waste_canvas.itemconfig(self._flask_fill_item, fill=color)
+
+		# Outline pulses thicker when >= 95% to draw the eye.
+		if pct >= 0.95:
+			self._start_flask_pulse()
+		else:
+			self._stop_flask_pulse()
+			self.waste_canvas.itemconfig(self._flask_outline_item, width=1.5)
+
+		# Numeric readout. Match text color to fill color.
+		self.waste_readout_lbl["text"] = (
+			f"{volume_ml:.0f} / {max_ml:.0f} mL ({pct:.0%})"
+		)
+		self.waste_readout_lbl["fg"] = color
+
+	def _start_flask_pulse(self):
+		if self._flask_pulse_after is not None:
+			return
+		self._flask_pulse_thick = False
+
+		def _tick():
+			self._flask_pulse_thick = not self._flask_pulse_thick
+			self.waste_canvas.itemconfig(
+				self._flask_outline_item,
+				width=3 if self._flask_pulse_thick else 1.5,
+			)
+			self._flask_pulse_after = self.after(500, _tick)
+
+		_tick()
+
+	def _stop_flask_pulse(self):
+		if self._flask_pulse_after is not None:
+			try:
+				self.after_cancel(self._flask_pulse_after)
+			except Exception:
+				pass
+			self._flask_pulse_after = None
 
 
 class AutomatedFrame(tk.Frame):
@@ -765,13 +921,16 @@ class AutomatedFrame(tk.Frame):
 		)
 		self.discard_te = TextEntry(runp, "Discard fractions:")
 		self.discard_te.grid(row=4, column=0, sticky="we")
+		# First-launch default: 0 (no discard phase). A persisted last_used
+		# value, if any, overrides this via set_values() after __init__.
+		self.discard_te.set("0")
 		Tooltip(
 			self.discard_te.entry,
 			"Initial fractions pumped to a waste bin before plate collection "
 			"begins (e.g., low-density buffer above the band of interest). "
 			"Set 0 to skip the discard phase.",
 		)
-		self.vol_text_entry = TextEntry(runp, "Volume per well (cc, e.g., 0.22):")
+		self.vol_text_entry = TextEntry(runp, "Volume per well (mL, e.g., 0.22):")
 		self.vol_text_entry.grid(row=5, column=0, sticky="we")
 
 		# ----- Plate Parameters (middle) ---------------------------------
@@ -804,23 +963,25 @@ class AutomatedFrame(tk.Frame):
 		self.ws_text_entry = TextEntry(platep, "Well width (cm):")
 		self.ws_text_entry.grid(row=3, column=0, sticky="we")
 
-		self.table_te = TextEntry(platep, "Starting point (x-axis):")
+		self.table_te = TextEntry(platep, "Starting well position (x-axis):")
 		self.table_te.grid(row=4, column=0, sticky="we")
-		self.carriage_te = TextEntry(platep, "Starting point (y-axis):")
+		self.carriage_te = TextEntry(platep, "Starting well position (y-axis):")
 		self.carriage_te.grid(row=5, column=0, sticky="we")
 
-		tk.Label(platep, text="Waste bin:", anchor="w").grid(
-			row=6, column=0, sticky="w", pady=(6, 0))
+		# Waste bin entries -- the previous "Waste bin:" sub-header is gone
+		# because each entry's own label now reads "Waste bin position
+		# (x-axis):" / "(y-axis):" without the cm-range suffix. Validation
+		# still enforces the X [0, 20] / Y [0, 15] bounds.
 		self.waste_table_te = TextEntry(
-			platep, "  table position (cm, 0–20):",
+			platep, "Waste bin position (x-axis):",
 			textvariable=app.waste_bin_table_var,
 		)
-		self.waste_table_te.grid(row=7, column=0, sticky="we")
+		self.waste_table_te.grid(row=6, column=0, sticky="we", pady=(6, 0))
 		self.waste_carriage_te = TextEntry(
-			platep, "  carriage position (cm, 0–15):",
+			platep, "Waste bin position (y-axis):",
 			textvariable=app.waste_bin_carriage_var,
 		)
-		self.waste_carriage_te.grid(row=8, column=0, sticky="we")
+		self.waste_carriage_te.grid(row=7, column=0, sticky="we")
 		Tooltip(
 			self.waste_table_te.entry,
 			"Waste-bin position used during the discard phase. "
@@ -839,7 +1000,7 @@ class AutomatedFrame(tk.Frame):
 		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=2)
 		pumpp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
 		pumpp.grid_columnconfigure(0, weight=1)
-		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (cc/hr — see your syringe pump spec):")
+		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (mL/hr — see your syringe pump spec):")
 		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
 		self.drip_wait_te = TextEntry(pumpp, "Drip wait time (s):")
 		self.drip_wait_te.grid(row=1, column=0, sticky="we")
@@ -848,6 +1009,51 @@ class AutomatedFrame(tk.Frame):
 			self.drip_wait_te.entry,
 			"Wait time between pump-off and moving to the next well. "
 			"Longer waits improve volume consistency; shorter waits run faster.",
+		)
+		self.purge_time_te = TextEntry(
+			pumpp, "Purge time (s):", textvariable=app.purge_time_var,
+		)
+		self.purge_time_te.grid(row=2, column=0, sticky="we")
+		Tooltip(
+			self.purge_time_te.entry,
+			"Per-phase duration of the inter-sample purge. Two pump phases "
+			"run between samples (wash then air-clear), each lasting this "
+			"many seconds. Use Cleaning mode's Purge Time Calibration to "
+			"measure the right value for your tubing.",
+		)
+		self.skip_purge_chk = ttk.Checkbutton(
+			pumpp, text="Skip inter-sample purge",
+			variable=app.skip_intersample_purge_var,
+		)
+		self.skip_purge_chk.grid(row=3, column=0, sticky="w", pady=(2, 0))
+		Tooltip(
+			self.skip_purge_chk,
+			"When checked, Continue to Next Sample goes straight to the "
+			"new sample's discard phase with no tubing flush. Leave "
+			"unchecked for multi-sample runs to prevent carryover.",
+		)
+		self.peristaltic_rate_te = TextEntry(
+			pumpp, "Peristaltic pump rate (mL/min):",
+			textvariable=app.peristaltic_rate_var,
+		)
+		self.peristaltic_rate_te.grid(row=4, column=0, sticky="we")
+		Tooltip(
+			self.peristaltic_rate_te.entry,
+			"Flow rate of the peristaltic pump used for purges. Drives "
+			"the waste-bin estimate during purge operations (inter-sample "
+			"purges, Manual Purge, Cleaning Purge, Purge Time Calibration).",
+		)
+		self.max_waste_te = TextEntry(
+			pumpp, "Max waste bin volume (mL):",
+			textvariable=app.max_waste_volume_var,
+		)
+		self.max_waste_te.grid(row=5, column=0, sticky="we")
+		Tooltip(
+			self.max_waste_te.entry,
+			"Capacity of your waste container. autoSIP warns at 80% and "
+			"halts all pump activity at 100% to prevent overflow. The "
+			"estimate is based on configured pump rates × pump-on time, "
+			"not a real measurement.",
 		)
 
 		# Begin Fractionation -- the run-launch button. (The previous
@@ -929,6 +1135,9 @@ class AutomatedFrame(tk.Frame):
 			"well_size": self.ws_text_entry,
 			"pump_rate": self.pump_rate_text_entry,
 			"drip_wait_time": self.drip_wait_te,
+			"purge_time": self.purge_time_te,
+			"peristaltic_rate": self.peristaltic_rate_te,
+			"max_waste_volume": self.max_waste_te,
 			"volume_per_well": self.vol_text_entry,
 			"table_start": self.table_te,
 			"carriage_start": self.carriage_te,
@@ -940,11 +1149,18 @@ class AutomatedFrame(tk.Frame):
 		self.app.end_run()
 
 	def get_values(self):
-		"""Snapshot every persistable field as a {field: str} dict."""
+		"""Snapshot every persistable field as a {field: str} dict.
+
+		The Skip checkbox is serialized as ``"true"`` / ``"false"`` so the
+		same string-typed config file can round-trip it; ``set_values``
+		parses it back into the BooleanVar.
+		"""
 		out = {}
 		for field in config_store.FIELDS:
 			if field == "labware_file":
 				out[field] = self.json_entry.get()
+			elif field == "skip_intersample_purge":
+				out[field] = "true" if self.app.skip_intersample_purge_var.get() else "false"
 			else:
 				w = self._entry_for(field)
 				out[field] = w.get() if w is not None else ""
@@ -952,15 +1168,26 @@ class AutomatedFrame(tk.Frame):
 
 	def set_values(self, values):
 		"""Populate fields from a {field: str} dict. Missing keys leave the
-		corresponding widget untouched."""
+		corresponding widget untouched.
+
+		Empty-string values are also treated as "leave alone" so the
+		first-launch defaults set in ``__init__`` (e.g. Discard fractions = 0,
+		Plate ID = "Plate-1") survive a load_last_used() that returns a
+		dict with mostly-empty fields (which happens when only some
+		fields have ever been edited or when the volume-bounds migration
+		rewrites config.json).
+		"""
 		for field in config_store.FIELDS:
 			if field not in values:
 				continue
 			val = values[field] or ""
+			if val == "":
+				continue
 			if field == "labware_file":
 				self.json_entry.delete(0, tk.END)
-				if val:
-					self.json_entry.insert(0, val)
+				self.json_entry.insert(0, val)
+			elif field == "skip_intersample_purge":
+				self.app.skip_intersample_purge_var.set(val == "true")
 			else:
 				w = self._entry_for(field)
 				if w is not None:
@@ -1046,7 +1273,9 @@ class AutomatedFrame(tk.Frame):
 			self.project_te, self.sample_id_te, self.plate_id_te,
 			self.n_fractions_te, self.discard_te,
 			self.rows_text_entry, self.cols_text_entry, self.ws_text_entry,
-			self.pump_rate_text_entry, self.drip_wait_te, self.vol_text_entry,
+			self.pump_rate_text_entry, self.drip_wait_te, self.purge_time_te,
+			self.peristaltic_rate_te, self.max_waste_te,
+			self.vol_text_entry,
 			self.table_te, self.carriage_te,
 			self.waste_table_te, self.waste_carriage_te,
 		):
@@ -1166,6 +1395,9 @@ class AutomatedFrame(tk.Frame):
 			(self.carriage_te, validation.carriage_pos),
 			(self.pump_rate_text_entry, validation.pump_rate),
 			(self.drip_wait_te, validation.drip_wait_time),
+			(self.purge_time_te, validation.purge_time),
+			(self.peristaltic_rate_te, validation.peristaltic_rate),
+			(self.max_waste_te, validation.max_waste_volume),
 		]
 		parsed = []
 		errors = []
@@ -1183,7 +1415,7 @@ class AutomatedFrame(tk.Frame):
 		if not errors:
 			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
 				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v,
-				drip_v) = parsed
+				drip_v, purge_v, peri_v, max_waste_v) = parsed
 			capacity = rows_v * cols_v
 
 			# N must fit on the plate
@@ -1274,6 +1506,10 @@ class AutomatedFrame(tk.Frame):
 			waste_bin_carriage=waste_y if waste_y is not None else 0.0,
 			table_start=table_v, carriage_start=carriage_v,
 			drip_wait_time=drip_v,
+			purge_time=purge_v,
+			skip_intersample_purge=self.app.skip_intersample_purge_var.get(),
+			peristaltic_rate_ml_per_min=peri_v,
+			max_waste_volume_ml=max_waste_v,
 		)
 
 	# -- WellPlateProgress shortcuts (called by App's state machine) ----
@@ -1362,7 +1598,7 @@ class ManualFrame(tk.Frame):
 		self.step_var = tk.DoubleVar(value=0.1)  # default 1 mm
 		step_row = tk.Frame(jog)
 		step_row.grid(row=1, column=0, sticky="w", pady=(0, 6))
-		tk.Label(step_row, text="Step:").pack(side=tk.LEFT, padx=(0, 6))
+		tk.Label(step_row, text="Step size selector:").pack(side=tk.LEFT, padx=(0, 6))
 		for label, value in self._STEPS:
 			tk.Radiobutton(
 				step_row, text=label, variable=self.step_var, value=value,
@@ -1415,6 +1651,43 @@ class ManualFrame(tk.Frame):
 		self.purge_space_lbl = tk.Label(
 			purge_wrap, text="(Space)", fg="gray40",
 		)
+
+		# ---- Position Calibration ----
+		# Captures the current X, Y position and writes it to Automated
+		# mode's Starting Well Position or Waste Bin Position fields,
+		# replacing the error-prone "read off the readout and re-type
+		# in the other mode" workflow. The Cleaning-mode Waste bin
+		# entries share variables with Automated's so the waste-bin
+		# save propagates to both modes.
+		cal = tk.LabelFrame(self, text="Position Calibration", padx=8, pady=8)
+		cal.grid(row=2, column=0, sticky="new", padx=4, pady=(0, 4))
+		cal.grid_columnconfigure(0, weight=1)
+
+		tk.Label(cal, anchor="w", justify="left", wraplength=540, text=(
+			"Use the jog controls above to position the needle, then click "
+			"the corresponding button to save the current position as a "
+			"parameter used by Automated mode."
+		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+
+		tk.Label(cal, anchor="w", justify="left",
+			text="1. Position the needle over well A1 of your plate.",
+		).grid(row=1, column=0, sticky="w")
+		self._cal_position_var = tk.StringVar(
+			value="   Current position: X = 0.000 cm, Y = 0.000 cm")
+		tk.Label(cal, textvariable=self._cal_position_var,
+			anchor="w").grid(row=2, column=0, sticky="we", padx=(20, 0))
+		primary_button(
+			cal, text="Save as Starting Well Position",
+			command=self._save_starting_well_position,
+		).grid(row=3, column=0, sticky="w", padx=(20, 0), pady=(2, 8))
+
+		tk.Label(cal, anchor="w", justify="left",
+			text="2. Position the needle over the waste bin opening.",
+		).grid(row=4, column=0, sticky="w")
+		primary_button(
+			cal, text="Save as Waste Bin Position",
+			command=self._save_waste_bin_position,
+		).grid(row=5, column=0, sticky="w", padx=(20, 0), pady=(2, 0))
 
 	def refresh(self):
 		"""Re-sync the position readout and clear the per-visit pump-confirm
@@ -1469,15 +1742,84 @@ class ManualFrame(tk.Frame):
 		self.app.carriage_motor.tare()
 		self.refresh_position_readout()
 
+	def _current_position_cm(self):
+		"""Live (x, y) in cm from the motor angles. Y is in motor frame
+		(negative as the carriage moves down from origin); callers
+		converting to the Automated-mode user frame use ``abs(y)``."""
+		x = self.app.table_motor.get_angle() * self.app.table_motor.cm_per_deg
+		y = self.app.carriage_motor.get_angle() * self.app.carriage_motor.cm_per_deg
+		return x, y
+
+	def _save_position_to(self, table_field, carriage_field, label):
+		"""Common save path: read current position, defensively bounds-
+		check against the Automated-mode validator ranges, write to the
+		target StringVars, surface a status confirmation.
+		"""
+		x_motor, y_motor = self._current_position_cm()
+		# Automated mode's Y validator is [0, 15]; Manual frames the
+		# Y axis as motor-negative for "down from origin", so take the
+		# absolute value for the saved parameter.
+		x_save = x_motor
+		y_save = abs(y_motor)
+		# Defensive bounds check. Manual mode's jog soft-limits should
+		# already keep us in range; this just guards against the
+		# unlikely case where the readout drifted outside.
+		if not (validation.TABLE_POS_MIN <= x_save <= validation.TABLE_POS_MAX):
+			messagebox.showerror(
+				"Position out of range",
+				f"Position out of range: X-axis must be between "
+				f"{validation.TABLE_POS_MIN} and {validation.TABLE_POS_MAX} cm. "
+				f"Current value: {x_save:.3f} cm. Jog the needle into "
+				"range before saving.",
+				parent=self,
+			)
+			return
+		if not (validation.CARRIAGE_POS_MIN <= y_save <= validation.CARRIAGE_POS_MAX):
+			messagebox.showerror(
+				"Position out of range",
+				f"Position out of range: Y-axis must be between "
+				f"{validation.CARRIAGE_POS_MIN} and "
+				f"{validation.CARRIAGE_POS_MAX} cm. Current value: "
+				f"{y_save:.3f} cm. Jog the needle into range before saving.",
+				parent=self,
+			)
+			return
+		table_field.set(f"{x_save:.3f}")
+		carriage_field.set(f"{y_save:.3f}")
+		self.app.set_status(
+			f"{label} saved: X = {x_save:.3f} cm, Y = {y_save:.3f} cm"
+		)
+
+	def _save_starting_well_position(self):
+		af = self.app.automated_frame
+		self._save_position_to(af.table_te, af.carriage_te,
+			"Starting well position")
+
+	def _save_waste_bin_position(self):
+		# These TextEntries are bound to App-level shared StringVars, so
+		# writing through either widget updates both Automated and
+		# Cleaning mode's mirrored fields.
+		af = self.app.automated_frame
+		self._save_position_to(af.waste_table_te, af.waste_carriage_te,
+			"Waste bin position")
+
 	def refresh_position_readout(self):
 		"""Re-render the Position: X = ..., Y = ... label from live motor
 		angles. Called by ``_jog``, ``_home_clicked``, and ``refresh`` so
 		any motion the user can initiate from this frame updates the
-		display immediately.
+		display immediately. Also updates the Position Calibration
+		``Current position`` line so the operator can read the live
+		coordinates while jogging toward a save target.
 		"""
 		x = self.app.table_motor.get_angle() * self.app.table_motor.cm_per_deg
 		y = self.app.carriage_motor.get_angle() * self.app.carriage_motor.cm_per_deg
 		self.position_var.set(f"Position: X = {x:.3f} cm, Y = {y:.3f} cm")
+		# Mirror to the calibration panel's live readout. Show the
+		# absolute Y so it matches what gets saved (Automated mode's
+		# Y validator expects [0, 15]).
+		self._cal_position_var.set(
+			f"   Current position: X = {x:.3f} cm, Y = {abs(y):.3f} cm"
+		)
 
 	def _set_space_hint(self, pump_name):
 		"""Show the "(Space)" hint label next to ``pump_name``'s button and
@@ -1527,12 +1869,12 @@ class CleaningFrame(tk.Frame):
 		bin_frame.grid(row=0, column=0, columnspan=2, sticky="we", padx=2, pady=(2, 4))
 		bin_frame.grid_columnconfigure(0, weight=1)
 		self.waste_table_te = TextEntry(
-			bin_frame, "Waste bin: table position (cm):",
+			bin_frame, "Waste bin position (x-axis):",
 			textvariable=app.waste_bin_table_var,
 		)
 		self.waste_table_te.grid(row=0, column=0, sticky="we")
 		self.waste_carriage_te = TextEntry(
-			bin_frame, "Waste bin: carriage position (cm):",
+			bin_frame, "Waste bin position (y-axis):",
 			textvariable=app.waste_bin_carriage_var,
 		)
 		self.waste_carriage_te.grid(row=1, column=0, sticky="we")
@@ -1547,6 +1889,162 @@ class CleaningFrame(tk.Frame):
 			style="PumpOff.TButton", cursor="hand2",
 		)
 		self.purge_btn.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+
+		# Purge Time Calibration sub-panel. Measures how long wash takes
+		# to fully replace one tubing-volume so the operator can save the
+		# resulting value as Automated mode's Purge time parameter.
+		cal = tk.LabelFrame(self, text="Purge Time Calibration",
+			padx=8, pady=6)
+		cal.grid(row=3, column=0, columnspan=2, sticky="we", padx=2, pady=(8, 2))
+		cal.grid_columnconfigure(0, weight=1)
+
+		tk.Label(cal, anchor="w", justify="left", wraplength=540, text=(
+			"Measure how long it takes wash solution to flow through your "
+			"tubing setup. The result can be saved as the Purge time "
+			"parameter used by Automated mode.\n"
+			"  1. Place the inlet line in your wash solution container.\n"
+			"  2. Click Start. The pump runs and a timer begins.\n"
+			"  3. Watch the outlet. Click Stop the moment wash first "
+			"appears at the outlet — this represents one full tubing volume."
+		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+
+		self._cal_elapsed_var = tk.StringVar(value="Elapsed: 0.0 s")
+		tk.Label(cal, textvariable=self._cal_elapsed_var,
+			anchor="w").grid(row=1, column=0, sticky="we")
+
+		cal_btn_row = tk.Frame(cal)
+		cal_btn_row.grid(row=2, column=0, sticky="w", pady=(4, 4))
+		self.cal_start_btn = ttk.Button(cal_btn_row, text="Start",
+			command=self._cal_start, style="Primary.TButton")
+		self.cal_start_btn.pack(side=tk.LEFT, padx=(0, 4))
+		self.cal_stop_btn = ttk.Button(cal_btn_row, text="Stop",
+			command=self._cal_stop)
+		self.cal_stop_btn.pack(side=tk.LEFT, padx=4)
+		self.cal_reset_btn = ttk.Button(cal_btn_row, text="Reset",
+			command=self._cal_reset)
+		self.cal_reset_btn.pack(side=tk.LEFT, padx=4)
+
+		self._cal_measured_var = tk.StringVar(value="Measured: -- s")
+		tk.Label(cal, textvariable=self._cal_measured_var,
+			anchor="w").grid(row=3, column=0, sticky="we", pady=(2, 0))
+		self.cal_save_btn = ttk.Button(cal, text="Save as Purge Time",
+			command=self._cal_save, style="Primary.TButton")
+		self.cal_save_btn.grid(row=4, column=0, sticky="w", pady=(2, 0))
+
+		# Calibration state
+		self._cal_t_start = None
+		self._cal_measured_s = None
+		self._cal_tick_after = None
+		self._cal_set_buttons_idle()
+
+	# -- Calibration helpers ------------------------------------------
+
+	def _cal_set_buttons_idle(self):
+		self.cal_start_btn.state(["!disabled"])
+		self.cal_stop_btn.state(["disabled"])
+		self.cal_reset_btn.state(["!disabled"])
+		self._cal_save_button_sync()
+
+	def _cal_save_button_sync(self):
+		"""Enable Save only when a measured value is in [PURGE_TIME_MIN, MAX]."""
+		ok = (
+			self._cal_measured_s is not None
+			and validation.PURGE_TIME_MIN <= self._cal_measured_s <= validation.PURGE_TIME_MAX
+		)
+		if ok:
+			self.cal_save_btn.state(["!disabled"])
+		else:
+			self.cal_save_btn.state(["disabled"])
+
+	def _cal_start(self):
+		"""Power the pump on (with the standard confirmation) and start
+		the elapsed-time tick. The Purge-claim machinery is reused so the
+		relay flips through the same code path as the manual Purge button."""
+		pc = self.app.pump_controller
+		# If something else holds the claim, bail out -- the user sees
+		# the interlock state on the Purge button.
+		if not pc.is_available_for("purge"):
+			messagebox.showinfo(
+				"Pump in use",
+				"The Fractionate claim is currently active. Stop it before "
+				"running the calibration timer.",
+				parent=self,
+			)
+			return
+		# Reuse _handle_pump_click so the operator gets the same "verify
+		# the peristaltic pump is plugged in" confirmation as any other
+		# Purge activation.
+		if pc.claimant != "purge" or not pc.relay_on:
+			self.app._handle_pump_click("purge", parent=self)
+			if not (pc.claimant == "purge" and pc.relay_on):
+				# User cancelled the confirm dialog or the relay didn't come on.
+				return
+		self._cal_t_start = monotonic()
+		self.cal_start_btn.state(["disabled"])
+		self.cal_stop_btn.state(["!disabled"])
+		self._tick_cal()
+
+	def _tick_cal(self):
+		if self._cal_t_start is None:
+			return
+		elapsed = monotonic() - self._cal_t_start
+		self._cal_elapsed_var.set(f"Elapsed: {elapsed:.1f} s")
+		self._cal_tick_after = self.after(100, self._tick_cal)
+
+	def _cal_stop(self):
+		"""Power the pump off, record elapsed, freeze the timer."""
+		if self._cal_t_start is None:
+			return
+		elapsed = monotonic() - self._cal_t_start
+		self._cal_t_start = None
+		if self._cal_tick_after is not None:
+			try:
+				self.after_cancel(self._cal_tick_after)
+			except Exception:
+				pass
+			self._cal_tick_after = None
+		pc = self.app.pump_controller
+		if pc.claimant == "purge" and pc.relay_on:
+			pc.set_relay(False)
+			pc.release()
+		self._cal_measured_s = elapsed
+		self._cal_elapsed_var.set(f"Elapsed: {elapsed:.1f} s")
+		self._cal_measured_var.set(f"Measured: {elapsed:.1f} s")
+		self.cal_stop_btn.state(["disabled"])
+		self.cal_start_btn.state(["!disabled"])
+		self._cal_save_button_sync()
+
+	def _cal_reset(self):
+		"""Clear measurement state without running the pump. If the pump
+		is currently on (mid-measurement), it stays on; only the UI
+		resets. The operator can call _cal_stop separately."""
+		# If we're mid-timer, stop the tick but leave pump alone (caller
+		# decides). For simplicity here, we stop everything.
+		if self._cal_t_start is not None:
+			self._cal_stop()
+		self._cal_t_start = None
+		self._cal_measured_s = None
+		self._cal_elapsed_var.set("Elapsed: 0.0 s")
+		self._cal_measured_var.set("Measured: -- s")
+		self._cal_save_button_sync()
+
+	def _cal_save(self):
+		"""Write the measured value to App.purge_time_var so Automated
+		mode's Purge time entry picks it up."""
+		if self._cal_measured_s is None:
+			return
+		val = f"{self._cal_measured_s:.1f}"
+		self.app.purge_time_var.set(val)
+		try:
+			config_store.save_last_used(self.app.automated_frame.get_values())
+		except OSError as exc:
+			logger.warning("Failed to persist purge_time: %s", exc)
+		messagebox.showinfo(
+			"Purge time saved",
+			f"Purge time saved: {val} s. Automated mode's Purge time "
+			"parameter is now set to this value.",
+			parent=self,
+		)
 
 	def refresh(self):
 		self.waste_table_te.clear_error()
@@ -1645,6 +2143,41 @@ class App(tk.Tk):
 		# them in its constructor.
 		self.waste_bin_table_var = tk.StringVar()
 		self.waste_bin_carriage_var = tk.StringVar()
+		# Inter-sample purge time. Owned at App level so the Cleaning-mode
+		# Purge Time Calibration panel can write a measured value here and
+		# Automated mode's Purge time entry picks it up immediately.
+		self.purge_time_var = tk.StringVar(value="30.0")
+		# Skip flag for the inter-sample purge workflow. BooleanVar so the
+		# Skip checkbox in Automated mode binds directly to it.
+		self.skip_intersample_purge_var = tk.BooleanVar(value=False)
+		# Peristaltic pump rate (mL/min) used by all purge-claim waste
+		# tracking. Live value -- mid-run edits affect subsequent waste
+		# calculations.
+		self.peristaltic_rate_var = tk.StringVar(value="100.0")
+		# Max waste-bin volume in mL. Live value driving the auto-shutoff
+		# and the status-bar fill-level indicator.
+		self.max_waste_volume_var = tk.StringVar(value="250.0")
+
+		# Waste-bin estimate. Initialized to 0 on every launch and NOT
+		# persisted to disk -- users typically empty the bin between
+		# sessions, so a fresh process starts with a fresh counter.
+		# Reset() also returns this to 0.
+		self.waste_volume_ml = 0.0
+		self.waste_warned_80 = False
+		self._waste_full = False
+		# Counters surfaced in end.json + summary.md.
+		self._waste_warnings_fired = 0
+		self._waste_shutoffs_fired = 0
+		self._waste_resets_during_run = 0
+		self._waste_volume_at_run_start = 0.0
+		# Timestamp the purge claim's relay turned on; consumed by the
+		# pump-state-change subscriber to compute the on-duration when the
+		# relay flips off. None when no purge-claim pumping is in flight.
+		self._purge_relay_on_at = None
+		# When True, the active inter-sample purge phase has been halted by
+		# a waste-bin auto-shutoff; the tick callback uses this to stop
+		# pumping mid-phase. Reset by waste-reset.
+		self._purge_halted_for_waste = False
 
 		# Root layout: 4 rows (header / separator / mode body / status) in
 		# a single column that expands with the window. The separator
@@ -1719,6 +2252,21 @@ class App(tk.Tk):
 		# on the focused widget type (passes through to text-entry widgets
 		# so users can still type a space character there).
 		self.bind_all("<KeyPress-space>", self._on_space)
+
+		# Arrow-key jog shortcuts (Manual mode only). Same self-gating as
+		# the space binding -- handler returns immediately when not in
+		# Manual mode or when the focused widget is a text entry, so
+		# typing in Sample ID etc. still moves the text cursor normally.
+		for keysym, axis, sign in (
+			("Up",    "y", +1),
+			("Down",  "y", -1),
+			("Left",  "x", -1),
+			("Right", "x", +1),
+		):
+			self.bind_all(
+				f"<KeyPress-{keysym}>",
+				lambda e, a=axis, s=sign: self._on_arrow(e, a, s),
+			)
 
 		# Seed the run-control button row to its idle state.
 		self._update_run_control_buttons()
@@ -2001,7 +2549,8 @@ class App(tk.Tk):
 				snap = self.automated_frame.progress.snapshot()
 				self.run_logger.end("manual_abort", snapshot=snap,
 				plates_used=self.state.plates_used,
-				well_records=self.state.well_records)
+				well_records=self.state.well_records,
+				waste_context=self._waste_context())
 			except Exception as exc:
 				logger.warning("Run logger failed to close on window close: %s", exc)
 			self.run_logger = None
@@ -2116,7 +2665,8 @@ class App(tk.Tk):
 			snap = self.automated_frame.progress.snapshot()
 			self.run_logger.end("emergency_stopped", snapshot=snap,
 				plates_used=self.state.plates_used,
-				well_records=self.state.well_records)
+				well_records=self.state.well_records,
+				waste_context=self._waste_context())
 			self.run_logger = None
 
 		# Run-control buttons reflect the new idle/estopped state.
@@ -2185,13 +2735,16 @@ class App(tk.Tk):
 	# -- Run-control button state machine -------------------------------
 
 	def _classify_ui_state(self):
-		"""Map (state.state, is_paused, _terminated) to a single UI bucket.
+		"""Map (state.state, is_paused, _terminated, _waste_full) to a
+		single UI bucket.
 
 		idle / running / paused_manual / paused_total / paused_plate_full /
-		estopped
+		estopped / waste_full
 		"""
 		if self._terminated:
 			return "estopped"
+		if self._waste_full:
+			return "waste_full"
 		s = self.state
 		if s.state == "plate_full":
 			return "paused_plate_full"
@@ -2258,6 +2811,14 @@ class App(tk.Tk):
 			pause_text = "Paused"
 			cont_plate_state = tk.NORMAL
 			cont_state = tk.NORMAL if s.plate_full_with_sample_complete else tk.DISABLED
+			end_state = tk.NORMAL
+		elif bucket == "waste_full":
+			# Waste-bin auto-shutoff: everything disabled except End Run.
+			# Reset (in the status bar) is the recovery path; clicking
+			# Reset clears _waste_full and we re-classify normally.
+			ret_state = tk.DISABLED
+			pause_state = tk.DISABLED
+			pause_text = "Paused"
 			end_state = tk.NORMAL
 		elif bucket == "estopped":
 			ret_state = tk.DISABLED
@@ -2378,6 +2939,22 @@ class App(tk.Tk):
 		self._handle_pump_click(self.last_pump_used, parent=self.manual_frame)
 		return "break"
 
+	def _on_arrow(self, event, axis, sign):
+		"""Arrow-key jog shortcut: routes to ManualFrame._jog so soft
+		limits, position readout, and motor entry points stay in one
+		place. Same self-gating as ``_on_space`` -- skip when not in
+		Manual mode and skip when the focused widget is a text entry
+		(so the cursor moves normally inside Sample ID etc.).
+		Returns ``"break"`` so ttk's default arrow-key focus traversal
+		doesn't also fire."""
+		if self.mode != "Manual":
+			return None
+		focused = self.focus_get()
+		if isinstance(focused, (tk.Entry, tk.Text)):
+			return None
+		self.manual_frame._jog(axis, sign)
+		return "break"
+
 	def _pump_confirm_text(self, name):
 		"""Body text for the relay-activation askyesno dialog."""
 		if name == "fractionate":
@@ -2400,9 +2977,199 @@ class App(tk.Tk):
 		)
 
 	def _on_pump_state_change(self, claimant, relay_on):
-		"""PumpController callback: sync the status bar + per-frame buttons."""
+		"""PumpController callback: sync the status bar + per-frame buttons.
+
+		Also tracks waste-bin contributions for purge-claim pumping: when
+		the relay turns on under a purge claim, record the start time;
+		when it turns off (or the claim is released with the relay on),
+		multiply the on-duration by the peristaltic rate and add the
+		result to ``waste_volume_ml`` via ``_add_waste``. Fractionate-claim
+		pumping is tracked separately at its emit points (discard cycles
+		in ``stop_pump``, inter-sample purges in ``_run_pump_phase``).
+		"""
 		self.status_bar.set_pump_state(claimant, relay_on)
 		self._refresh_pump_buttons()
+
+		# Purge-claim waste tracking.
+		if claimant == "purge" and relay_on and self._purge_relay_on_at is None:
+			self._purge_relay_on_at = monotonic()
+		elif (claimant != "purge" or not relay_on) and self._purge_relay_on_at is not None:
+			delta_s = monotonic() - self._purge_relay_on_at
+			rate_ml_per_s = self._live_peristaltic_rate() / 60.0
+			self._add_waste(delta_s * rate_ml_per_s)
+			self._purge_relay_on_at = None
+
+	def _live_peristaltic_rate(self):
+		"""Read the peristaltic rate from the App-level StringVar with a
+		fallback to the FractionatorState snapshot (set at run start)
+		and finally to a safe default. Used by waste-tracking callsites
+		that fire outside an active run."""
+		raw = self.peristaltic_rate_var.get()
+		try:
+			val = float(raw)
+		except (TypeError, ValueError):
+			val = self.state.peristaltic_rate_ml_per_min or 100.0
+		if val <= 0:
+			val = 100.0
+		return val
+
+	def _live_max_waste_volume(self):
+		"""Same idea for max bin capacity."""
+		raw = self.max_waste_volume_var.get()
+		try:
+			val = float(raw)
+		except (TypeError, ValueError):
+			val = self.state.max_waste_volume_ml or 250.0
+		if val <= 0:
+			val = 250.0
+		return val
+
+	def _add_waste(self, ml):
+		"""Increment the running waste estimate by ``ml`` and fire the
+		warning + auto-shutoff state transitions if thresholds were
+		crossed. ``ml`` may be 0 or slightly negative due to floating-
+		point drift; clamp at 0 silently.
+		"""
+		if ml <= 0:
+			# Refresh the status-bar indicator even on a zero update --
+			# the max-waste-volume field may have been edited and the
+			# percentage display needs to reflect that.
+			self._refresh_waste_indicator()
+			return
+		self.waste_volume_ml += ml
+		max_v = self._live_max_waste_volume()
+		# 80% warning: fires once per fill cycle. Reset clears the flag.
+		if not self.waste_warned_80 and self.waste_volume_ml >= 0.80 * max_v:
+			self.waste_warned_80 = True
+			self._waste_warnings_fired += 1
+			if self.run_logger is not None:
+				self.run_logger.waste_event(
+					"waste_warning", self._waste_warnings_fired,
+				)
+			pct = self.waste_volume_ml / max_v if max_v else 0.0
+			messagebox.showwarning(
+				"Waste Bin Approaching Capacity",
+				f"Waste bin is at {self.waste_volume_ml:.1f} mL of "
+				f"{max_v:.0f} mL configured capacity ({pct:.0%}). "
+				"Please empty the waste container soon. Click Reset Waste "
+				"Counter (next to the waste indicator in the status bar) "
+				"after emptying.",
+				parent=self,
+			)
+		# 100% auto-shutoff. Fires whenever we cross the threshold; the
+		# _waste_full flag prevents the lockdown UI from re-firing on
+		# subsequent _add_waste calls before Reset.
+		if self.waste_volume_ml >= max_v and not self._waste_full:
+			self._trigger_auto_shutoff(max_v)
+		self._refresh_waste_indicator()
+
+	def _trigger_auto_shutoff(self, max_v):
+		"""Hard halt: kill the pump, lock the UI, log the event, show a
+		blocking modal. Reset clears the lockdown."""
+		self._waste_full = True
+		self._waste_shutoffs_fired += 1
+		# Cancel any in-flight pump task. Force the relay off; release
+		# the purge claim if we hold it (fractionate claim persists --
+		# the run is still ongoing, just paused).
+		if self.state.taskId is not None:
+			try:
+				self.after_cancel(self.state.taskId)
+			except Exception:
+				pass
+			self.state.taskId = None
+		self.pump_controller.set_relay(False)
+		if self.pump_controller.claimant == "purge":
+			self.pump_controller.release()
+		# Signal any in-flight inter-sample purge phase to halt its tick.
+		self._purge_halted_for_waste = True
+		# Lock the run-control buttons (only End Run stays enabled).
+		self._update_run_control_buttons()
+		# Lock the Cleaning-mode Purge + Calibration controls.
+		cf = getattr(self, "cleaning_frame", None)
+		if cf is not None:
+			try:
+				cf.cal_start_btn.state(["disabled"])
+				cf.cal_stop_btn.state(["disabled"])
+				cf.move_btn.state(["disabled"])
+			except Exception:
+				pass
+		self.set_status(
+			"WASTE BIN FULL — empty container and click Reset Waste Counter."
+		)
+		if self.run_logger is not None:
+			self.run_logger.waste_event(
+				"waste_shutoff", self._waste_shutoffs_fired,
+			)
+		messagebox.showwarning(
+			"⚠ Waste Bin Full",
+			(
+				f"The estimated waste volume has reached the configured "
+				f"maximum ({max_v:.0f} mL). All pump activity has been "
+				"halted to prevent overflow.\n\n"
+				"  1. Empty the waste container.\n"
+				"  2. Click Reset Waste Counter in the status bar.\n"
+				"  3. Resume your run (or End Run if you'd rather stop)."
+			),
+			parent=self,
+		)
+
+	def reset_waste_counter(self):
+		"""Reset workflow triggered by the status-bar button. Confirms
+		with the operator, logs the event, clears the lockdown if one
+		was active, and refreshes the indicator."""
+		if not messagebox.askyesno(
+			"Reset waste bin counter",
+			"Reset waste bin counter to 0 mL?\n\n"
+			"Confirm that you have emptied the waste container.",
+			parent=self,
+		):
+			return
+		self.waste_volume_ml = 0.0
+		self.waste_warned_80 = False
+		# Only count resets that happen during a run so end.json reports
+		# a sensible "Resets during run" tally.
+		if self.run_logger is not None:
+			self._waste_resets_during_run += 1
+			self.run_logger.waste_event(
+				"waste_reset", self._waste_resets_during_run,
+			)
+		if self._waste_full:
+			self._waste_full = False
+			self._purge_halted_for_waste = False
+			# Re-enable Cleaning controls. (Run-control buttons will
+			# re-classify naturally via _update_run_control_buttons.)
+			cf = getattr(self, "cleaning_frame", None)
+			if cf is not None:
+				try:
+					cf.cal_start_btn.state(["!disabled"])
+					cf.move_btn.state(["!disabled"])
+					cf._cal_save_button_sync()
+				except Exception:
+					pass
+			self._update_run_control_buttons()
+			self.set_status("Waste bin reset. Resume your run or End Run.")
+		self._refresh_waste_indicator()
+
+	def _refresh_waste_indicator(self):
+		"""Tell the status bar to repaint the flask + readout from the
+		current waste_volume_ml / max_waste_volume_ml. Safe to call
+		before the status bar is fully constructed (no-op in that case)."""
+		if hasattr(self, "status_bar") and hasattr(self.status_bar, "set_waste_state"):
+			self.status_bar.set_waste_state(
+				self.waste_volume_ml, self._live_max_waste_volume(),
+			)
+
+	def _waste_context(self):
+		"""Dict passed to ``RunLogger.end`` so end.json + summary.md get
+		the waste-bin bookkeeping for the run."""
+		return {
+			"waste_volume_ml_at_run_start": self._waste_volume_at_run_start,
+			"waste_volume_ml_at_run_end": self.waste_volume_ml,
+			"max_waste_volume_ml": self._live_max_waste_volume(),
+			"waste_warnings_fired": self._waste_warnings_fired,
+			"waste_shutoffs_fired": self._waste_shutoffs_fired,
+			"waste_resets_during_run": self._waste_resets_during_run,
+		}
 
 	def _refresh_pump_buttons(self):
 		"""Push the controller's current state to every frame's pump buttons."""
@@ -2486,7 +3253,9 @@ class App(tk.Tk):
 			project, sample_id_at_start, plate_id_at_start,
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
-			table_start, carriage_start, drip_wait_time):
+			table_start, carriage_start, drip_wait_time,
+			purge_time, skip_intersample_purge,
+			peristaltic_rate_ml_per_min, max_waste_volume_ml):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
 		Cross-field rules (N ≤ rows·cols, D < N, waste-bin coords required
@@ -2548,6 +3317,68 @@ class App(tk.Tk):
 			f"  (discard phase: {_fmt_hms(discard_seconds)}; "
 			f"plate phase: {_fmt_hms(plate_seconds)})"
 		)
+		# Inter-sample purge line: shown only when the run could have a
+		# transition (always shown; the user may not click Continue to
+		# Next Sample, but the configuration applies if they do). The
+		# wording is symmetric (skipped vs. configured), and the
+		# runtime estimate is annotated with a caveat about the
+		# user-controlled pauses since those are open-ended.
+		if skip_intersample_purge:
+			purge_line = (
+				"  • Inter-sample purge: SKIPPED (no tubing flush between "
+				"samples)\n"
+			)
+			runtime_caveat = ""
+		else:
+			purge_line = (
+				f"  • Inter-sample purge: {purge_time:g} s wash + "
+				f"{purge_time:g} s clear per transition\n"
+				f"    (each transition also requires three user-controlled "
+				f"pauses to swap the line.)\n"
+			)
+			runtime_caveat = (
+				f"  Note: inter-sample purges add ~{2 * purge_time:g} s of "
+				f"pumping per transition plus user-controlled pause time; "
+				f"not included in the estimate above.\n"
+			)
+
+		# Waste-bin projection: estimate the discard + purge contributions
+		# for one sample's worth of activity, then call out the bin status
+		# at start and projected end. If the operator runs multiple
+		# samples, each additional sample adds the same per-sample amount.
+		waste_now = self.waste_volume_ml
+		waste_max = max_waste_volume_ml
+		discard_per_sample_ml = discard_fractions * volume
+		# Per-transition purge volume: 2 phases × purge_time × peristaltic
+		# rate. If Skip is checked, the purges don't fire so we don't add
+		# anything for transitions.
+		per_transition_ml = (
+			0.0 if skip_intersample_purge
+			else 2.0 * purge_time * (peristaltic_rate_ml_per_min / 60.0)
+		)
+		projected_end_ml = waste_now + discard_per_sample_ml
+		start_pct = waste_now / waste_max if waste_max else 0.0
+		waste_projection_lines = [
+			f"  • Waste bin: {waste_now:.0f} mL of {waste_max:.0f} mL "
+			f"({start_pct:.0%}) at start.\n",
+			f"    Estimated added per sample: ~{discard_per_sample_ml:.1f} mL "
+			f"from discards.\n",
+		]
+		if per_transition_ml > 0:
+			waste_projection_lines.append(
+				f"    Each inter-sample transition adds ~{per_transition_ml:.1f} mL "
+				f"(2 × {purge_time:g} s × {peristaltic_rate_ml_per_min:g} mL/min).\n"
+			)
+		waste_projection_lines.append(
+			f"    Projected after first sample: ~{projected_end_ml:.0f} mL "
+			f"of {waste_max:.0f} mL.\n"
+		)
+		if projected_end_ml > waste_max:
+			waste_projection_lines.append(
+				"    ⚠ Projected to exceed max bin capacity during this "
+				"run. Consider emptying the bin before starting.\n"
+			)
+		waste_projection = "".join(waste_projection_lines)
 		summary = (
 			f"Begin fractionation:\n"
 			f"  • Project: {project}\n"
@@ -2556,11 +3387,14 @@ class App(tk.Tk):
 			f"  • Total fractions: {number_of_fractions}\n"
 			f"{discard_lines}"
 			f"{plate_line}"
-			f"  • Volume per fraction: {volume:g} cc\n"
-			f"  • Pump rate: {pump_rate:g} cc/hr\n"
+			f"  • Volume per fraction: {volume:g} mL\n"
+			f"  • Pump rate: {pump_rate:g} mL/hr\n"
 			f"  • Drip wait: {drip_wait_time:g} s\n"
+			f"{purge_line}"
+			f"{waste_projection}"
 			f"  • Estimated total runtime: {_fmt_hms(estimated_total_s)}\n"
 			f"{runtime_breakdown}\n"
+			f"{runtime_caveat}"
 			"\n"
 			"Before continuing:\n"
 			f"{waste_reminder}"
@@ -2591,7 +3425,19 @@ class App(tk.Tk):
 		s.well_size = well_size
 		s.pump_time = pump_time
 		s.drip_wait_time = drip_wait_time
+		s.purge_time = purge_time
+		s.skip_intersample_purge = skip_intersample_purge
+		s.peristaltic_rate_ml_per_min = peristaltic_rate_ml_per_min
+		s.max_waste_volume_ml = max_waste_volume_ml
 		s.volume_per_well = volume
+
+		# Snapshot the waste counter at run start so end.json can report
+		# how much waste this specific run added (independent of
+		# mid-session resets).
+		self._waste_volume_at_run_start = self.waste_volume_ml
+		self._waste_warnings_fired = 0
+		self._waste_shutoffs_fired = 0
+		self._waste_resets_during_run = 0
 		s.project = project
 		s.current_sample_id = sample_id_at_start
 		s.current_plate_id = plate_id_at_start
@@ -2614,7 +3460,8 @@ class App(tk.Tk):
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, estimated_total_s,
-			drip_wait_time)
+			drip_wait_time, purge_time, skip_intersample_purge,
+			peristaltic_rate_ml_per_min, max_waste_volume_ml)
 
 		# Remember the Sample ID at this series's start so Continue-to-Next-
 		# Sample can prompt if the operator forgot to update it.
@@ -2629,7 +3476,8 @@ class App(tk.Tk):
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, estimated_total_s,
-			drip_wait_time):
+			drip_wait_time, purge_time, skip_intersample_purge,
+			peristaltic_rate_ml_per_min, max_waste_volume_ml):
 		"""Build the run metadata and create a RunLogger directory."""
 		af = self.automated_frame
 		metadata = {
@@ -2646,9 +3494,13 @@ class App(tk.Tk):
 				"cols": cols,
 				"well_size_cm": well_size,
 				"pump_rate": pump_rate,
-				"pump_rate_units": "cc/hr",
+				"pump_rate_units": "mL/hr",
 				"drip_wait_time_s": drip_wait_time,
-				"volume_per_well_cc": volume,
+				"purge_time_s": purge_time,
+				"skip_intersample_purge": skip_intersample_purge,
+				"peristaltic_rate_ml_per_min": peristaltic_rate_ml_per_min,
+				"max_waste_volume_ml": max_waste_volume_ml,
+				"volume_per_well_ml": volume,
 				"table_start_cm": table_start,
 				"carriage_start_cm": carriage_start,
 				"number_of_fractions": number_of_fractions,
@@ -2751,6 +3603,12 @@ class App(tk.Tk):
 			idx = s.discards_done + 1
 			if self.run_logger is not None:
 				self.run_logger.discard_dispense_end(s.series_index, idx)
+			# Discard cycles pump to the waste bin via the syringe pump.
+			# By construction pump_time = volume / (pump_rate / 3600), so
+			# the volume delivered in this dispense equals volume_per_well
+			# mL (1 mL = 1 cc; pump_rate is in mL/hr). Charge that to the
+			# waste-bin estimate.
+			self._add_waste(s.volume_per_well)
 			self.set_status(
 				f"Discard {idx} of {s.discards_at_series_start}: drip wait..."
 			)
@@ -2999,7 +3857,8 @@ class App(tk.Tk):
 				self.run_logger.end(final_status, snapshot=snap,
 					plates_used=self.state.plates_used,
 					well_records=self.state.well_records,
-					file_suffix=end_ts)
+					file_suffix=end_ts,
+					waste_context=self._waste_context())
 			else:
 				discarded_run_dir = self._last_run_path
 				# Close the CSV cleanly so the partial log is well-formed
@@ -3058,17 +3917,17 @@ class App(tk.Tk):
 		if s.state != "total_reached":
 			return
 
-		# Pre-flight 1: Sample ID unchanged warning
+		# Pre-flight 1: Sample ID unchanged warning. The dialog binds to
+		# the same StringVar as the main Sample ID entry, so edits in
+		# either widget propagate in real time. Re-read the value after
+		# the dialog so the rest of this method uses whatever the
+		# operator (possibly) changed it to.
 		current_sample = self.automated_frame.sample_id_te.get().strip()
 		prior_sample = getattr(self, "_series_start_sample_id", s.current_sample_id)
 		if current_sample == prior_sample:
-			if not messagebox.askyesno(
-				"Sample ID unchanged",
-				f"Sample ID is still '{current_sample}'. Did you mean to update "
-				"it for the new sample? Continue anyway?",
-				parent=self,
-			):
+			if not self._show_sample_id_confirm_dialog():
 				return
+			current_sample = self.automated_frame.sample_id_te.get().strip()
 
 		# Re-read D from the entry box so a mid-run edit takes effect on the
 		# NEW series (per spec: "Only NEW wells filled after the edit ...
@@ -3108,26 +3967,48 @@ class App(tk.Tk):
 				parent=self,
 			)
 
-		# Start the new series. Snapshot the per-series D so labels and
-		# the discard-cycle count come from the value that was set when
-		# the operator clicked Continue, not whatever the entry holds
-		# later (e.g. if they edit it again mid-series).
+		# Optional inter-sample purge workflow: three modal steps with
+		# pump phases between them, gated by Skip inter-sample purge.
+		# The purge keeps the run "logically paused" (state stays at
+		# total_reached) until Phase 3 confirms; then _commit_new_series
+		# runs the new sample's discard + collection.
+		def _proceed():
+			self._commit_new_series(current_sample, new_d_val)
+
+		if s.skip_intersample_purge:
+			_proceed()
+		else:
+			self._start_intersample_purge(
+				new_sample_id=current_sample,
+				next_series_index=s.series_index + 1,
+				on_done=_proceed,
+			)
+
+	def _commit_new_series(self, sample_id, discards_val):
+		"""Bookkeeping + first move of a new sample series. Called by
+		``continue_to_next_sample`` either directly (when skip-purge is on)
+		or via the purge workflow's on_done callback (after the three
+		modal phases complete)."""
+		s = self.state
+		# Snapshot the per-series D so labels and the discard-cycle count
+		# come from the value that was set when the operator clicked
+		# Continue, not whatever the entry holds later.
 		s.series_index += 1
 		s.discards_done = 0
 		s.wells_collected = 0
 		s.current_series_sequence = 0
-		s.discards_at_series_start = new_d_val
+		s.discards_at_series_start = discards_val
 		s.is_paused = False
-		self._series_start_sample_id = current_sample
+		self._series_start_sample_id = sample_id
 		logger.info("Starting series %d: sample %s (D=%d)",
-			s.series_index, current_sample, new_d_val)
+			s.series_index, sample_id, discards_val)
 
 		# Resume breadcrumb -- documents the sample handoff in log.csv.
 		if self.run_logger is not None:
 			next_x, next_y = self._next_well_after_resume()
 			self.run_logger.resume_breadcrumb(next_x, next_y)
 
-		self.set_status(f"Starting series {s.series_index}: sample {current_sample}")
+		self.set_status(f"Starting series {s.series_index}: sample {sample_id}")
 
 		if s.discards_at_series_start > 0:
 			s.phase = "discard"
@@ -3149,6 +4030,239 @@ class App(tk.Tk):
 
 		self._update_run_control_buttons()
 
+	def _start_intersample_purge(self, new_sample_id, next_series_index, on_done):
+		"""Run the three-phase inter-sample purge workflow.
+
+		1. Move the needle to the waste bin.
+		2. Phase 1 modal -- swap line into wash; on Start Purge, pump for
+		   ``state.purge_time`` seconds with a live remaining-time label,
+		   then auto-advance to Phase 2.
+		3. Phase 2 modal -- remove line from wash; on Continue, pump for
+		   another ``purge_time`` seconds, then auto-advance to Phase 3.
+		4. Phase 3 modal -- connect new sample tube; on Begin Fractionation,
+		   close the modal and invoke ``on_done``.
+
+		Any Cancel button aborts the workflow and leaves the run in its
+		``total_reached`` auto-paused state. Escape inside a pump-phase
+		modal closes the modal and triggers ``terminate_run``.
+
+		Each completed pump phase emits a ``purge_wash`` / ``purge_clear``
+		row to log.csv via ``RunLogger.purge_committed``. Partial pump
+		phases (cancelled mid-flush) are logged with their actual measured
+		duration -- the goal is forensic accuracy, not "did the operator
+		finish a textbook flush".
+		"""
+		s = self.state
+		duration = float(s.purge_time)
+
+		# Move to waste bin first. Synchronous via move_to_positions;
+		# the relay claim ("fractionate") is still held from start_run.
+		self.set_status("Moving to waste bin for inter-sample purge…")
+		self.move_to_positions(
+			table_dist=s.waste_bin_table,
+			carriage_dist=s.waste_bin_carriage,
+		)
+		self.set_status("Inter-sample purge: awaiting user.")
+
+		# Shared state across the three phases.
+		ctx = {"cancelled": False, "modal": None, "after_id": None}
+
+		def _cancel_and_close():
+			ctx["cancelled"] = True
+			if ctx["after_id"] is not None:
+				try:
+					self.after_cancel(ctx["after_id"])
+				except Exception:
+					pass
+				ctx["after_id"] = None
+			# Force the pump off in case we cancelled mid-phase.
+			self.pump_controller.set_relay(False)
+			if ctx["modal"] is not None:
+				try:
+					ctx["modal"].destroy()
+				except Exception:
+					pass
+				ctx["modal"] = None
+			self.set_status(
+				f"Inter-sample purge cancelled. Sample {s.current_sample_id} "
+				"still at auto-pause; click Continue to Next Sample to retry."
+			)
+
+		def _build_modal(title, body_text, action_label, action_cmd):
+			dlg = tk.Toplevel(self)
+			dlg.title(title)
+			dlg.transient(self)
+			dlg.resizable(False, False)
+			dlg.protocol("WM_DELETE_WINDOW", _cancel_and_close)
+			# Escape -> trigger terminate_run (heavy hammer per spec).
+			dlg.bind("<Escape>", lambda _e: (_cancel_and_close(), self.terminate_run()))
+
+			body = tk.Frame(dlg, padx=14, pady=12)
+			body.pack(fill=tk.BOTH, expand=True)
+			msg_lbl = tk.Label(body, text=body_text, justify="left",
+				wraplength=460, anchor="w")
+			msg_lbl.pack(anchor="w", pady=(0, 10))
+
+			# Progress label hidden until the pump phase starts; the
+			# action button swaps to a progress label once clicked.
+			progress_lbl = tk.Label(body, text="", justify="left",
+				anchor="w", fg=PALETTE["fg_text"])
+			progress_lbl.pack(anchor="w", pady=(0, 8))
+
+			btn_row = tk.Frame(body)
+			btn_row.pack(fill=tk.X)
+			cancel_btn = ttk.Button(btn_row, text="Cancel",
+				command=_cancel_and_close, style="Danger.TButton")
+			cancel_btn.pack(side=tk.LEFT, padx=4)
+			action_btn = ttk.Button(btn_row, text=action_label,
+				command=action_cmd, style="Primary.TButton")
+			action_btn.pack(side=tk.RIGHT, padx=4)
+
+			ctx["modal"] = dlg
+			dlg.update_idletasks()
+			# Center over the main window.
+			x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+			y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+			dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+			dlg.grab_set()
+			return dlg, msg_lbl, progress_lbl, action_btn
+
+		def _run_pump_phase(phase, progress_lbl, action_btn, phase_text, on_complete):
+			"""Pump for ``duration`` seconds; tick the remaining label every
+			second; log a purge_{phase} row on completion (or partial).
+			"""
+			if ctx["cancelled"]:
+				return
+			action_btn.state(["disabled"])
+			start = monotonic()
+			start_iso = datetime.now().isoformat(timespec="milliseconds")
+			self.pump_controller.set_relay(True)
+
+			def _tick():
+				if ctx["cancelled"]:
+					return
+				# Waste-bin auto-shutoff aborted this phase mid-pump.
+				# Halt + freeze the label; the user resolves via Reset
+				# and clicks the action button again to retry.
+				if self._purge_halted_for_waste:
+					ctx["after_id"] = None
+					self.pump_controller.set_relay(False)
+					progress_lbl.config(text=(
+						f"{phase_text}: HALTED at {monotonic() - start:.0f} s "
+						"(waste bin full; click Reset Waste Counter and "
+						"re-click the action button)"
+					))
+					action_btn.state(["!disabled"])
+					return
+				elapsed = monotonic() - start
+				remaining = max(0.0, duration - elapsed)
+				progress_lbl.config(text=(
+					f"{phase_text}: {elapsed:.0f} s elapsed / "
+					f"{remaining:.0f} s remaining"
+				))
+				if remaining > 0:
+					ctx["after_id"] = self.after(250, _tick)
+					return
+				# Done. Turn pump off, log the row, charge the waste
+				# estimate (duration × peristaltic rate), hand off.
+				ctx["after_id"] = None
+				self.pump_controller.set_relay(False)
+				end_iso = datetime.now().isoformat(timespec="milliseconds")
+				if self.run_logger is not None:
+					self.run_logger.purge_committed(
+						phase=phase, series_index=next_series_index,
+						waste_x_cm=s.waste_bin_table,
+						waste_y_cm=s.waste_bin_carriage,
+						start_iso=start_iso, end_iso=end_iso,
+						duration_s=elapsed,
+					)
+				ml = elapsed * (self._live_peristaltic_rate() / 60.0)
+				self._add_waste(ml)
+				on_complete()
+			_tick()
+
+		def _phase_one():
+			body_text = (
+				"Disconnect the inlet line from the previous sample's "
+				"centrifuge tube and place it in the wash solution container."
+				"\n\n"
+				f"Click Start Purge to run the pump for {duration:g} seconds, "
+				"drawing wash solution through the tubing. The needle is "
+				f"currently at the waste bin "
+				f"({s.waste_bin_table:g} cm, {s.waste_bin_carriage:g} cm); "
+				"wash will dispense there."
+			)
+
+			def _start_purge():
+				_run_pump_phase(
+					phase="wash",
+					progress_lbl=progress_lbl,
+					action_btn=action_btn,
+					phase_text="Purging tubing with wash solution",
+					on_complete=lambda: (
+						ctx["modal"].destroy() if ctx["modal"] else None,
+						_phase_two() if not ctx["cancelled"] else None,
+					),
+				)
+
+			_, _msg, progress_lbl, action_btn = _build_modal(
+				"Inter-sample Purge — Step 1 of 3",
+				body_text, "Start Purge", _start_purge,
+			)
+
+		def _phase_two():
+			if ctx["cancelled"]:
+				return
+			body_text = (
+				"Remove the inlet line from the wash solution container, "
+				"leaving it in air."
+				"\n\n"
+				f"Click Continue to run the pump for {duration:g} seconds, "
+				"pushing air through the tubing to clear residual wash."
+			)
+
+			def _start_clear():
+				_run_pump_phase(
+					phase="clear",
+					progress_lbl=progress_lbl,
+					action_btn=action_btn,
+					phase_text="Clearing wash from tubing",
+					on_complete=lambda: (
+						ctx["modal"].destroy() if ctx["modal"] else None,
+						_phase_three() if not ctx["cancelled"] else None,
+					),
+				)
+
+			_, _msg, progress_lbl, action_btn = _build_modal(
+				"Inter-sample Purge — Step 2 of 3",
+				body_text, "Continue", _start_clear,
+			)
+
+		def _phase_three():
+			if ctx["cancelled"]:
+				return
+			body_text = (
+				f"Connect the inlet line to the new sample tube "
+				f"({new_sample_id}). Verify the connection is secure."
+				"\n\n"
+				f"Click Begin Fractionation to proceed with sample "
+				f"{new_sample_id}'s discard phase and collection."
+			)
+
+			def _begin():
+				if ctx["modal"] is not None:
+					ctx["modal"].destroy()
+					ctx["modal"] = None
+				if not ctx["cancelled"]:
+					on_done()
+
+			_build_modal(
+				"Inter-sample Purge — Step 3 of 3",
+				body_text, "Begin Fractionation", _begin,
+			)
+
+		_phase_one()
+
 	def continue_to_next_plate(self):
 		"""Open the plate-swap dialog. The dialog walks the operator through
 		removing the full plate, optionally homing the needle, placing a new
@@ -3166,6 +4280,109 @@ class App(tk.Tk):
 			# end_run() inside the dialog and returns None here).
 			return
 		self._commit_plate_swap(new_plate_id)
+
+	def _show_sample_id_confirm_dialog(self):
+		"""Modal Toplevel for the unchanged-Sample-ID confirm path.
+
+		The entry is bound to the same StringVar as the main Sample ID
+		field in Run Parameters, so edits in either widget propagate in
+		real time. Returns True on Confirm, False on Cancel (X button,
+		Escape key). Enter activates Confirm only when the current
+		Sample ID is valid; otherwise it's a no-op.
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title("Confirm Sample ID")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+
+		result = {"confirmed": False}
+
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+		tk.Label(
+			body, justify="left", anchor="w", wraplength=420,
+			text=(
+				"The Sample ID has not been changed since the previous "
+				"series started. Update it now if this is a new sample, "
+				"or confirm to continue with the same Sample ID."
+			),
+		).pack(anchor="w", pady=(0, 10))
+
+		row = tk.Frame(body)
+		row.pack(fill=tk.X, pady=(0, 4))
+		tk.Label(row, text="Sample ID:").pack(side=tk.LEFT, padx=(0, 6))
+		# Bind to the SAME StringVar as the main Sample ID entry so edits
+		# in either widget sync via the underlying variable.
+		entry = ttk.Entry(row,
+			textvariable=self.automated_frame.sample_id_te.var, width=32)
+		entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+		err_lbl = tk.Label(body, text="", fg="red", anchor="w", wraplength=420)
+		err_lbl.pack(anchor="w")
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X, pady=(8, 0))
+
+		def _cancel(_event=None):
+			dlg.destroy()
+		def _confirm(_event=None):
+			# Block confirm when validation fails. (Enter binding routes
+			# here too; this guard makes Enter a no-op on invalid input.)
+			ok, _ = validation.sample_id(
+				self.automated_frame.sample_id_te.var.get())
+			if not ok:
+				return
+			result["confirmed"] = True
+			dlg.destroy()
+
+		cancel_btn = ttk.Button(btn_row, text="Cancel", command=_cancel)
+		cancel_btn.pack(side=tk.LEFT, padx=4)
+		confirm_btn = ttk.Button(btn_row, text="Confirm",
+			command=_confirm, style="Primary.TButton")
+		confirm_btn.pack(side=tk.RIGHT, padx=4)
+
+		def _sync():
+			"""Re-validate on every keystroke; show/hide the inline error
+			and toggle the Confirm button accordingly."""
+			ok, msg = validation.sample_id(
+				self.automated_frame.sample_id_te.var.get())
+			if ok:
+				err_lbl.config(text="")
+				confirm_btn.state(["!disabled"])
+			else:
+				err_lbl.config(text=str(msg))
+				confirm_btn.state(["disabled"])
+		trace_id = self.automated_frame.sample_id_te.var.trace_add(
+			"write", lambda *_: _sync())
+
+		# Initial sync (validates the pre-filled value).
+		_sync()
+
+		# Keyboard + close-box wiring.
+		dlg.bind("<Escape>", _cancel)
+		dlg.bind("<Return>", _confirm)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+		# Center the dialog over the main window.
+		dlg.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		dlg.grab_set()
+
+		# Focus on the entry with current text selected so the user can
+		# immediately overtype it.
+		entry.focus_set()
+		entry.select_range(0, tk.END)
+		entry.icursor(tk.END)
+
+		self.wait_window(dlg)
+		# Clean up the trace so successive opens don't accumulate handlers.
+		try:
+			self.automated_frame.sample_id_te.var.trace_remove("write", trace_id)
+		except Exception:
+			pass
+		return result["confirmed"]
 
 	def _show_plate_swap_dialog(self, old_plate_id, suggested_new_id):
 		"""Modal Toplevel for the plate-swap flow.

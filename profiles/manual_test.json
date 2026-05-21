@@ -3,7 +3,7 @@
   "cols": "2",
   "well_size": "0.9",
   "pump_rate": "600",
-  "volume_per_well": "0.05",
+  "volume_per_well": "0.1",
   "table_start": "0",
   "carriage_start": "0",
   "labware_file": ""

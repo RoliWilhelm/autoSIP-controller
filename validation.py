@@ -24,13 +24,37 @@ ROWS_MIN, ROWS_MAX = 1, 16
 COLS_MIN, COLS_MAX = 1, 24
 WELL_SIZE_MIN, WELL_SIZE_MAX = 0.1, 5.0  # cm
 
-# Pump parameters
-PUMP_RATE_MIN, PUMP_RATE_MAX = 0.1, 600.0  # cc/hr
-VOLUME_MIN, VOLUME_MAX = 0.001, 5.0        # cc per well
+# Pump parameters.
+# Pump rate units are mL/hr (1 mL = 1 cm^3 = 1 cc; the rate ceiling matches
+# the Razel R-200 high-gear-set spec).
+PUMP_RATE_MIN, PUMP_RATE_MAX = 0.1, 600.0  # mL/hr
+
+# Per-well volume in mL. Lower bound is ~5x the volume of one aqueous drop
+# (~20 µL = 0.02 mL), so 0.1 mL is the smallest dispensable volume that
+# reliably forms a contiguous drip rather than a single droplet. Upper bound
+# is a generous cap for typical SIP fractions.
+VOLUME_MIN, VOLUME_MAX = 0.1, 2.0          # mL per well
 
 # Drip wait between dispense and move-to-next, seconds. Lower bound of 0 lets
 # the operator disable the wait entirely; upper bound is a sanity cap.
 DRIP_WAIT_MIN, DRIP_WAIT_MAX = 0.0, 60.0
+
+# Inter-sample purge duration, seconds. Two pump phases run for this many
+# seconds each between samples: one drawing wash through the tubing, one
+# pushing air to clear the wash. Lower bound 1 s prevents an effectively
+# disabled purge; upper bound 10 min is a generous ceiling that catches
+# unit-confusion typos.
+PURGE_TIME_MIN, PURGE_TIME_MAX = 1.0, 600.0
+
+# Peristaltic pump rate, mL/min. Adafruit 3910 nominal ~100 mL/min; bound
+# leaves room for slower flow restrictors below it and faster pumps above.
+PERISTALTIC_RATE_MIN, PERISTALTIC_RATE_MAX = 1.0, 200.0
+
+# Max waste-bin volume, mL. The estimated-volume tracker shuts off the
+# pump at this threshold to prevent overflow. Lower bound 10 mL is the
+# smallest container we can think of using; upper bound 5 L is generous
+# for a bench-top jug.
+MAX_WASTE_VOLUME_MIN, MAX_WASTE_VOLUME_MAX = 10.0, 5000.0
 
 # Stage positions (lead-screw travel)
 TABLE_POS_MIN, TABLE_POS_MAX = 0.0, 20.0       # cm
@@ -64,7 +88,10 @@ def _parse_int(text, label, lo, hi):
 	return True, value
 
 
-def _parse_float(text, label, lo, hi, *, allow_empty=False):
+def _parse_float(text, label, lo, hi, *, allow_empty=False, unit=None):
+	"""Parse a float and bounds-check it. ``unit`` (optional) is appended
+	to the bounds in the error message, e.g. ``"... between 0.1 and 2.0 mL"``.
+	"""
 	text = (text or "").strip()
 	if text == "":
 		if allow_empty:
@@ -75,7 +102,8 @@ def _parse_float(text, label, lo, hi, *, allow_empty=False):
 	except ValueError:
 		return False, f"{label} must be a number (got '{text}')"
 	if value < lo or value > hi:
-		return False, f"{label} must be between {lo} and {hi} (got {value})"
+		bounds = f"{lo} and {hi}" if unit is None else f"{lo} and {hi} {unit}"
+		return False, f"{label} must be between {bounds} (got {value})"
 	return True, value
 
 
@@ -95,18 +123,42 @@ def well_size(text):
 
 
 def pump_rate(text):
-	"""Validate pump rate (cc/hr): float in ``[PUMP_RATE_MIN, PUMP_RATE_MAX]``."""
-	return _parse_float(text, "Pump rate", PUMP_RATE_MIN, PUMP_RATE_MAX)
+	"""Validate pump rate (mL/hr): float in ``[PUMP_RATE_MIN, PUMP_RATE_MAX]``."""
+	return _parse_float(text, "Pump rate", PUMP_RATE_MIN, PUMP_RATE_MAX,
+		unit="mL/hr")
 
 
 def volume(text):
-	"""Validate per-well volume (cc): float in ``[VOLUME_MIN, VOLUME_MAX]``."""
-	return _parse_float(text, "Volume per well", VOLUME_MIN, VOLUME_MAX)
+	"""Validate per-well volume (mL): float in ``[VOLUME_MIN, VOLUME_MAX]``."""
+	return _parse_float(text, "Volume per well", VOLUME_MIN, VOLUME_MAX,
+		unit="mL")
 
 
 def drip_wait_time(text):
 	"""Validate the post-pump drip wait (s): float in ``[DRIP_WAIT_MIN, DRIP_WAIT_MAX]``."""
 	return _parse_float(text, "Drip wait time", DRIP_WAIT_MIN, DRIP_WAIT_MAX)
+
+
+def purge_time(text):
+	"""Validate per-phase inter-sample purge time (s): float in
+	``[PURGE_TIME_MIN, PURGE_TIME_MAX]``. The same duration is used for
+	the wash and air-clear phases."""
+	return _parse_float(text, "Purge time", PURGE_TIME_MIN, PURGE_TIME_MAX,
+		unit="s")
+
+
+def peristaltic_rate(text):
+	"""Validate peristaltic pump rate (mL/min): float in
+	``[PERISTALTIC_RATE_MIN, PERISTALTIC_RATE_MAX]``."""
+	return _parse_float(text, "Peristaltic pump rate",
+		PERISTALTIC_RATE_MIN, PERISTALTIC_RATE_MAX, unit="mL/min")
+
+
+def max_waste_volume(text):
+	"""Validate max waste-bin volume (mL): float in
+	``[MAX_WASTE_VOLUME_MIN, MAX_WASTE_VOLUME_MAX]``."""
+	return _parse_float(text, "Max waste bin volume",
+		MAX_WASTE_VOLUME_MIN, MAX_WASTE_VOLUME_MAX, unit="mL")
 
 
 def table_pos(text, *, allow_empty=False):

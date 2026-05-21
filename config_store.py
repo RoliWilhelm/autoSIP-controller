@@ -28,7 +28,10 @@ logger = logging.getLogger("autosip")
 FIELDS = (
 	"project", "sample_id", "plate_id",
 	"number_of_fractions", "discard_fractions",
-	"rows", "cols", "well_size", "pump_rate", "drip_wait_time", "volume_per_well",
+	"rows", "cols", "well_size", "pump_rate", "drip_wait_time",
+	"purge_time", "skip_intersample_purge",
+	"peristaltic_rate", "max_waste_volume",
+	"volume_per_well",
 	"table_start", "carriage_start",
 	"waste_bin_table", "waste_bin_carriage",
 	"labware_file",
@@ -52,17 +55,50 @@ def get_config_path():
 # -- last_used ---------------------------------------------------------
 
 def load_last_used():
-	"""Return the ``last_used`` dict from config.json, or ``{}`` if absent."""
+	"""Return the ``last_used`` dict from config.json, or ``{}`` if absent.
+
+	Applies a one-time migration for ``volume_per_well``: if the persisted
+	value falls outside the current ``validation.VOLUME_MIN``/``MAX`` bounds
+	(e.g., a config saved before the 0.1-2.0 mL clamp was introduced),
+	reset it to ``0.22`` mL and rewrite the file so subsequent launches
+	don't re-run the migration.
+	"""
 	path = get_config_path()
 	if not path.exists():
 		return {}
 	try:
 		with open(path) as f:
 			data = json.load(f)
-		return dict(data.get("last_used") or {})
+		last = dict(data.get("last_used") or {})
 	except (OSError, json.JSONDecodeError) as exc:
 		logger.warning("Failed to read %s: %s", path, exc)
 		return {}
+
+	# Volume-bound migration. Local import keeps validation/config_store
+	# free of a circular dependency at module load time.
+	try:
+		import validation
+		raw = last.get("volume_per_well")
+		if raw is not None and raw != "":
+			try:
+				v = float(raw)
+			except (TypeError, ValueError):
+				v = None
+			if v is not None and (v < validation.VOLUME_MIN or v > validation.VOLUME_MAX):
+				logger.info(
+					"Volume per well last_used value %s outside new bounds "
+					"[%g, %g] mL; reset to 0.22 mL.",
+					raw, validation.VOLUME_MIN, validation.VOLUME_MAX,
+				)
+				last["volume_per_well"] = "0.22"
+				try:
+					save_last_used(last)
+				except OSError as exc:
+					logger.warning("Could not persist volume migration: %s", exc)
+	except ImportError:
+		pass
+
+	return last
 
 
 def save_last_used(values):
