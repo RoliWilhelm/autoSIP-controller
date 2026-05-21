@@ -91,11 +91,18 @@ Two consequences follow from that convention:
   the waste container. These same two values are mirrored in
   Cleaning mode — editing them in either mode updates the other.
 
-Two buttons sound similar but do different things:
+Three buttons sound similar but do different things:
 
-- **Return to Start Coords** (Automated mode, run-controls row) moves
+- **Return to Origin** (Automated mode, run-controls row) and **Home**
+  (Manual mode, Jog Controls) are equivalent: both move the motors
+  to origin `(0, 0)` and re-zero the software's tracked angle
+  counters. Return to Origin in Automated mode is also the mid-run
+  recalibration entry point — clicking it while paused captures the
+  current motor position so Resume can drive back there and pop a
+  Confirm Calibration dialog.
+- **Return to Start Well** (Automated mode, run-controls row) moves
   the needle to the plate-start coordinates — well **A1** of the plate
-  — *not* to origin.
+  — *not* to origin. Enabled only while idle; disabled mid-run.
 - **Home** (Manual mode, Jog Controls) moves both motors to origin
   `(0, 0)` and re-zeros the software's tracked angle counters. The
   Position readout will then read exactly `X = 0.000 cm,
@@ -205,8 +212,15 @@ move:
 
 **Run controls** (top-right of the Automated frame):
 
-- **Return to Start Coords** — moves the needle to the plate-start
-  coordinates.
+- **Return to Origin** — moves the motors to `(0, 0)` and tares the
+  software counters. Equivalent to Manual mode's Home button. Also
+  works mid-pause: clicking it captures the current position so the
+  matching Resume can drive the needle back and pop a Confirm
+  Calibration dialog. Used to recover from stepper-motor drift
+  without aborting the run.
+- **Return to Start Well** — moves the needle to the plate-start
+  coordinates (well A1) entered in Plate Parameters. Enabled only
+  while idle; disabled mid-run.
 - **Pause** — pauses an in-progress run; pump off, motors hold
   position. The button label flips to **Resume** while paused.
 - **Continue to Next Sample** — enabled after the auto-pause at "Total
@@ -344,7 +358,7 @@ After a Terminate Run:
   current plate state to a `.txt` file before clearing the view.
 - The status bar reads `Run terminated — click Return to Start
   Coords to re-enable controls.`
-- Clicking **Return to Start Coords** re-enables Manual jog and
+- Clicking **Return to Origin** re-enables Manual jog and
   Begin Fractionation.
 
 Use Terminate Run for safety emergencies (smell, collision, fluid

@@ -138,8 +138,16 @@ five run-control buttons sits at the top-right of the frame.
 
 **Run controls** (top-right of the Automated frame):
 
-- **Return to Start Coords** — moves the needle to the plate-start
-  coordinates (well A1 of the loaded labware).
+- **Return to Origin** — moves both motors to physical `(0, 0)` and
+  tares the software counters. Equivalent to Manual mode's Home
+  button. Also works while a run is paused: the first click in a
+  pause captures the current motor position so the matching Resume
+  can drive the needle back and pop a Confirm Calibration dialog.
+  This is the mid-run recalibration entry point (see §6.3.6).
+- **Return to Start Well** — moves the needle to the plate-start
+  (well A1) coordinates from Plate Parameters. Enabled only while
+  idle; disabled mid-run since interrupting the snake-path would
+  lose the operator's place.
 - **Pause** — pauses an in-progress run; pump off, motors hold position.
   The button label flips to **Resume** while paused.
 - **Continue to Next Sample** — enabled after the auto-pause at "Total
@@ -518,23 +526,27 @@ breadcrumb row at each Continue to Next Sample.
 
 ### 6.3.4 Pause and end controls — when to use which
 
-autoSIP has five interruption controls. They look similar in the GUI
+autoSIP has six interruption controls. They look similar in the GUI
 but differ in when they are available, what they do to the run, and
 what files they produce.
 
 | Button                      | Available when                                                                 | Effect                                                                                                          | Resumable?                                                       | What it writes to `log.csv` / disk                                                                |
 | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | **Pause** / **Resume**      | During a run (pump, wait, or move phase)                                       | Cancels the in-flight `after()` task; pump relay off; motors hold position. Claim stays held.                   | Yes — click the same button (label becomes **Resume**)           | One `resume` breadcrumb row on Resume, if currently in the collection phase                       |
+| **Return to Origin** (mid-pause) | While the run is paused                                                   | Moves motors to `(0, 0)` and tares the counters; captures the paused position on the first click. Used for mid-run recalibration against stepper drift (§6.3.6). | Yes — on Resume, the application moves the needle back to the captured position and shows a Confirm Calibration dialog. | No row in `log.csv`. |
 | **Continue to Next Sample** | After auto-pause at "Total reached"                                            | Starts a new series: increments series_index, runs the discard phase, then collects at the next available well. | Continues the run                                                | `resume` breadcrumb row                                                                           |
 | **Continue to Next Plate**  | After auto-pause at "Plate full"                                               | Opens the plate-swap dialog. After Continue, moves the carriage to A1 of the new plate and resumes.             | Continues the run after the dialog                               | `plate_swap` breadcrumb row                                                                       |
 | **End Run**                 | Any active run state (running, paused, total reached, plate full)              | Save-or-discard prompt; pump off; motors released; visuals reset; FractionatorState counters zeroed.            | No — the run terminates                                          | On "Yes, save": `end_{ts}.json`, `summary_{ts}.md`, `summary_{plate_id}_{ts}.md`. On "No": none.  |
-| **Terminate Run**           | Visible in Automated mode (bottom-right of the status bar, red octagon button) | Hard-halt: pump off, motors released, run-control buttons disabled. Confirmation dialog required.               | After clicking **Return to Start Coords** the controls re-enable | In-flight entry stamped `emergency_stopped` in `log.csv`; `end.json` + `summary.md` written       |
+| **Terminate Run**           | Visible in Automated mode (bottom-right of the status bar, red octagon button) | Hard-halt: pump off, motors released, run-control buttons disabled. Confirmation dialog required.               | After clicking **Return to Origin** the controls re-enable | In-flight entry stamped `emergency_stopped` in `log.csv`; `end.json` + `summary.md` written       |
 
 When to use each:
 
 - **Quick interruption** (operator break, momentary distraction):
   **Pause**. Cleanest interrupt. Click again to resume; the cycle
   picks up at exactly the same point.
+- **Stepper drift suspected mid-run**: **Pause** → **Return to
+  Origin** → manually re-park the carriage → **Resume** →
+  **Confirm Calibration**. See §6.3.6 for the full walkthrough.
 - **End-of-tube — swap source tubes**: **Continue to Next Sample**.
   autoSIP fires this auto-pause on its own when the per-sample
   fraction target is reached; update Sample ID and click Continue.
@@ -546,7 +558,7 @@ When to use each:
 - **Safety emergency** (smell, collision, fluid leak):
   **Terminate Run**. Stops the pump and motors immediately on
   confirming the dialog. After the rig is verified safe, click
-  **Return to Start Coords** to re-enable controls.
+  **Return to Origin** to re-enable controls.
 
 Pause is reversible and silent; Continue advances the run; End Run
 finishes cleanly; Terminate Run is the heavy hammer and writes
@@ -588,6 +600,54 @@ deuterated one, to clear residual buffer or DNA from the tubing.
    before starting the next Automated run.** The software cannot
    detect which pump is wired in — that is the purpose of the
    Fractionate/Purge confirmation dialogs.
+
+### 6.3.6 Recalibrating mid-run after stepper drift
+
+Stepper motors occasionally miss steps, so the software's tracked
+position can drift away from the true physical position over a long
+run. autoSIP supports a mid-run recalibration that re-zeros the
+counters against the upper-left mechanical limit without aborting
+the run.
+
+1. **Notice the drift.** The dispensed drop lands slightly off-well,
+   or the snake path looks visibly shifted. Click **Pause**.
+
+2. **Click Return to Origin.** The motors drive to coordinate `(0, 0)`
+   and the software's tracked counters are tared. The current motor
+   position at the moment of the click is captured so the matching
+   Resume can drive the needle back to it. Status bar:
+   *"Returned to origin. Manually re-park the carriage against the
+   upper-left limit, then click Resume."*
+
+3. **Manually re-park the carriage** against the upper-left
+   mechanical stops. The software's `(0, 0)` now matches the
+   physical upper-left position — drift is corrected.
+
+4. **Click Resume.** The application drives the needle from the
+   freshly-calibrated origin to the position captured in step 2,
+   then opens a **Confirm Calibration** modal showing the captured
+   coordinates and asking you to verify the needle is correctly
+   positioned over the expected well.
+
+5. **Inspect, then click Confirm.** Fractionation resumes from the
+   exact state-machine point where it was paused (mid-pump, mid-wait,
+   or between wells).
+
+If the calibration looks wrong, click **Cancel** in the confirm
+dialog instead. The run stays paused; the needle stays at the
+captured position. You can click Return to Origin again to retry,
+or End Run to abandon.
+
+Multiple Return-to-Origin clicks during the same pause are safe —
+only the FIRST click captures the reference position. Subsequent
+clicks simply re-issue the move-to-origin + tare, so an operator
+who botches the first manual re-park can retry without losing the
+"where the run actually was" reference.
+
+The recalibration flag clears on Resume-confirm, End Run, Continue
+to Next Sample, and Continue to Next Plate — those all advance the
+run past the paused point, so the captured position is no longer
+the right reference.
 
 ## 6.4 Logging Output
 
@@ -679,7 +739,7 @@ confirmation, the application:
 - Offers to save a plate-state snapshot to a `.txt` file before
   clearing the progress view.
 - Disables every run-control button until the operator clicks
-  **Return to Start Coords**, which re-enables the controls and
+  **Return to Origin**, which re-enables the controls and
   clears the terminated state.
 
 Use Terminate Run for safety emergencies (smell, collision, fluid

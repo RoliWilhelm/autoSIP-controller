@@ -497,6 +497,16 @@ class FractionatorState:
 	taskId: object = None
 	is_paused: bool = False
 
+	# Mid-pause recalibration support. ``origin_returned_during_pause``
+	# flips True the first time the operator clicks Return to Origin
+	# during the current pause; on the matching Resume, the run drives
+	# the needle back to (paused_table_cm, paused_carriage_cm) and pops
+	# a Confirm Calibration dialog. Cleared on Resume-confirm, End Run,
+	# Continue to Next Sample, and Continue to Next Plate.
+	origin_returned_during_pause: bool = False
+	paused_table_cm: float = 0.0
+	paused_carriage_cm: float = 0.0
+
 	# Run identification, mirrored from the AutomatedFrame entry boxes by
 	# trace_add callbacks. These are NOT frozen at run start -- the logger
 	# reads them fresh per well so mid-run tube swaps (Sample ID) and typo
@@ -850,13 +860,25 @@ class AutomatedFrame(tk.Frame):
 			self.grid_columnconfigure(i, weight=1, uniform="auto")
 
 		# Run-control button row: always visible from app startup, state-
-		# driven enable/disable. Placed at row 0 (top-right of the frame)
-		# so the four controls are the first thing visible.
+		# driven enable/disable. The cluster of five buttons is the first
+		# thing visible. Gridded WITHOUT sticky so the un-stretched
+		# subframe centers horizontally in the row-0 cell (which spans
+		# both weighted columns), keeping the buttons balanced as the
+		# window resizes.
 		ctrl = tk.Frame(self)
-		ctrl.grid(row=0, column=0, columnspan=2, sticky="e", pady=(0, 4))
-		self.return_btn = ttk.Button(ctrl, text="Return to Start Coords",
-			command=app.return_to_home)
-		self.return_btn.pack(side=tk.LEFT, padx=2)
+		ctrl.grid(row=0, column=0, columnspan=2, pady=(0, 4))
+		# Two distinct recovery buttons. "Return to Origin" matches Manual
+		# mode's Home (move motors to 0,0 and tare), and is the
+		# mid-pause recalibration entry point. "Return to Start Well"
+		# moves to the entered plate-start (well A1) coords; it stays
+		# disabled mid-run since interrupting the snake-path would be
+		# destructive.
+		self.return_origin_btn = ttk.Button(ctrl, text="Return to Origin",
+			command=app.return_to_origin)
+		self.return_origin_btn.pack(side=tk.LEFT, padx=2)
+		self.return_well_btn = ttk.Button(ctrl, text="Return to Start Well",
+			command=app.return_to_start_well)
+		self.return_well_btn.pack(side=tk.LEFT, padx=2)
 		# Pause button starts in the default TButton style; toggle_pause /
 		# _update_run_control_buttons swap it to PauseRunning.TButton or
 		# PausePaused.TButton as the run state changes.
@@ -1058,7 +1080,7 @@ class AutomatedFrame(tk.Frame):
 
 		# Begin Fractionation -- the run-launch button. (The previous
 		# "Move (jog to Plate-start coords)" button was removed because the
-		# Return to Start Coords button in the run-controls row already
+		# Return to Start Well button in the run-controls row already
 		# moves to the same position.)
 		#
 		# Visually this is a composite: a small Canvas drawing a 45-deg
@@ -1690,13 +1712,11 @@ class ManualFrame(tk.Frame):
 		).grid(row=5, column=0, sticky="w", padx=(20, 0), pady=(2, 0))
 
 	def refresh(self):
-		"""Re-sync the position readout and clear the per-visit pump-confirm
-		set so the first click on EACH pump (Fractionate, Purge) after
-		switching INTO Manual mode shows the relay-activation warning once
-		for that pump. Also re-anchor the "(Space)" hint label next to the
-		currently-active pump so it's visible immediately on mode entry.
+		"""Re-sync the position readout and the space-bar hint when this
+		mode becomes active. (The pump-confirmation dialog is now
+		session-scoped, not per-visit, so the previous reset of a
+		per-Manual-visit set is gone.)
 		"""
-		self.app._manual_pumps_confirmed.clear()
 		self.refresh_position_readout()
 		self._set_space_hint(self.app.last_pump_used)
 
@@ -1883,12 +1903,24 @@ class CleaningFrame(tk.Frame):
 			self, text="Move to Waste Bin", command=self.move_clicked,
 		)
 		self.move_btn.grid(row=1, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+		# Purge button + Space-shortcut hint. The hint sits next to the
+		# button (column 1 of the wrap frame) so the operator sees at a
+		# glance that Space toggles Purge in Cleaning mode. Lives inside
+		# CleaningFrame, so it's automatically hidden when the frame is
+		# grid_remove'd on a mode switch.
+		purge_wrap = tk.Frame(self)
+		purge_wrap.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+		purge_wrap.grid_columnconfigure(0, weight=1)
 		self.purge_btn = ttk.Button(
-			self, text="Purge: OFF",
+			purge_wrap, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
 			style="PumpOff.TButton", cursor="hand2",
 		)
-		self.purge_btn.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+		self.purge_btn.grid(row=0, column=0, sticky="we")
+		self.purge_space_lbl = tk.Label(
+			purge_wrap, text="(Space)", fg="gray40",
+		)
+		self.purge_space_lbl.grid(row=0, column=1, padx=(4, 0))
 
 		# Purge Time Calibration sub-panel. Measures how long wash takes
 		# to fully replace one tubing-volume so the operator can save the
@@ -1957,9 +1989,14 @@ class CleaningFrame(tk.Frame):
 			self.cal_save_btn.state(["disabled"])
 
 	def _cal_start(self):
-		"""Power the pump on (with the standard confirmation) and start
-		the elapsed-time tick. The Purge-claim machinery is reused so the
-		relay flips through the same code path as the manual Purge button."""
+		"""Power the pump on and start the elapsed-time tick. This is
+		an automated-workflow path (its own setup-style action), so we
+		bypass the per-pump confirmation dialog and drive the relay
+		directly via the PumpController. The operator is expected to
+		have already verified the peristaltic pump is connected -- the
+		manual Purge button on the same screen is the place to learn
+		that, and its first-of-session confirmation covers that role.
+		"""
 		pc = self.app.pump_controller
 		# If something else holds the claim, bail out -- the user sees
 		# the interlock state on the Purge button.
@@ -1971,14 +2008,10 @@ class CleaningFrame(tk.Frame):
 				parent=self,
 			)
 			return
-		# Reuse _handle_pump_click so the operator gets the same "verify
-		# the peristaltic pump is plugged in" confirmation as any other
-		# Purge activation.
-		if pc.claimant != "purge" or not pc.relay_on:
-			self.app._handle_pump_click("purge", parent=self)
-			if not (pc.claimant == "purge" and pc.relay_on):
-				# User cancelled the confirm dialog or the relay didn't come on.
-				return
+		if pc.claimant != "purge":
+			pc.claim_for("purge")
+		if not pc.relay_on:
+			pc.set_relay(True)
 		self._cal_t_start = monotonic()
 		self.cal_start_btn.state(["disabled"])
 		self.cal_stop_btn.state(["!disabled"])
@@ -2119,11 +2152,14 @@ class App(tk.Tk):
 		self.mode = None
 		self._active_frame = None
 		self._terminated = False
-		# Track which pumps have shown the "Activating the relay" confirm at
-		# least once during the current Manual-mode visit. Each pump prompts
-		# on its first activation; subsequent activations of THE SAME pump
-		# are suppressed. Switching to/from Manual clears the set.
-		self._manual_pumps_confirmed = set()
+		# Pump-confirmation latches. The "Activating the relay" dialog
+		# fires only on the FIRST user-initiated activation of each pump
+		# per session; subsequent toggles skip the dialog. Not persisted
+		# to disk, so a fresh process starts with both flags False. Reset
+		# back to False on Terminate Run, since the operator may have
+		# changed hardware during the stop.
+		self.fractionate_confirmed_this_session = False
+		self.purge_confirmed_this_session = False
 		# Which pump the space-bar shortcut targets in Manual mode. Updated
 		# every time the user clicks (or space-activates) one of the two
 		# pump buttons, and persisted across launches via config_store.
@@ -2652,6 +2688,13 @@ class App(tk.Tk):
 		self.table_motor.release()
 		self.carriage_motor.release()
 
+		# E-stop may have occurred because of a hardware swap or
+		# mis-plumbed pump; clear the per-pump confirmation latches so
+		# the next user-initiated activation re-prompts the operator
+		# to verify which pump is wired up.
+		self.fractionate_confirmed_this_session = False
+		self.purge_confirmed_this_session = False
+
 		# Close out the on-disk run log. If terminate landed mid-dispense or
 		# mid-wait, mark the in-flight entry as emergency_stopped before the
 		# end() call so it shows up in log.csv with that status.
@@ -2708,29 +2751,79 @@ class App(tk.Tk):
 		# its e-stopped layout (everything disabled).
 		self._set_controls_enabled(False)
 		self.set_status(
-			"Run terminated — click Return to Start Coords to re-enable controls.",
+			"Run terminated — click Return to Origin to re-enable controls.",
 		)
 		self._terminated = True
 		self._update_run_control_buttons()
 		logger.warning("Run terminated")
 
-	def return_to_home(self):
-		"""Move both stages to (0, 0) and re-enable controls if disabled.
+	def return_to_origin(self):
+		"""Move motors to (0, 0) and tare the angle counters.
 
-		Always available, not gated on a prior Terminate. Useful both as
-		the recovery action after a Terminate AND as a "recenter the rig"
-		convenience between runs. Despite the method name (kept for
-		backward compatibility), in Automated mode this is the
-		"Return to Start Coords" button -- it ends up at the operator's
-		plate-start position only because the App always tares the
-		motor counters at run start, so motor 0 == plate-start coords.
+		Three roles in one button:
+		  (1) Idle-time recentering equivalent to Manual mode's Home.
+		  (2) Mid-pause recalibration: captures the current motor
+		      position on the FIRST click in this pause so the matching
+		      Resume can drive back to it and pop a Confirm Calibration
+		      dialog.
+		  (3) Post-terminate recovery: clears the e-stopped lockdown
+		      so the operator can start a fresh run.
 		"""
-		logger.info("Returning to start coords")
+		s = self.state
+		# Pause-time capture (first click only -- subsequent clicks in
+		# the same pause re-issue the move+tare without overwriting
+		# the captured reference).
+		if s.is_paused and not s.origin_returned_during_pause:
+			s.paused_table_cm = (
+				self.table_motor.get_angle() * self.table_motor.cm_per_deg
+			)
+			s.paused_carriage_cm = (
+				self.carriage_motor.get_angle() * self.carriage_motor.cm_per_deg
+			)
+			s.origin_returned_during_pause = True
+			logger.info(
+				"Captured pause position for mid-run recalibration: "
+				"(%.3f cm, %.3f cm)",
+				s.paused_table_cm, s.paused_carriage_cm,
+			)
+		# Same physical action as Manual Home: drive to (0, 0) + tare.
 		self.carriage_return()
-		self._set_controls_enabled(True)
-		self._terminated = False
-		self.set_status("Returned to start coords.")
+		self.table_motor.tare()
+		self.carriage_motor.tare()
+		# Post-terminate recovery path.
+		if self._terminated:
+			self._set_controls_enabled(True)
+			self._terminated = False
+		if s.is_paused:
+			self.set_status(
+				"Returned to origin. Manually re-park the carriage "
+				"against the upper-left limit, then click Resume."
+			)
+		else:
+			self.set_status("Returned to origin.")
 		self._update_run_control_buttons()
+
+	def return_to_start_well(self):
+		"""Move the needle to the entered Starting well position coords.
+
+		Reads the LIVE values from the Starting well position entries
+		so the button works pre-run too. Validates first; out-of-range
+		input is surfaced inline and the move is refused. Disabled
+		mid-run (the button-state matrix prevents the click, but the
+		validation guard above is also a defensive backstop).
+		"""
+		af = self.automated_frame
+		t_ok, t_val = validation.table_pos(af.table_te.get())
+		c_ok, c_val = validation.carriage_pos(af.carriage_te.get())
+		(af.table_te.clear_error if t_ok else lambda: af.table_te.show_error(t_val))()
+		(af.carriage_te.clear_error if c_ok else lambda: af.carriage_te.show_error(c_val))()
+		if not (t_ok and c_ok):
+			return
+		self.move_to_positions(table_dist=t_val, carriage_dist=c_val)
+		self.set_status(
+			f"Moved to starting well position "
+			f"({t_val:g} cm, {c_val:g} cm)."
+		)
 
 	# -- Run-control button state machine -------------------------------
 
@@ -2757,9 +2850,19 @@ class App(tk.Tk):
 		return "idle"
 
 	def _update_run_control_buttons(self):
-		"""Sync the five run-control buttons in AutomatedFrame to the current
-		state machine state. Called at every state transition so the user
-		sees an immediate response.
+		"""Sync the six run-control buttons in AutomatedFrame to the
+		current state machine state. Called at every state transition
+		so the user sees an immediate response.
+
+		Two recovery buttons replace the previous single Return:
+		  - origin (Return to Origin): enabled at idle AND in every
+		    paused/halted state so it can serve as the mid-pause
+		    recalibration entry point. Disabled only while a run is
+		    actively running (so the operator can't accidentally
+		    interrupt the snake-path).
+		  - start_well (Return to Start Well): enabled at idle only.
+		    Disabled mid-run -- moving to A1 mid-run would lose the
+		    operator's place.
 
 		The Pause button's color is varied by swapping its ttk style
 		(PauseRunning.TButton / PausePaused.TButton / TButton); the
@@ -2771,7 +2874,8 @@ class App(tk.Tk):
 		bucket = self._classify_ui_state()
 
 		# Defaults; per-bucket overrides follow.
-		ret_state = tk.NORMAL
+		origin_state = tk.NORMAL
+		start_well_state = tk.NORMAL
 		pause_state = tk.DISABLED
 		pause_text = "Pause"
 		pause_style = "TButton"
@@ -2782,13 +2886,15 @@ class App(tk.Tk):
 		if bucket == "idle":
 			pass  # Default values above.
 		elif bucket == "running":
-			ret_state = tk.DISABLED
+			origin_state = tk.DISABLED
+			start_well_state = tk.DISABLED
 			pause_state = tk.NORMAL
 			pause_text = "Pause"
 			pause_style = "PauseRunning.TButton"
 			end_state = tk.NORMAL
 		elif bucket == "paused_manual":
-			ret_state = tk.DISABLED
+			origin_state = tk.NORMAL  # mid-pause recalibration path
+			start_well_state = tk.DISABLED
 			pause_state = tk.NORMAL
 			pause_text = "Resume"
 			pause_style = "PausePaused.TButton"
@@ -2796,7 +2902,8 @@ class App(tk.Tk):
 		elif bucket == "paused_total":
 			# Sample complete, plate not full -- next action is Continue
 			# to Next Sample (or End Run).
-			ret_state = tk.DISABLED
+			origin_state = tk.NORMAL
+			start_well_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
 			cont_state = tk.NORMAL
@@ -2806,25 +2913,33 @@ class App(tk.Tk):
 			# Continue to Next Sample becomes available only if the sample
 			# ALSO wrapped up on this well; otherwise it stays disabled
 			# until after the plate swap resolves.
-			ret_state = tk.DISABLED
+			origin_state = tk.NORMAL
+			start_well_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
 			cont_plate_state = tk.NORMAL
 			cont_state = tk.NORMAL if s.plate_full_with_sample_complete else tk.DISABLED
 			end_state = tk.NORMAL
 		elif bucket == "waste_full":
-			# Waste-bin auto-shutoff: everything disabled except End Run.
-			# Reset (in the status bar) is the recovery path; clicking
-			# Reset clears _waste_full and we re-classify normally.
-			ret_state = tk.DISABLED
+			# Waste-bin auto-shutoff: only End Run + Reset (in status
+			# bar) work. Return-to-Origin stays available so an
+			# operator who's emptied the bin AND wants to recalibrate
+			# can do that in one halted state.
+			origin_state = tk.NORMAL
+			start_well_state = tk.DISABLED
 			pause_state = tk.DISABLED
 			pause_text = "Paused"
 			end_state = tk.NORMAL
 		elif bucket == "estopped":
-			ret_state = tk.DISABLED
+			# After Terminate Run, clicking Return to Origin is the
+			# recovery path: it tares + clears _terminated +
+			# re-enables motion controls.
+			origin_state = tk.NORMAL
+			start_well_state = tk.DISABLED
 			pause_state = tk.DISABLED
 
-		af.return_btn["state"] = ret_state
+		af.return_origin_btn["state"] = origin_state
+		af.return_well_btn["state"] = start_well_state
 		af.pause_btn["state"] = pause_state
 		af.pause_btn["text"] = pause_text
 		af.pause_btn.configure(style=pause_style)
@@ -2902,19 +3017,22 @@ class App(tk.Tk):
 			return
 
 		# claimant is None and we want to turn this pump ON.
-		# Relay-activation confirmation -- in Manual mode, prompt only the
-		# first time EACH pump is activated per visit (Fractionate and Purge
-		# track their confirms independently).
-		suppress = self.mode == "Manual" and name in self._manual_pumps_confirmed
-		if not suppress:
+		# Relay-activation confirmation: prompt once per pump per session
+		# regardless of mode. Cancelling the dialog leaves the flag False
+		# so the next attempt re-prompts. Terminate Run also resets the
+		# flag (see terminate_run) since hardware may have been swapped.
+		confirmed_attr = (
+			"fractionate_confirmed_this_session" if name == "fractionate"
+			else "purge_confirmed_this_session"
+		)
+		if not getattr(self, confirmed_attr):
 			if not messagebox.askyesno(
 				"Activate pump",
 				self._pump_confirm_text(name),
 				parent=parent,
 			):
 				return
-			if self.mode == "Manual":
-				self._manual_pumps_confirmed.add(name)
+			setattr(self, confirmed_attr, True)
 
 		pc.claim_for(name)
 		pc.set_relay(True)
@@ -2922,22 +3040,33 @@ class App(tk.Tk):
 			self.set_status("System purging.")
 
 	def _on_space(self, event):
-		"""Space-bar shortcut: toggle the last-used pump in Manual mode.
+		"""Space-bar shortcut: toggle a pump in Manual or Cleaning mode.
 
-		Self-gates on mode and on the type of widget currently holding
-		keyboard focus -- if the user is typing into an Entry or Text,
-		space is a literal character there and we must NOT consume it.
-		Returns ``"break"`` to prevent default activation on whichever
-		button might be focused (which would otherwise fire a second
-		toggle on the same key press).
+		Manual mode toggles whichever pump was used most recently
+		(tracked via ``last_pump_used``). Cleaning mode always toggles
+		Purge -- it's the only pump button in that mode, so no
+		last-used tracking is needed.
+
+		Self-gates on mode (no-op in Automated) and on the type of
+		widget currently holding keyboard focus -- if the user is
+		typing into an Entry or Text, space is a literal character
+		there and we must NOT consume it. Routes through
+		``_handle_pump_click`` so the OFF→ON confirmation dialog still
+		fires (Cleaning mode triggers the peristaltic-pump-connected
+		check just like a button click would). Returns ``"break"`` so
+		focus traversal / button activation on the same keypress
+		doesn't double-fire.
 		"""
-		if self.mode != "Manual":
-			return None
 		focused = self.focus_get()
 		if isinstance(focused, (tk.Entry, tk.Text)):
 			return None
-		self._handle_pump_click(self.last_pump_used, parent=self.manual_frame)
-		return "break"
+		if self.mode == "Manual":
+			self._handle_pump_click(self.last_pump_used, parent=self.manual_frame)
+			return "break"
+		if self.mode == "Cleaning":
+			self._handle_pump_click("purge", parent=self.cleaning_frame)
+			return "break"
+		return None
 
 	def _on_arrow(self, event, axis, sign):
 		"""Arrow-key jog shortcut: routes to ManualFrame._jog so soft
@@ -3201,30 +3330,115 @@ class App(tk.Tk):
 				self.after_cancel(self.state.taskId)
 				self.pump_controller.set_relay(False)
 			self.set_status("Fractionation paused...")
-		else:
-			self.set_status("Fractionation in progress...")
+			self._update_run_control_buttons()
+			return
 
-			# Resume breadcrumb: drop a status="resume" row to the CSV
-			# pinned to the well that's about to be dispensed (the well
-			# after the next snake step) and the CURRENT Project/Sample ID.
-			# Forensically: prior rows under the old Sample ID, one resume
-			# row at the changeover, then subsequent completed rows under
-			# the new Sample ID. Skip during the discard phase -- there's
-			# no "next well" concept and the per-discard rows already
-			# capture the same provenance.
-			if self.run_logger is not None and self.state.phase == "collect":
-				next_x, next_y = self._next_well_after_resume()
-				self.run_logger.resume_breadcrumb(next_x, next_y)
+		# --- Resuming branch ---
+		# If the operator clicked Return to Origin during this pause to
+		# recalibrate against the upper-left mechanical limit, drive the
+		# needle back to the captured position FIRST and pop a Confirm
+		# Calibration dialog before re-arming the state machine.
+		s = self.state
+		if s.origin_returned_during_pause:
+			self.set_status("Returning to paused position…")
+			self.move_to_positions(
+				table_dist=s.paused_table_cm,
+				carriage_dist=s.paused_carriage_cm,
+			)
+			confirmed = self._show_calibration_confirm_dialog(
+				s.paused_table_cm, s.paused_carriage_cm,
+			)
+			if not confirmed:
+				# Cancel: leave the flag True and the run paused so the
+				# operator can re-park and re-attempt without losing
+				# their place. The needle stays at the captured position
+				# (the operator is now in "verify the rig" mode).
+				s.is_paused = True
+				self.set_status(
+					"Calibration not confirmed. Run remains paused."
+				)
+				self._update_run_control_buttons()
+				return
+			# Confirmed -- clear the flag so a subsequent ordinary
+			# Pause+Resume doesn't re-fire the dialog.
+			s.origin_returned_during_pause = False
 
-			# Resume from the same point in the pump -> wait -> move cycle.
-			if self.state.state == "pump":
-				self.stop_pump()
-			elif self.state.state == "wait":
-				self.move()
-			elif self.state.state == "move":
-				self.pump_liquid()
+		self.set_status("Fractionation in progress...")
+
+		# Resume breadcrumb: drop a status="resume" row to the CSV
+		# pinned to the well that's about to be dispensed (the well
+		# after the next snake step) and the CURRENT Project/Sample ID.
+		# Forensically: prior rows under the old Sample ID, one resume
+		# row at the changeover, then subsequent completed rows under
+		# the new Sample ID. Skip during the discard phase -- there's
+		# no "next well" concept and the per-discard rows already
+		# capture the same provenance.
+		if self.run_logger is not None and self.state.phase == "collect":
+			next_x, next_y = self._next_well_after_resume()
+			self.run_logger.resume_breadcrumb(next_x, next_y)
+
+		# Resume from the same point in the pump -> wait -> move cycle.
+		if self.state.state == "pump":
+			self.stop_pump()
+		elif self.state.state == "wait":
+			self.move()
+		elif self.state.state == "move":
+			self.pump_liquid()
 
 		self._update_run_control_buttons()
+
+	def _show_calibration_confirm_dialog(self, paused_x_cm, paused_y_cm):
+		"""Modal Toplevel asking the operator to verify the needle is
+		correctly positioned over the expected well after a mid-pause
+		Return-to-Origin recalibration. Returns True on Confirm, False
+		on Cancel (X button, Escape key).
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title("Confirm Calibration")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+
+		result = {"confirmed": False}
+
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+		tk.Label(
+			body, justify="left", anchor="w", wraplength=440,
+			text=(
+				"The needle has returned to the position where the run "
+				"was paused\n"
+				f"(X = {paused_x_cm:.3f} cm, Y = {paused_y_cm:.3f} cm).\n\n"
+				"Please verify visually that the needle is correctly "
+				"positioned over the expected well before resuming.\n\n"
+				"If calibration looks correct, click Confirm to resume "
+				"fractionation. If not, click Cancel — the run stays "
+				"paused so you can re-park the carriage and try again."
+			),
+		).pack(anchor="w", pady=(0, 10))
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+
+		def _cancel(_event=None):
+			dlg.destroy()
+		def _confirm(_event=None):
+			result["confirmed"] = True
+			dlg.destroy()
+
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text="Confirm", command=_confirm,
+			style="Primary.TButton").pack(side=tk.RIGHT, padx=4)
+		dlg.bind("<Escape>", _cancel)
+		dlg.bind("<Return>", _confirm)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+		dlg.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		dlg.grab_set()
+		self.wait_window(dlg)
+		return result["confirmed"]
 
 	def _next_well_after_resume(self):
 		"""Pure mirror of move()'s advancing logic so we can name the next
@@ -3819,6 +4033,10 @@ class App(tk.Tk):
 			self.after_cancel(s.taskId)
 			s.taskId = None
 
+		# Clear the mid-pause recalibration flag -- ending the run
+		# means no Resume confirmation will ever fire for this pause.
+		s.origin_returned_during_pause = False
+
 		# Determine final status: "completed" iff we hit total_reached
 		# before End Run; "manual_abort" otherwise.
 		final_status = "completed" if s.state == "total_reached" else "manual_abort"
@@ -3990,6 +4208,10 @@ class App(tk.Tk):
 		or via the purge workflow's on_done callback (after the three
 		modal phases complete)."""
 		s = self.state
+		# Clear any mid-pause recalibration flag carried over from the
+		# auto-pause -- Continue advances the run, so the Resume
+		# confirmation path is no longer relevant.
+		s.origin_returned_during_pause = False
 		# Snapshot the per-series D so labels and the discard-cycle count
 		# come from the value that was set when the operator clicked
 		# Continue, not whatever the entry holds later.
@@ -4481,6 +4703,9 @@ class App(tk.Tk):
 		emit breadcrumb, safety-home if the operator skipped step 2, move
 		to A1 of the new plate, and resume the appropriate phase."""
 		s = self.state
+		# Clear any mid-pause recalibration flag carried over from the
+		# plate-full auto-pause -- Continue advances the run.
+		s.origin_returned_during_pause = False
 		# State updates BEFORE the breadcrumb so the logger callback sees
 		# the new plate_id.
 		s.current_plate_id = new_plate_id
