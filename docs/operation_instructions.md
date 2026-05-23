@@ -89,7 +89,7 @@ five run-control buttons sits at the top-right of the frame.
 
 **Plate Parameters.** Labware geometry and positions:
 
-- **Load well plate file** — at the top of the section. Browse for an
+- **Load labware specs** — at the top of the section. Browse for an
   Opentrons-format JSON file; the application reads `ordering`,
   `dimensions`, and per-well coordinates, then populates the rows,
   columns, well-width, and starting-point fields below.
@@ -409,13 +409,21 @@ two discard fractions each, total 100 dispense cycles = 90 collected
        previous sample tube and place it in the wash solution
        container. Click **Start Purge** to run the pump for
        *Purge time* seconds, drawing wash through the tubing. A
-       remaining-time label ticks down once per second; the modal
-       auto-advances to Step 2 when the pump shuts off.
+       remaining-time label ticks down once per second. When the
+       pump shuts off the modal enters a *purge complete* state:
+       inspect the tubing, then click **Continue** (or press Enter)
+       to advance to Step 2. **If the tubing isn't fully purged
+       when the countdown ends, press Space to add another full
+       *Purge time* of pumping. Extensions can be triggered as
+       many times as needed for each of Phase 1 and Phase 2.**
     2. **Step 2 of 3 — clear.** Remove the inlet line from the wash
        container, leaving it in air. Click **Continue** to run the
        pump for another *Purge time* seconds, pushing air through
-       the tubing to clear residual wash. The modal auto-advances
-       to Step 3 when finished.
+       the tubing to clear residual wash. As in Step 1, the modal
+       enters a *purge complete* state on cycle completion — press
+       Space to add another *Purge time* of pumping if residual
+       wash is still visible, or click **Continue** to advance to
+       Step 3.
     3. **Step 3 of 3 — connect new sample.** Connect the inlet line
        to the new sample tube. Click **Begin Fractionation** to
        proceed.
@@ -424,7 +432,10 @@ two discard fractions each, total 100 dispense cycles = 90 collected
     returns the run to the auto-paused state (you can click
     *Continue to Next Sample* again to restart from Step 1). The
     measured wash and clear durations are recorded in `log.csv` as
-    `purge_wash` and `purge_clear` rows.
+    `purge_wash` and `purge_clear` rows; Space-triggered extensions
+    are recorded as additional rows with `_ext{N}` suffixes on the
+    `well_id`, and `summary.md` reports extension counts next to
+    the per-transition durations.
 
     If *Skip inter-sample purge* was checked, this workflow is
     bypassed entirely — the new sample's discard phase starts
@@ -648,6 +659,80 @@ The recalibration flag clears on Resume-confirm, End Run, Continue
 to Next Sample, and Continue to Next Plate — those all advance the
 run past the paused point, so the captured position is no longer
 the right reference.
+
+### 6.3.7 Running a bulk submission
+
+For multi-sample sessions, autoSIP can preload Sample ID, Plate ID,
+fraction counts, and per-well volume for every tube from a spreadsheet
+so the operator does not have to retype Run Parameters between
+samples. This is the recommended workflow whenever more than two
+tubes are being processed in a session.
+
+1. **Generate a template.** In Automated mode, open the *Bulk Sample
+   Submission* panel above Run Parameters and click **Generate
+   Template**. Pick a save location (e.g. on a USB stick or in your
+   project folder). The CSV opens with header comments explaining
+   the columns and two example rows.
+
+2. **Fill in the spreadsheet.** Edit the CSV in a spreadsheet editor
+   (LibreOffice Calc, Excel, Google Sheets). The only required
+   column is `sample_id`; blank cells in the optional columns
+   (`plate_id`, `number_of_fractions`, `discard_fractions`,
+   `volume_per_well_ml`, `notes`) inherit the value currently in the
+   GUI's Run Parameters at the moment of import. Comment lines
+   starting with `#` and blank lines are ignored. Delete the example
+   rows before importing.
+
+   **Plan plate capacity.** A 96-well plate holds 96 fractions
+   minus any pre-collected wells. If your samples in aggregate
+   would exceed the capacity of one plate, choose where the plate
+   swap occurs by setting `plate_id` to a new value (e.g.
+   `Plate-2`) on the first row that should land on the new plate.
+   The transition dialog at that point will prompt you to swap the
+   physical plate before continuing.
+
+3. **Import the submission.** Click **Import Submission** in the
+   Bulk Sample Submission panel and pick the CSV. autoSIP validates
+   every row before activating the panel — if any row fails (bad
+   Sample ID character, non-integer fraction count, discards ≥ N,
+   out-of-range volume) the import is rejected as a whole and the
+   panel stays inactive. Fix the spreadsheet and re-import.
+
+   On success, Run Parameters auto-populate from row 1 and lock.
+   The panel header shows the source filename and a status line
+   (e.g. *"Bulk mode — 8 samples loaded, sample 1 of 8"*). The
+   **Project name** field remains editable so you can adjust the
+   log folder before clicking Begin Fractionation.
+
+4. **Begin Fractionation.** Confirm the run summary — the dialog
+   includes a "Bulk mode" line showing total samples and the
+   sample-1 ID. The first sample runs exactly like a normal
+   single-sample run.
+
+5. **Transition dialog at each Total reached.** When the first
+   sample finishes (auto-pause at "Total reached"), a *Continue to
+   Next Sample* dialog opens automatically. It shows the next
+   sample's Sample ID, Plate ID, and the inter-sample purge
+   reminder. You can edit the Sample ID inline if the physical tube
+   label differs from the spreadsheet — edits are flagged in the
+   final `summary.md` with a `b` suffix on the Sample ID. Click
+   **Continue** to apply the next sample's metadata to Run
+   Parameters and start the discard phase for that sample.
+
+   If you instead click **End Run** in the transition dialog,
+   bulk mode exits and the run finalizes with whatever samples
+   were completed.
+
+6. **Final sample.** After the last sample's Total reached, the
+   transition dialog reads *"Bulk Run Complete"* and offers only
+   End Run. Click it to write the final summary and exit bulk mode.
+
+The `summary.md` for a bulk run includes a `## Bulk submission`
+section listing the source spreadsheet path, total samples, and the
+as-run Sample ID sequence (with `b` markers for any IDs edited in
+the transition dialog). The `metadata.json` at run start records
+the full spreadsheet contents so the planned vs. actual sequence is
+recoverable later.
 
 ## 6.4 Logging Output
 

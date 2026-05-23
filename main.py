@@ -44,6 +44,170 @@ LEAD_SCREW_PITCH_IN_CM = 4.0
 MODE_ORDER = ["Automated", "Manual", "Cleaning"]
 
 
+# --- Bulk Sample Submission helpers ------------------------------------
+# Comment + column-header bytes written by Generate Template, and the
+# recognized column names used by the importer.
+
+_BULK_TEMPLATE_BYTES = (
+	"# autoSIP Bulk Sample Submission Template\n"
+	"# Required column: sample_id\n"
+	"# Optional columns: plate_id, number_of_fractions, discard_fractions,\n"
+	"#   volume_per_well_ml, notes\n"
+	"# Blank optional values inherit the current Run Parameters values\n"
+	"# from the GUI at the moment of import. Comment lines (starting with #)\n"
+	"# and empty lines are skipped during import.\n"
+	"# Add one row per sample, in the order they will be fractionated.\n"
+	"sample_id,plate_id,number_of_fractions,discard_fractions,volume_per_well_ml,notes\n"
+	"Tube-A01,Plate-1,20,2,0.22,Example: first gradient\n"
+	"Tube-A02,Plate-1,20,2,0.22,\n"
+	"Tube-A03,Plate-1,20,2,0.22,\n"
+	"Tube-B01,Plate-2,20,2,0.22,Example: plate swap before this sample\n"
+	"Tube-B02,Plate-2,20,2,0.22,\n"
+)
+
+_BULK_KNOWN_COLUMNS = {
+	"sample_id", "plate_id", "number_of_fractions",
+	"discard_fractions", "volume_per_well_ml", "notes",
+}
+
+
+def write_bulk_template(path):
+	"""Write the Bulk Sample Submission template to ``path``. Overwrites
+	an existing file. Raises OSError on filesystem failures."""
+	with open(path, "w", newline="") as f:
+		f.write(_BULK_TEMPLATE_BYTES)
+
+
+def load_bulk_submission(path, *, gui_defaults):
+	"""Parse a Bulk Sample Submission CSV from ``path``.
+
+	Skips ``#``-prefixed and blank lines. Validates header + each row
+	using the same constants the GUI's Run Parameters fields use.
+	``gui_defaults`` is a dict carrying the operator's current GUI
+	values for fields that are optional in the CSV (used to fill
+	blanks at import time, so the spreadsheet-omitted defaults
+	track what the operator set up before clicking Import).
+
+	Returns ``(samples, errors)``: a list of dicts (one per valid
+	row) and a list of ``(csv_row_number, message)`` tuples. If
+	``errors`` is non-empty the caller should NOT activate bulk mode.
+	"""
+	import csv as _csv
+	samples = []
+	errors = []
+
+	with open(path, newline="") as f:
+		# Pre-strip comment + blank lines so DictReader sees a clean
+		# header-then-data stream. Track original CSV line numbers so
+		# error messages can quote the user's file accurately.
+		raw_lines = []
+		raw_indices = []
+		for raw_idx, raw_line in enumerate(f, start=1):
+			stripped = raw_line.strip()
+			if not stripped or stripped.startswith("#"):
+				continue
+			raw_lines.append(raw_line)
+			raw_indices.append(raw_idx)
+
+	if not raw_lines:
+		errors.append((0, "File contains no data rows."))
+		return [], errors
+
+	# DictReader on the filtered stream.
+	from io import StringIO
+	reader = _csv.DictReader(StringIO("".join(raw_lines)))
+	if reader.fieldnames is None or "sample_id" not in (reader.fieldnames or []):
+		errors.append((raw_indices[0] if raw_indices else 0,
+			"Header row must contain a 'sample_id' column."))
+		return [], errors
+
+	for fname in reader.fieldnames:
+		if fname and fname not in _BULK_KNOWN_COLUMNS:
+			logger.warning(
+				"Bulk submission: unrecognized column %r will be ignored.",
+				fname,
+			)
+
+	for csv_row_idx, row in enumerate(reader):
+		# raw_indices[0] is the header row; data rows start at index 1.
+		file_line = raw_indices[csv_row_idx + 1] if csv_row_idx + 1 < len(raw_indices) else "?"
+		ctx = f"Row {file_line}"
+
+		def _add_err(msg):
+			errors.append((file_line, f"{ctx}: {msg}"))
+
+		sid_raw = (row.get("sample_id") or "").strip()
+		ok, sid_val = validation.sample_id(sid_raw)
+		if not ok:
+			_add_err(str(sid_val))
+			continue
+		entry = {
+			"sample_id": sid_val,
+			"spreadsheet_sample_id": sid_val,
+			"plate_id": "",
+			"number_of_fractions": None,
+			"discard_fractions": None,
+			"volume_per_well_ml": None,
+			"notes": "",
+			"edited": False,
+		}
+
+		# Optional plate_id
+		pid_raw = (row.get("plate_id") or "").strip()
+		if pid_raw:
+			ok, pid_val = validation.plate_id(pid_raw)
+			if not ok:
+				_add_err(str(pid_val))
+				continue
+			entry["plate_id"] = pid_val
+
+		# Optional number_of_fractions
+		nf_raw = (row.get("number_of_fractions") or "").strip()
+		if nf_raw:
+			ok, nf_val = validation.number_of_fractions(nf_raw)
+			if not ok:
+				_add_err(str(nf_val))
+				continue
+			entry["number_of_fractions"] = nf_val
+		# Optional discard_fractions -- cross-checked against
+		# row's N (or GUI's N if N omitted) for the upper bound.
+		df_raw = (row.get("discard_fractions") or "").strip()
+		if df_raw:
+			ok, df_val = validation.discard_fractions(df_raw)
+			if not ok:
+				_add_err(str(df_val))
+				continue
+			n_for_check = entry["number_of_fractions"]
+			if n_for_check is None:
+				try:
+					n_for_check = int(gui_defaults.get("number_of_fractions") or 0)
+				except (TypeError, ValueError):
+					n_for_check = 0
+			if n_for_check and df_val >= n_for_check:
+				_add_err(
+					f"discard_fractions ({df_val}) must be less than "
+					f"number_of_fractions ({n_for_check})."
+				)
+				continue
+			entry["discard_fractions"] = df_val
+
+		# Optional volume_per_well_ml
+		v_raw = (row.get("volume_per_well_ml") or "").strip()
+		if v_raw:
+			ok, v_val = validation.volume(v_raw)
+			if not ok:
+				_add_err(str(v_val))
+				continue
+			entry["volume_per_well_ml"] = v_val
+
+		entry["notes"] = (row.get("notes") or "").strip()
+		samples.append(entry)
+
+	if not samples and not errors:
+		errors.append((0, "File contains a header but no sample rows."))
+	return samples, errors
+
+
 class StepperMotor:
 	"""Track stepper motor state and translate cm/degree moves into microsteps.
 
@@ -665,6 +829,11 @@ class StatusBarFrame(tk.Frame):
 		self.waste_canvas = tk.Canvas(self, width=28, height=42,
 			highlightthickness=0, bd=0)
 		self.waste_canvas.pack(side=tk.RIGHT, padx=(4, 2), pady=1)
+		# "Waste:" label sits to the LEFT of the flask icon so the icon
+		# isn't ambiguous on first glance. Packed AFTER the canvas with
+		# side=RIGHT (stack-from-right) so it appears just to its left.
+		self.waste_label = tk.Label(self, text="Waste:", anchor="e")
+		self.waste_label.pack(side=tk.RIGHT, padx=(8, 0))
 		# Build the flask geometry once; _draw_flask updates fill height
 		# and color on every set_waste_state call without recreating items.
 		self._flask_fill_item = None
@@ -897,18 +1066,57 @@ class AutomatedFrame(tk.Frame):
 			command=self.end_run_clicked, style="Danger.TButton")
 		self.end_run_btn.pack(side=tk.LEFT, padx=2)
 
-		# ----- Run Parameters (top) --------------------------------------
+		# ----- Bulk Sample Submission (top of column 0) --------------
+		# Lets the operator preload a multi-sample session via a CSV.
+		# Sits above Run Parameters because it acts as a configuration
+		# upstream of the per-sample fields below.
+		bulk = tk.LabelFrame(self, text="Bulk Sample Submission", padx=8, pady=2)
+		bulk.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 4))
+		bulk.grid_columnconfigure(0, weight=1)
+		self.bulk_status_var = tk.StringVar(
+			value="Status: No bulk submission active."
+		)
+		tk.Label(bulk, textvariable=self.bulk_status_var, anchor="w",
+			justify="left", wraplength=380,
+		).grid(row=0, column=0, sticky="we")
+		self.bulk_source_var = tk.StringVar(value="")
+		# Source-path line is gridded into row 1 only when bulk is
+		# active; bulk_source_lbl.grid_remove() hides it cleanly.
+		self.bulk_source_lbl = tk.Label(bulk, textvariable=self.bulk_source_var,
+			anchor="w", justify="left", wraplength=380, fg=PALETTE["fg_muted"])
+		self.bulk_source_lbl.grid(row=1, column=0, sticky="we")
+		self.bulk_source_lbl.grid_remove()
+		bulk_btn_row = tk.Frame(bulk, bg=PALETTE["bg_frame"])
+		bulk_btn_row.grid(row=2, column=0, sticky="w", pady=(4, 0))
+		self.bulk_template_btn = ttk.Button(
+			bulk_btn_row, text="Generate Template",
+			command=app.generate_bulk_template,
+		)
+		self.bulk_template_btn.pack(side=tk.LEFT, padx=(0, 4))
+		self.bulk_import_btn = ttk.Button(
+			bulk_btn_row, text="Import Submission",
+			command=app.import_bulk_submission,
+		)
+		self.bulk_import_btn.pack(side=tk.LEFT, padx=4)
+		self.bulk_exit_btn = ttk.Button(
+			bulk_btn_row, text="Exit Bulk Mode",
+			command=app.exit_bulk_mode, style="Danger.TButton",
+		)
+		# Exit button only appears when active; managed by
+		# _refresh_bulk_panel.
+
+		# ----- Run Parameters --------------------------------------------
 		# Project + Sample ID stay user-editable while a run is in progress
 		# so the operator can update Sample ID a moment before clicking
 		# Resume after a tube swap. Number of fractions / discards are
 		# frozen at run start. Volume per well moved here from the old
 		# pump-and-volume row because it's per-fraction metadata.
 		runp = tk.LabelFrame(self, text="Run Parameters", padx=8, pady=2)
-		# Row 1 col 0: Run Parameters. Pump LabelFrame stacks directly
-		# beneath it in row 2 col 0 (flush, no double-padding) to fill
-		# the gap that would otherwise sit below this frame; the taller
-		# Plate Parameters LabelFrame spans both rows in col 1.
-		runp.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
+		self.runp_frame = runp  # exposed so bulk activation can mutate the title
+		# Row 2 col 0: Run Parameters (shifted down to make room for the
+		# Bulk panel at row 1). Pump LabelFrame stacks directly beneath
+		# in row 3 col 0; Plate Parameters at col 1 spans rows 1-3.
+		runp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		runp.grid_columnconfigure(0, weight=1)
 		self.project_te = TextEntry(runp, "Project name:")
 		self.project_te.grid(row=0, column=0, sticky="we")
@@ -960,10 +1168,9 @@ class AutomatedFrame(tk.Frame):
 		# waste-bin). The plate-start fields used to live in the table/carriage
 		# move row; they're now part of plate definition.
 		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=2)
-		# Row 1 col 1, spanning rows 1+2 so the Plate Parameters frame
-		# (which is taller because of the Waste bin sub-section) sits
-		# alongside the Run Parameters + Pump stack on the left.
-		platep.grid(row=1, column=1, rowspan=2, sticky="new", padx=(4, 2), pady=(0, 2))
+		# Row 1 col 1, spanning rows 1-3 so Plate Parameters covers the
+		# height of the Bulk + Run Parameters + Pump stack on the left.
+		platep.grid(row=1, column=1, rowspan=3, sticky="new", padx=(4, 2), pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
 		# JSON loader -- first row of Plate Parameters because loading a
 		# file populates the rows/cols/well-width/starting-point entries
@@ -971,7 +1178,7 @@ class AutomatedFrame(tk.Frame):
 		loader_row = tk.Frame(platep, bg=PALETTE["bg_frame"])
 		loader_row.grid(row=0, column=0, sticky="we", pady=(0, 6))
 		loader_row.grid_columnconfigure(1, weight=1)
-		tk.Label(loader_row, text="Load well plate file:").grid(
+		tk.Label(loader_row, text="Load labware specs:").grid(
 			row=0, column=0, sticky="w", padx=(0, 6))
 		self.json_entry = ttk.Entry(loader_row)
 		self.json_entry.grid(row=0, column=1, sticky="we")
@@ -1004,6 +1211,24 @@ class AutomatedFrame(tk.Frame):
 			textvariable=app.waste_bin_carriage_var,
 		)
 		self.waste_carriage_te.grid(row=7, column=0, sticky="we")
+
+		# Focus-out normalization: when the operator tabs away after
+		# typing a coordinate, reformat to 2 decimals so e.g. "13.6" or
+		# "13" become "13.60" / "13.00". Invalid input is left as-is so
+		# the existing inline validator can flag it on Begin.
+		def _normalize_coord_entry(te):
+			def _on_focus_out(_e):
+				raw = te.get().strip()
+				if not raw:
+					return
+				try:
+					te.set(f"{float(raw):.2f}")
+				except ValueError:
+					return
+			te.entry.bind("<FocusOut>", _on_focus_out, add="+")
+		for _coord_te in (self.table_te, self.carriage_te,
+				self.waste_table_te, self.waste_carriage_te):
+			_normalize_coord_entry(_coord_te)
 		Tooltip(
 			self.waste_table_te.entry,
 			"Waste-bin position used during the discard phase. "
@@ -1020,7 +1245,7 @@ class AutomatedFrame(tk.Frame):
 		# two LabelFrames read as a single visual stack alongside
 		# Plate Parameters in column 1.
 		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=2)
-		pumpp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
+		pumpp.grid(row=3, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
 		pumpp.grid_columnconfigure(0, weight=1)
 		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (mL/hr — see your syringe pump spec):")
 		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
@@ -1089,7 +1314,7 @@ class AutomatedFrame(tk.Frame):
 		# Clicks on the tube canvas fall through to begin_clicked too so
 		# the entire region behaves like a single button.
 		begin_frame = tk.Frame(self, bg=PALETTE["accent"], bd=0, highlightthickness=0)
-		begin_frame.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
+		begin_frame.grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 0))
 		# Outer empty columns expand so the [tube | button | distribution]
 		# trio sits centered as a group, with the icons bookending the
 		# centered text immediately on either side of the button.
@@ -1120,8 +1345,8 @@ class AutomatedFrame(tk.Frame):
 		# LabelFrames above it shrink the canvas to ~70 px tall and the
 		# plate clamps to its 12-px-per-well floor.
 		self.progress = WellPlateProgress(self, min_width=500, min_height=400)
-		self.progress.grid(row=4, column=0, columnspan=2, sticky="nsew")
-		self.grid_rowconfigure(4, weight=1)
+		self.progress.grid(row=5, column=0, columnspan=2, sticky="nsew")
+		self.grid_rowconfigure(5, weight=1)
 
 		# Mirror Project/Sample ID entry text into state.project /
 		# state.current_sample_id on every keystroke (trace_add). Focus-out
@@ -1199,6 +1424,10 @@ class AutomatedFrame(tk.Frame):
 		fields have ever been edited or when the volume-bounds migration
 		rewrites config.json).
 		"""
+		_coord_fields = {
+			"table_start", "carriage_start",
+			"waste_bin_table", "waste_bin_carriage",
+		}
 		for field in config_store.FIELDS:
 			if field not in values:
 				continue
@@ -1211,6 +1440,15 @@ class AutomatedFrame(tk.Frame):
 			elif field == "skip_intersample_purge":
 				self.app.skip_intersample_purge_var.set(val == "true")
 			else:
+				# Coordinate fields are normalized to 2 decimals so a
+				# legacy config.json with "13.650" or "12" displays as
+				# "13.65" / "12.00" without the operator having to
+				# re-save. Non-numeric values pass through unchanged.
+				if field in _coord_fields:
+					try:
+						val = f"{float(val):.2f}"
+					except (TypeError, ValueError):
+						pass
 				w = self._entry_for(field)
 				if w is not None:
 					w.set(val)
@@ -1282,13 +1520,22 @@ class AutomatedFrame(tk.Frame):
 		return self.app.state.state != "idle" or self.app.state.is_paused
 
 	def refresh(self):
-		"""Re-sync widgets and state when the Automated frame becomes active."""
+		"""Re-sync widgets and state when the Automated frame becomes active.
+
+		During an active run (state.state != "idle") the position
+		counters and status text MUST NOT be reset -- mode-switching
+		mid-run was zeroing s.x/s.y, which caused the next move to
+		send the needle back to the plate origin and the next
+		well_dispensing call to mark (0,0) as the active well, wiping
+		the plate visualization back to the first column.
+		"""
 		s = self.app.state
-		s.x = 0
-		s.y = 0
-		s.carriage_forwards = True
 		self._clear_all_errors()
-		self.app.set_status("System idle.")
+		if s.state == "idle":
+			s.x = 0
+			s.y = 0
+			s.carriage_forwards = True
+			self.app.set_status("System idle.")
 
 	def _clear_all_errors(self):
 		for te in (
@@ -1389,8 +1636,11 @@ class AutomatedFrame(tk.Frame):
 		self.rows_text_entry.set(str(n_rows))
 		self.cols_text_entry.set(str(n_cols))
 		self.ws_text_entry.set(str(abs(a1_y - b1_y) / 10.0))
-		self.table_te.set(str(15 - a1_x * 0.1))
-		self.carriage_te.set(str(0.1 * (y_dim - a1_y) - 0.5))
+		# Coordinates display with 2 decimals to match the rest of the
+		# UI; raw str() on these float expressions otherwise produces
+		# 13.650000000000001-style readings.
+		self.table_te.set(f"{15 - a1_x * 0.1:.2f}")
+		self.carriage_te.set(f"{0.1 * (y_dim - a1_y) - 0.5:.2f}")
 
 		# Remember what was loaded so the RunLogger can include the file
 		# path + inline JSON contents in metadata.json.
@@ -1507,7 +1757,7 @@ class AutomatedFrame(tk.Frame):
 			if lo_x <= waste_x <= hi_x and lo_y <= waste_y <= hi_y:
 				go = messagebox.askyesno(
 					"Waste bin overlaps plate footprint",
-					f"Waste bin position ({waste_x} cm, {waste_y} cm) appears "
+					f"Waste bin position ({waste_x:.2f} cm, {waste_y:.2f} cm) appears "
 					f"to overlap the plate footprint. Discarded fractions will "
 					f"be dispensed onto a plate well. Continue anyway?",
 					default=messagebox.NO,
@@ -1632,7 +1882,7 @@ class ManualFrame(tk.Frame):
 		self.home_btn.grid(row=2, column=0, sticky="we", pady=(0, 6))
 
 		# Position readout
-		self.position_var = tk.StringVar(value="Position: X = 0.000 cm, Y = 0.000 cm")
+		self.position_var = tk.StringVar(value="Position: X = 0.00 cm, Y = 0.00 cm")
 		self.position_lbl = tk.Label(jog, textvariable=self.position_var, anchor="w")
 		self.position_lbl.grid(row=3, column=0, sticky="we")
 
@@ -1695,7 +1945,7 @@ class ManualFrame(tk.Frame):
 			text="1. Position the needle over well A1 of your plate.",
 		).grid(row=1, column=0, sticky="w")
 		self._cal_position_var = tk.StringVar(
-			value="   Current position: X = 0.000 cm, Y = 0.000 cm")
+			value="   Current position: X = 0.00 cm, Y = 0.00 cm")
 		tk.Label(cal, textvariable=self._cal_position_var,
 			anchor="w").grid(row=2, column=0, sticky="we", padx=(20, 0))
 		primary_button(
@@ -1789,7 +2039,7 @@ class ManualFrame(tk.Frame):
 				"Position out of range",
 				f"Position out of range: X-axis must be between "
 				f"{validation.TABLE_POS_MIN} and {validation.TABLE_POS_MAX} cm. "
-				f"Current value: {x_save:.3f} cm. Jog the needle into "
+				f"Current value: {x_save:.2f} cm. Jog the needle into "
 				"range before saving.",
 				parent=self,
 			)
@@ -1800,14 +2050,14 @@ class ManualFrame(tk.Frame):
 				f"Position out of range: Y-axis must be between "
 				f"{validation.CARRIAGE_POS_MIN} and "
 				f"{validation.CARRIAGE_POS_MAX} cm. Current value: "
-				f"{y_save:.3f} cm. Jog the needle into range before saving.",
+				f"{y_save:.2f} cm. Jog the needle into range before saving.",
 				parent=self,
 			)
 			return
-		table_field.set(f"{x_save:.3f}")
-		carriage_field.set(f"{y_save:.3f}")
+		table_field.set(f"{x_save:.2f}")
+		carriage_field.set(f"{y_save:.2f}")
 		self.app.set_status(
-			f"{label} saved: X = {x_save:.3f} cm, Y = {y_save:.3f} cm"
+			f"{label} saved: X = {x_save:.2f} cm, Y = {y_save:.2f} cm"
 		)
 
 	def _save_starting_well_position(self):
@@ -1833,12 +2083,12 @@ class ManualFrame(tk.Frame):
 		"""
 		x = self.app.table_motor.get_angle() * self.app.table_motor.cm_per_deg
 		y = self.app.carriage_motor.get_angle() * self.app.carriage_motor.cm_per_deg
-		self.position_var.set(f"Position: X = {x:.3f} cm, Y = {y:.3f} cm")
+		self.position_var.set(f"Position: X = {x:.2f} cm, Y = {y:.2f} cm")
 		# Mirror to the calibration panel's live readout. Show the
 		# absolute Y so it matches what gets saved (Automated mode's
 		# Y validator expects [0, 15]).
 		self._cal_position_var.set(
-			f"   Current position: X = {x:.3f} cm, Y = {abs(y):.3f} cm"
+			f"   Current position: X = {x:.2f} cm, Y = {abs(y):.2f} cm"
 		)
 
 	def _set_space_hint(self, pump_name):
@@ -2080,11 +2330,19 @@ class CleaningFrame(tk.Frame):
 		)
 
 	def refresh(self):
+		"""Re-sync widgets when Cleaning mode becomes active.
+
+		Same guard as ``AutomatedFrame.refresh``: never mutate run
+		state or override the status text while a run is active --
+		mode-switching mid-run was clobbering the fractionation
+		state machine's direction flag and status display.
+		"""
 		self.waste_table_te.clear_error()
 		self.waste_carriage_te.clear_error()
 		s = self.app.state
-		s.carriage_forwards = True
-		self.app.set_status("System idle.")
+		if s.state == "idle":
+			s.carriage_forwards = True
+			self.app.set_status("System idle.")
 
 	def set_controls_enabled(self, enabled):
 		self.move_btn["state"] = tk.NORMAL if enabled else tk.DISABLED
@@ -2115,6 +2373,12 @@ class App(tk.Tk):
 	switching is done by ``grid_remove()`` / ``grid()`` on whole frames; no
 	widget is destroyed or rebuilt at runtime.
 	"""
+
+	@property
+	def bulk_mode_active(self):
+		"""True iff a bulk submission is currently loaded. Cleared by
+		Exit Bulk Mode, End Run, and Terminate Run."""
+		return bool(self.bulk_samples)
 
 	def __init__(self, backends):
 		super().__init__()
@@ -2164,6 +2428,24 @@ class App(tk.Tk):
 		# every time the user clicks (or space-activates) one of the two
 		# pump buttons, and persisted across launches via config_store.
 		self.last_pump_used = config_store.load_last_pump_used()
+
+		# Whether the close handler should drive the needle back to
+		# (0, 0) before the window goes away. Persistent top-level
+		# preference; toggled via the Tools -> Preferences dialog.
+		self.return_to_origin_on_exit = config_store.load_return_to_origin_on_exit()
+
+		# Bulk Sample Submission. Operator imports a CSV of sample
+		# metadata before clicking Begin Fractionation. Each entry of
+		# ``bulk_samples`` is a dict with keys:
+		#   sample_id (required), plate_id, number_of_fractions,
+		#   discard_fractions, volume_per_well_ml, notes,
+		#   spreadsheet_sample_id (original CSV value before any
+		#   transition-dialog edit), edited (bool).
+		# Ephemeral -- not persisted. ``bulk_mode_active`` is the
+		# convenience property below.
+		self.bulk_samples = []
+		self.bulk_current_index = 0
+		self.bulk_source_path = ""
 		# Per-run on-disk logger. None when no run is active. Set on
 		# start_run, cleared on run end / terminate.
 		self.run_logger = None
@@ -2309,9 +2591,13 @@ class App(tk.Tk):
 
 		# One-time initialization wiggle to seat the lead screws against a
 		# known direction of backlash. Lives here (not in a mode's refresh)
-		# because the motors themselves persist across mode switches.
+		# because the motors themselves persist across mode switches. Tare
+		# immediately after so the Manual-mode Position readout starts at
+		# exactly (0.000, 0.000) instead of (-0.100, -0.100).
 		self.table_motor.move_dist_relative(-0.1)
 		self.carriage_motor.move_dist_relative(-0.1)
+		self.table_motor.tare()
+		self.carriage_motor.tare()
 
 	def _build_menu(self):
 		"""Top-level menubar with File + Tools + Help."""
@@ -2325,6 +2611,8 @@ class App(tk.Tk):
 
 		tools = tk.Menu(menubar, tearoff=False)
 		tools.add_command(label="Open last run folder", command=self._open_last_run)
+		tools.add_separator()
+		tools.add_command(label="Preferences…", command=self._show_preferences_dialog)
 		menubar.add_cascade(label="Tools", menu=tools)
 
 		help_menu = tk.Menu(menubar, tearoff=False)
@@ -2332,6 +2620,50 @@ class App(tk.Tk):
 		menubar.add_cascade(label="Help", menu=help_menu)
 
 		self.config(menu=menubar)
+
+	def _show_preferences_dialog(self):
+		"""Modal preferences dialog. Single checkbox for the
+		return-to-origin-on-exit preference; OK persists to
+		config.json, Cancel discards."""
+		dlg = tk.Toplevel(self)
+		dlg.title("Preferences")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=18, pady=14)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		var = tk.BooleanVar(value=self.return_to_origin_on_exit)
+		tk.Checkbutton(
+			body, variable=var,
+			text="Return needle to origin when closing the application",
+		).pack(anchor="w", pady=(0, 12))
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+
+		def _ok():
+			new_val = bool(var.get())
+			self.return_to_origin_on_exit = new_val
+			try:
+				config_store.save_return_to_origin_on_exit(new_val)
+			except Exception as exc:
+				logger.warning("Could not persist preferences: %s", exc)
+			dlg.destroy()
+
+		def _cancel():
+			dlg.destroy()
+
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.RIGHT, padx=4)
+		ttk.Button(btn_row, text="OK", command=_ok,
+			style="Primary.TButton").pack(side=tk.RIGHT, padx=4)
+		dlg.bind("<Return>", lambda _e: _ok())
+		dlg.bind("<Escape>", lambda _e: _cancel())
+
+		dlg.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		dlg.grab_set()
 
 	def _show_about_dialog(self):
 		"""Custom About window: version + clickable GitHub link + the
@@ -2569,7 +2901,35 @@ class App(tk.Tk):
 	def _on_close(self):
 		"""WM_DELETE_WINDOW handler. Records a run-in-flight as
 		``manual_abort`` so end.json + summary.md still land on disk before
-		the window goes away."""
+		the window goes away.
+
+		If ``return_to_origin_on_exit`` is True AND the system is idle
+		(no active run, no e-stop, no waste-full lockdown), drive both
+		motors back to (0, 0) and re-tare before the window closes so
+		the operator finds the needle parked at a known position next
+		launch. The move is skipped mid-run so we don't surprise the
+		operator's experiment, and skipped when an e-stop / waste-full
+		lockdown is active because those signal a hardware issue worth
+		human inspection before any further motion.
+		"""
+		safe_to_home = (
+			self.return_to_origin_on_exit
+			and self.state.state == "idle"
+			and not self._terminated
+			and not self._waste_full
+			and self.run_logger is None
+		)
+		if safe_to_home:
+			try:
+				self.set_status("Returning to origin…")
+				self.update_idletasks()
+				self.table_motor.move_dist_absolute(0.0)
+				self.carriage_motor.move_dist_absolute(0.0)
+				self.table_motor.tare()
+				self.carriage_motor.tare()
+			except Exception as exc:
+				logger.warning("Origin-return on close failed: %s", exc)
+
 		if self.run_logger is not None:
 			# If a well or discard cycle was in the middle of dispense/wait,
 			# commit it so log.csv has an entry rather than silently dropping.
@@ -2586,7 +2946,8 @@ class App(tk.Tk):
 				self.run_logger.end("manual_abort", snapshot=snap,
 				plates_used=self.state.plates_used,
 				well_records=self.state.well_records,
-				waste_context=self._waste_context())
+				waste_context=self._waste_context(),
+				bulk_context=self._bulk_context())
 			except Exception as exc:
 				logger.warning("Run logger failed to close on window close: %s", exc)
 			self.run_logger = None
@@ -2600,6 +2961,12 @@ class App(tk.Tk):
 		Pause and Terminate Run buttons are hidden in non-Automated modes
 		since they only operate on fractionation runs; Return-to-home stays
 		visible across all modes.
+
+		On entering Automated, the well-plate canvas is force-refreshed
+		from its own ``status_grid`` / ``well_records`` after the next
+		idle so any rendering missed while the frame was hidden (e.g. a
+		stray ``<Configure>`` with a tiny canvas size) is recovered.
+		Run-control button states are reasserted too.
 		"""
 		if self._active_frame is not None:
 			self._active_frame.grid_remove()
@@ -2612,6 +2979,15 @@ class App(tk.Tk):
 		self.status_bar.set_mode(name)
 		self.status_bar.set_terminate_visible(name == "Automated")
 		frame.refresh()
+		if name == "Automated":
+			logger.debug(
+				"mode-switch ENTER Automated: well_records=%d phase=%s state=%s",
+				len(self.state.well_records), self.state.phase, self.state.state,
+			)
+			# Wait for the frame to actually be laid out before forcing
+			# the canvas redraw, otherwise winfo_width is still zero.
+			self.after_idle(self.automated_frame.progress.refresh_from_state)
+			self.after_idle(self._update_run_control_buttons)
 		logger.debug("Switched to %s mode", name)
 
 	def request_mode_change(self, name):
@@ -2688,6 +3064,10 @@ class App(tk.Tk):
 		self.table_motor.release()
 		self.carriage_motor.release()
 
+		# Freeze the Elapsed clock at the terminate point so the operator
+		# sees the active-fractionation time accrued before the e-stop.
+		self.automated_frame.progress.pause_elapsed()
+
 		# E-stop may have occurred because of a hardware swap or
 		# mis-plumbed pump; clear the per-pump confirmation latches so
 		# the next user-initiated activation re-prompts the operator
@@ -2709,7 +3089,8 @@ class App(tk.Tk):
 			self.run_logger.end("emergency_stopped", snapshot=snap,
 				plates_used=self.state.plates_used,
 				well_records=self.state.well_records,
-				waste_context=self._waste_context())
+				waste_context=self._waste_context(),
+				bulk_context=self._bulk_context())
 			self.run_logger = None
 
 		# Run-control buttons reflect the new idle/estopped state.
@@ -2756,6 +3137,172 @@ class App(tk.Tk):
 		self._terminated = True
 		self._update_run_control_buttons()
 		logger.warning("Run terminated")
+		# Terminate implicitly exits bulk mode -- the remaining samples
+		# need fresh consideration after whatever caused the e-stop.
+		if self.bulk_mode_active:
+			self._deactivate_bulk_mode()
+
+	# -- Bulk Sample Submission ----------------------------------------
+
+	def generate_bulk_template(self):
+		"""Save-file dialog → write the standard template to the chosen
+		path. Shows a confirmation messagebox on success."""
+		path = filedialog.asksaveasfilename(
+			parent=self,
+			title="Save Bulk Sample Submission template",
+			defaultextension=".csv",
+			initialfile="autosip_bulk_template.csv",
+			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+		)
+		if not path:
+			return
+		try:
+			write_bulk_template(path)
+		except OSError as exc:
+			messagebox.showerror(
+				"Could not write template",
+				f"Failed to save template to {path}:\n\n{exc}",
+				parent=self,
+			)
+			return
+		messagebox.showinfo(
+			"Template saved",
+			f"Template saved to {path}.\n\n"
+			"Open it in a spreadsheet program (Excel, LibreOffice, "
+			"Google Sheets), fill out one row per sample, save as CSV, "
+			"then click Import Submission.",
+			parent=self,
+		)
+
+	def import_bulk_submission(self):
+		"""Open-file dialog → parse + validate → activate bulk mode on
+		success. Validation failures pop a messagebox listing every
+		problem row by row; bulk mode does NOT activate in that case."""
+		path = filedialog.askopenfilename(
+			parent=self,
+			title="Import Bulk Sample Submission",
+			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+		)
+		if not path:
+			return
+		af = self.automated_frame
+		gui_defaults = {
+			"number_of_fractions": af.n_fractions_te.get(),
+			"discard_fractions": af.discard_te.get(),
+			"plate_id": af.plate_id_te.get(),
+			"volume_per_well_ml": af.vol_text_entry.get(),
+		}
+		try:
+			samples, errors = load_bulk_submission(path, gui_defaults=gui_defaults)
+		except (OSError, UnicodeDecodeError) as exc:
+			messagebox.showerror(
+				"Could not read CSV",
+				f"Failed to read {path}:\n\n{exc}",
+				parent=self,
+			)
+			return
+		if errors:
+			lines = [msg for _, msg in errors]
+			messagebox.showerror(
+				"Bulk submission import failed",
+				"Bulk submission import failed:\n\n" + "\n".join(lines),
+				parent=self,
+			)
+			return
+		# Success path.
+		self.bulk_samples = samples
+		self.bulk_current_index = 0
+		self.bulk_source_path = path
+		self._activate_bulk_mode()
+		messagebox.showinfo(
+			"Bulk submission loaded",
+			f"Loaded {len(samples)} samples from {path}. "
+			"Bulk mode is now active.",
+			parent=self,
+		)
+
+	def exit_bulk_mode(self):
+		"""Operator-initiated bulk-mode exit. Confirmation guard then
+		clears state + re-enables Run Parameters."""
+		if not self.bulk_mode_active:
+			return
+		if not messagebox.askyesno(
+			"Exit bulk mode?",
+			"Exit bulk mode? Run Parameters will become editable again. "
+			"Any unprocessed samples in the loaded submission will be "
+			"discarded.",
+			parent=self,
+		):
+			return
+		self._deactivate_bulk_mode()
+
+	def _activate_bulk_mode(self):
+		"""Populate Run Parameters from sample 0, disable the editable
+		entries (except Project), retitle the Run Parameters frame, and
+		refresh the bulk panel UI."""
+		af = self.automated_frame
+		self._apply_bulk_sample_to_fields(self.bulk_samples[0])
+		# Disable Run Parameters entries (Project stays editable so the
+		# operator can correct a typo before clicking Begin).
+		for te in (af.sample_id_te, af.plate_id_te, af.n_fractions_te,
+				af.discard_te, af.vol_text_entry):
+			te.entry.configure(state="disabled")
+		af.runp_frame.configure(text="Run Parameters (bulk mode)")
+		self._refresh_bulk_panel()
+
+	def _deactivate_bulk_mode(self):
+		"""Inverse of _activate_bulk_mode. Always safe to call (a no-op
+		if bulk wasn't active)."""
+		af = self.automated_frame
+		self.bulk_samples = []
+		self.bulk_current_index = 0
+		self.bulk_source_path = ""
+		for te in (af.sample_id_te, af.plate_id_te, af.n_fractions_te,
+				af.discard_te, af.vol_text_entry):
+			te.entry.configure(state="normal")
+		af.runp_frame.configure(text="Run Parameters")
+		self._refresh_bulk_panel()
+
+	def _apply_bulk_sample_to_fields(self, sample):
+		"""Write one bulk-samples entry into the Run Parameters Tk
+		fields. Blank optional spreadsheet values leave the current GUI
+		value alone -- the operator's pre-import state is the fallback."""
+		af = self.automated_frame
+		# sample_id is required; always set.
+		af.sample_id_te.set(sample["sample_id"])
+		if sample.get("plate_id"):
+			af.plate_id_te.set(sample["plate_id"])
+		if sample.get("number_of_fractions") is not None:
+			af.n_fractions_te.set(str(sample["number_of_fractions"]))
+		if sample.get("discard_fractions") is not None:
+			af.discard_te.set(str(sample["discard_fractions"]))
+		if sample.get("volume_per_well_ml") is not None:
+			af.vol_text_entry.set(f"{sample['volume_per_well_ml']:g}")
+
+	def _refresh_bulk_panel(self):
+		"""Sync the Bulk Sample Submission LabelFrame to the current
+		bulk_* state. Toggles which buttons are visible and updates
+		the status + source lines."""
+		af = self.automated_frame
+		if self.bulk_mode_active:
+			n = len(self.bulk_samples)
+			i = self.bulk_current_index + 1
+			af.bulk_status_var.set(
+				f"Status: Bulk mode — {n} samples loaded, sample {i} of {n}."
+			)
+			af.bulk_source_var.set(f"Loaded from: {self.bulk_source_path}")
+			af.bulk_source_lbl.grid()
+			# Hide template/import; show exit.
+			af.bulk_template_btn.pack_forget()
+			af.bulk_import_btn.pack_forget()
+			af.bulk_exit_btn.pack(side=tk.LEFT, padx=(0, 4))
+		else:
+			af.bulk_status_var.set("Status: No bulk submission active.")
+			af.bulk_source_var.set("")
+			af.bulk_source_lbl.grid_remove()
+			af.bulk_exit_btn.pack_forget()
+			af.bulk_template_btn.pack(side=tk.LEFT, padx=(0, 4))
+			af.bulk_import_btn.pack(side=tk.LEFT, padx=4)
 
 	def return_to_origin(self):
 		"""Move motors to (0, 0) and tare the angle counters.
@@ -2783,7 +3330,7 @@ class App(tk.Tk):
 			s.origin_returned_during_pause = True
 			logger.info(
 				"Captured pause position for mid-run recalibration: "
-				"(%.3f cm, %.3f cm)",
+				"(%.2f cm, %.2f cm)",
 				s.paused_table_cm, s.paused_carriage_cm,
 			)
 		# Same physical action as Manual Home: drive to (0, 0) + tare.
@@ -2822,7 +3369,7 @@ class App(tk.Tk):
 		self.move_to_positions(table_dist=t_val, carriage_dist=c_val)
 		self.set_status(
 			f"Moved to starting well position "
-			f"({t_val:g} cm, {c_val:g} cm)."
+			f"({t_val:.2f} cm, {c_val:.2f} cm)."
 		)
 
 	# -- Run-control button state machine -------------------------------
@@ -3288,6 +3835,35 @@ class App(tk.Tk):
 				self.waste_volume_ml, self._live_max_waste_volume(),
 			)
 
+	def _bulk_context(self):
+		"""Dict passed to ``RunLogger.end`` so summary.md's Bulk
+		submission section reflects the spreadsheet source + the
+		as-run sequence (with edit markers). Returns None when no
+		bulk submission is loaded -- the logger then omits the
+		section entirely.
+		"""
+		if not self.bulk_mode_active and not self.bulk_source_path:
+			return None
+		# bulk_current_index is incremented to 1 after sample-1 completes
+		# (in _auto_pause_total_reached), so it acts as the count of
+		# completed samples at End Run time. Slice up to (but not
+		# including) that index to get the as-run sequence.
+		# If End Run is clicked mid-sample-1, bulk_current_index is
+		# still 0 and we report an empty sequence (no samples completed
+		# fractionation).
+		completed = min(self.bulk_current_index, len(self.bulk_samples))
+		sequence = []
+		for s in self.bulk_samples[:completed]:
+			label = s.get("sample_id", "")
+			if s.get("edited"):
+				label += "b"
+			sequence.append(label)
+		return {
+			"source_path": self.bulk_source_path,
+			"total_samples": len(self.bulk_samples),
+			"sample_sequence": sequence,
+		}
+
 	def _waste_context(self):
 		"""Dict passed to ``RunLogger.end`` so end.json + summary.md get
 		the waste-bin bookkeeping for the run."""
@@ -3329,6 +3905,7 @@ class App(tk.Tk):
 			if self.state.taskId is not None:
 				self.after_cancel(self.state.taskId)
 				self.pump_controller.set_relay(False)
+			self.automated_frame.progress.pause_elapsed()
 			self.set_status("Fractionation paused...")
 			self._update_run_control_buttons()
 			return
@@ -3364,6 +3941,7 @@ class App(tk.Tk):
 			s.origin_returned_during_pause = False
 
 		self.set_status("Fractionation in progress...")
+		self.automated_frame.progress.resume_elapsed()
 
 		# Resume breadcrumb: drop a status="resume" row to the CSV
 		# pinned to the well that's about to be dispensed (the well
@@ -3407,7 +3985,7 @@ class App(tk.Tk):
 			text=(
 				"The needle has returned to the position where the run "
 				"was paused\n"
-				f"(X = {paused_x_cm:.3f} cm, Y = {paused_y_cm:.3f} cm).\n\n"
+				f"(X = {paused_x_cm:.2f} cm, Y = {paused_y_cm:.2f} cm).\n\n"
 				"Please verify visually that the needle is correctly "
 				"positioned over the expected well before resuming.\n\n"
 				"If calibration looks correct, click Confirm to resume "
@@ -3518,11 +4096,11 @@ class App(tk.Tk):
 		if discard_fractions > 0:
 			discard_lines = (
 				f"    - {discard_fractions} will be discarded to waste at "
-				f"({waste_bin_table:g} cm, {waste_bin_carriage:g} cm)\n"
+				f"({waste_bin_table:.2f} cm, {waste_bin_carriage:.2f} cm)\n"
 			)
 			waste_reminder = (
 				f"  - Verify a waste container is positioned at "
-				f"({waste_bin_table:g} cm, {waste_bin_carriage:g} cm).\n"
+				f"({waste_bin_table:.2f} cm, {waste_bin_carriage:.2f} cm).\n"
 			)
 		plate_line = (
 			f"    - {plate_count} will be collected to the plate, starting at A1\n"
@@ -3593,8 +4171,15 @@ class App(tk.Tk):
 				"run. Consider emptying the bin before starting.\n"
 			)
 		waste_projection = "".join(waste_projection_lines)
+		bulk_line = ""
+		if self.bulk_mode_active:
+			bulk_line = (
+				f"  • Bulk mode: starting sample 1 of "
+				f"{len(self.bulk_samples)} ({sample_id_at_start}).\n"
+			)
 		summary = (
 			f"Begin fractionation:\n"
+			f"{bulk_line}"
 			f"  • Project: {project}\n"
 			f"  • Sample ID: {sample_id_at_start}\n"
 			f"  • Plate ID: {plate_id_at_start}\n"
@@ -3613,7 +4198,7 @@ class App(tk.Tk):
 			"Before continuing:\n"
 			f"{waste_reminder}"
 			f"  - Verify the plate is positioned with A1 at "
-			f"({table_start:g} cm, {carriage_start:g} cm).\n"
+			f"({table_start:.2f} cm, {carriage_start:.2f} cm).\n"
 			"Continue?"
 		)
 		if not messagebox.askyesno(
@@ -3715,16 +4300,38 @@ class App(tk.Tk):
 				"peristaltic_rate_ml_per_min": peristaltic_rate_ml_per_min,
 				"max_waste_volume_ml": max_waste_volume_ml,
 				"volume_per_well_ml": volume,
-				"table_start_cm": table_start,
-				"carriage_start_cm": carriage_start,
+				"table_start_cm": round(table_start, 2),
+				"carriage_start_cm": round(carriage_start, 2),
 				"number_of_fractions": number_of_fractions,
 				"discard_fractions": discard_fractions,
-				"waste_bin_table_cm": waste_bin_table,
-				"waste_bin_carriage_cm": waste_bin_carriage,
+				"waste_bin_table_cm": round(waste_bin_table, 2),
+				"waste_bin_carriage_cm": round(waste_bin_carriage, 2),
 				"plate_id_at_start": plate_id_at_start,
 			},
 			"estimated_total_time_s": estimated_total_s,
 		}
+		if self.bulk_mode_active:
+			first = self.bulk_samples[0]
+			metadata["bulk_submission"] = {
+				"source_path": self.bulk_source_path,
+				"total_samples": len(self.bulk_samples),
+				"this_sample_index": 1,
+				"spreadsheet_sample_id": first.get("spreadsheet_sample_id", ""),
+				"actual_sample_id": first.get("sample_id", ""),
+				"notes": first.get("notes", ""),
+				"samples": [
+					{
+						"index": i + 1,
+						"spreadsheet_sample_id": s.get("spreadsheet_sample_id", ""),
+						"plate_id": s.get("plate_id", ""),
+						"number_of_fractions": s.get("number_of_fractions"),
+						"discard_fractions": s.get("discard_fractions"),
+						"volume_per_well_ml": s.get("volume_per_well_ml"),
+						"notes": s.get("notes", ""),
+					}
+					for i, s in enumerate(self.bulk_samples)
+				],
+			}
 		# The logger reads project + sample_id + plate_id via this callback
 		# each time it writes a row, so mid-run edits flow into subsequent
 		# CSV rows (Sample ID on tube swap, Plate ID on plate swap).
@@ -3768,7 +4375,7 @@ class App(tk.Tk):
 			s.phase = "discard"
 			self.set_status(
 				f"Discard phase: moving to waste bin "
-				f"({s.waste_bin_table:g} cm, {s.waste_bin_carriage:g} cm)..."
+				f"({s.waste_bin_table:.2f} cm, {s.waste_bin_carriage:.2f} cm)..."
 			)
 			self.move_to_positions(
 				table_dist=s.waste_bin_table,
@@ -3960,7 +4567,12 @@ class App(tk.Tk):
 			self.pump_liquid()
 
 	def _auto_pause_total_reached(self):
-		"""Hold the run at the last collected position; await End Run."""
+		"""Hold the run at the last collected position; await End Run.
+
+		In bulk mode: advance the bulk-sample index and auto-open the
+		transition dialog so the operator doesn't have to click
+		Continue to Next Sample to start the next sample's setup.
+		"""
 		s = self.state
 		# Cancel any pending after (defensive -- shouldn't be one here).
 		if s.taskId is not None:
@@ -3969,14 +4581,23 @@ class App(tk.Tk):
 		self.pump_controller.set_relay(False)
 		s.state = "total_reached"
 		s.is_paused = True
+		self.automated_frame.progress.pause_elapsed()
 		self.automated_frame.progress.set_total_reached(s.number_of_fractions)
 		self.set_status(
 			f"Total of {s.number_of_fractions} fractions reached. "
 			"Click End Run or Continue to Next Sample."
 		)
-		# Button row picks up the paused_total layout (Pause disabled →
-		# "Paused"; Continue + End Run enabled).
 		self._update_run_control_buttons()
+
+		if self.bulk_mode_active:
+			# bulk_current_index pointed at the just-completed sample;
+			# advance to the next one before opening the dialog so the
+			# dialog shows the "Sample N of total" copy.
+			self.bulk_current_index += 1
+			self._refresh_bulk_panel()
+			# Defer the dialog so the GUI repaints the auto-pause state
+			# before the modal grabs focus.
+			self.after(50, self._handle_bulk_transition)
 
 	def _auto_pause_plate_full(self, sample_complete):
 		"""Hold the run at the last well of a now-full plate; await
@@ -3990,6 +4611,7 @@ class App(tk.Tk):
 		s.state = "plate_full"
 		s.is_paused = True
 		s.plate_full_with_sample_complete = bool(sample_complete)
+		self.automated_frame.progress.pause_elapsed()
 		self.set_status(
 			f"Plate {s.current_plate_id} is full. Click Continue to Next "
 			"Plate to swap plates and continue."
@@ -4017,16 +4639,30 @@ class App(tk.Tk):
 
 		project_at_click = s.project or "(unset)"
 		sample_at_click = s.current_sample_id or "(unset)"
-		save = messagebox.askyesno(
-			"End Run",
-			f"Save the run logs for project '{project_at_click}' / "
-			f"sample '{sample_at_click}'?\n\n"
-			"Yes: finalize and write end_*.json + summary*.md with a "
-			"timestamp suffix.\n"
-			"No: discard finalization (metadata.json + log.csv remain "
-			"on disk; delete manually if not needed).",
-			parent=self,
-		)
+		if self.bulk_mode_active:
+			# bulk_current_index advances on each completed sample (in
+			# _auto_pause_total_reached), so it doubles as the count of
+			# completed samples at End Run time.
+			completed = min(self.bulk_current_index, len(self.bulk_samples))
+			save = messagebox.askyesno(
+				"End Run",
+				f"End bulk run with {completed} of "
+				f"{len(self.bulk_samples)} samples completed? "
+				"Logs from completed samples will be saved if you "
+				"click Yes.",
+				parent=self,
+			)
+		else:
+			save = messagebox.askyesno(
+				"End Run",
+				f"Save the run logs for project '{project_at_click}' / "
+				f"sample '{sample_at_click}'?\n\n"
+				"Yes: finalize and write end_*.json + summary*.md with a "
+				"timestamp suffix.\n"
+				"No: discard finalization (metadata.json + log.csv remain "
+				"on disk; delete manually if not needed).",
+				parent=self,
+			)
 
 		# Cancel any pending after()
 		if s.taskId is not None:
@@ -4076,7 +4712,8 @@ class App(tk.Tk):
 					plates_used=self.state.plates_used,
 					well_records=self.state.well_records,
 					file_suffix=end_ts,
-					waste_context=self._waste_context())
+					waste_context=self._waste_context(),
+					bulk_context=self._bulk_context())
 			else:
 				discarded_run_dir = self._last_run_path
 				# Close the CSV cleanly so the partial log is well-formed
@@ -4119,6 +4756,30 @@ class App(tk.Tk):
 				f"Run discarded. Partial log files at {discarded_run_dir} "
 				"may be deleted manually."
 			)
+		# End Run implicitly exits bulk mode so the next run starts
+		# with a clean Run Parameters slate.
+		if self.bulk_mode_active:
+			self._deactivate_bulk_mode()
+
+	def _handle_bulk_transition(self):
+		"""Open the bulk transition dialog. On Continue, drive through
+		the standard continue_to_next_sample workflow. On Cancel, leave
+		the run paused so the operator can re-open via the Continue to
+		Next Sample button."""
+		if not self.bulk_mode_active:
+			return
+		# If we just incremented past the last sample, show the "bulk
+		# complete" final dialog and stop here -- the operator clicks
+		# End Run to finalize.
+		if self.bulk_current_index >= len(self.bulk_samples):
+			self._show_bulk_transition_dialog()
+			return
+		if self._show_bulk_transition_dialog():
+			# Dialog already wrote the (possibly edited) sample_id +
+			# populated Run Parameters. Now run the standard
+			# continue-to-next-sample flow, which the bulk pre-flight
+			# below knows to short-circuit past its Sample ID check.
+			self.continue_to_next_sample()
 
 	def continue_to_next_sample(self):
 		"""Start a new series within the current run. Used after auto-pause-
@@ -4129,10 +4790,27 @@ class App(tk.Tk):
 		the remaining plate wells. Otherwise: reset per-series counters, emit
 		a resume breadcrumb, optionally run a discard phase, and snake-step
 		to the first new plate well.
+
+		In bulk mode: if the operator clicks the Continue to Next Sample
+		button DIRECTLY (rather than going through the auto-fired bulk
+		transition dialog), re-open the transition dialog first.
 		"""
 		s = self.state
 		# Only meaningful from the auto-pause-at-total-reached state.
 		if s.state != "total_reached":
+			return
+
+		# Bulk mode: route the operator through the transition dialog
+		# unless we just came from one (the bulk dialog applies its
+		# edits + populates fields BEFORE calling back here, so by
+		# this point Run Parameters already reflect the new sample).
+		if self.bulk_mode_active and not getattr(
+				self, "_bulk_transition_in_progress", False):
+			self._bulk_transition_in_progress = True
+			try:
+				self._handle_bulk_transition()
+			finally:
+				self._bulk_transition_in_progress = False
 			return
 
 		# Pre-flight 1: Sample ID unchanged warning. The dialog binds to
@@ -4140,9 +4818,12 @@ class App(tk.Tk):
 		# either widget propagate in real time. Re-read the value after
 		# the dialog so the rest of this method uses whatever the
 		# operator (possibly) changed it to.
+		# In bulk mode the transition dialog has already vetted Sample
+		# ID, so skip the legacy unchanged-prompt to avoid stacking
+		# modals.
 		current_sample = self.automated_frame.sample_id_te.get().strip()
 		prior_sample = getattr(self, "_series_start_sample_id", s.current_sample_id)
-		if current_sample == prior_sample:
+		if current_sample == prior_sample and not self.bulk_mode_active:
 			if not self._show_sample_id_confirm_dialog():
 				return
 			current_sample = self.automated_frame.sample_id_te.get().strip()
@@ -4222,6 +4903,9 @@ class App(tk.Tk):
 		s.discards_at_series_start = discards_val
 		s.is_paused = False
 		self._series_start_sample_id = sample_id
+		# Active fractionation resumes -- restart the Elapsed clock that
+		# pause_elapsed() froze at the prior auto-pause-at-total-reached.
+		self.automated_frame.progress.resume_elapsed()
 		logger.info("Starting series %d: sample %s (D=%d)",
 			s.series_index, sample_id, discards_val)
 
@@ -4275,7 +4959,6 @@ class App(tk.Tk):
 		finish a textbook flush".
 		"""
 		s = self.state
-		duration = float(s.purge_time)
 
 		# Move to waste bin first. Synchronous via move_to_positions;
 		# the relay claim ("fractionate") is still held from start_run.
@@ -4286,10 +4969,41 @@ class App(tk.Tk):
 		)
 		self.set_status("Inter-sample purge: awaiting user.")
 
-		# Shared state across the three phases.
-		ctx = {"cancelled": False, "modal": None, "after_id": None}
+		# Shared state across the three phases. ``is_pumping`` gates the
+		# Space-bar extension handler so a second Space press during an
+		# active countdown is ignored (would otherwise queue overlapping
+		# pump cycles). The ``cycle_*`` fields are populated when a pump
+		# cycle starts so an Escape-triggered emergency stop can log the
+		# partial row with the correct phase + extension index.
+		ctx = {"cancelled": False, "modal": None, "after_id": None,
+			"is_pumping": False,
+			"cycle_phase": None, "cycle_extension": 0,
+			"cycle_start_iso": None, "cycle_start_mono": None}
 
-		def _cancel_and_close():
+		def _cancel_and_close(*, log_partial_as_estop=False):
+			# If e-stop fires mid-pump, write the partial cycle's row
+			# BEFORE turning the relay off / clearing flags so log.csv
+			# carries a row tagged with the correct _ext{N} suffix.
+			if (log_partial_as_estop and ctx["is_pumping"]
+					and ctx["cycle_phase"] is not None
+					and self.run_logger is not None):
+				try:
+					elapsed = monotonic() - ctx["cycle_start_mono"]
+					end_iso = datetime.now().isoformat(timespec="milliseconds")
+					self.run_logger.purge_emergency_stopped(
+						phase=ctx["cycle_phase"],
+						series_index=next_series_index,
+						waste_x_cm=s.waste_bin_table,
+						waste_y_cm=s.waste_bin_carriage,
+						start_iso=ctx["cycle_start_iso"],
+						end_iso=end_iso,
+						duration_s=elapsed,
+						extension=ctx["cycle_extension"],
+					)
+				except Exception as exc:
+					logger.warning(
+						"Failed to log partial purge e-stop row: %s", exc)
+
 			ctx["cancelled"] = True
 			if ctx["after_id"] is not None:
 				try:
@@ -4297,8 +5011,10 @@ class App(tk.Tk):
 				except Exception:
 					pass
 				ctx["after_id"] = None
-			# Force the pump off in case we cancelled mid-phase.
+			# Force the pump off in case we cancelled mid-phase
+			# (initial cycle or an extension cycle).
 			self.pump_controller.set_relay(False)
+			ctx["is_pumping"] = False
 			if ctx["modal"] is not None:
 				try:
 					ctx["modal"].destroy()
@@ -4317,7 +5033,12 @@ class App(tk.Tk):
 			dlg.resizable(False, False)
 			dlg.protocol("WM_DELETE_WINDOW", _cancel_and_close)
 			# Escape -> trigger terminate_run (heavy hammer per spec).
-			dlg.bind("<Escape>", lambda _e: (_cancel_and_close(), self.terminate_run()))
+			# Pass log_partial_as_estop so a mid-cycle e-stop drops a
+			# partial row in log.csv before the relay shuts off.
+			dlg.bind("<Escape>", lambda _e: (
+				_cancel_and_close(log_partial_as_estop=True),
+				self.terminate_run(),
+			))
 
 			body = tk.Frame(dlg, padx=14, pady=12)
 			body.pack(fill=tk.BOTH, expand=True)
@@ -4349,26 +5070,40 @@ class App(tk.Tk):
 			dlg.grab_set()
 			return dlg, msg_lbl, progress_lbl, action_btn
 
-		def _run_pump_phase(phase, progress_lbl, action_btn, phase_text, on_complete):
-			"""Pump for ``duration`` seconds; tick the remaining label every
-			second; log a purge_{phase} row on completion (or partial).
+		def _run_pump_cycle(phase, progress_lbl, action_btn, phase_text,
+				cycle_duration, extension_idx, on_cycle_done):
+			"""Pump for ``cycle_duration`` seconds; tick the remaining
+			label every 250 ms; log a purge_{phase} row on completion
+			(``extension_idx``=0 for the initial cycle, ``>=1`` for each
+			Space-bar extension). On clean completion, calls
+			``on_cycle_done()`` so the modal can flip to the "purge
+			complete" state. On cancel or waste-bin halt, does not.
 			"""
 			if ctx["cancelled"]:
 				return
+			ctx["is_pumping"] = True
 			action_btn.state(["disabled"])
 			start = monotonic()
 			start_iso = datetime.now().isoformat(timespec="milliseconds")
+			# Record per-cycle metadata so an Escape-triggered e-stop
+			# can log the partial row with the right phase + extension.
+			ctx["cycle_phase"] = phase
+			ctx["cycle_extension"] = extension_idx
+			ctx["cycle_start_iso"] = start_iso
+			ctx["cycle_start_mono"] = start
 			self.pump_controller.set_relay(True)
 
 			def _tick():
 				if ctx["cancelled"]:
 					return
-				# Waste-bin auto-shutoff aborted this phase mid-pump.
+				# Waste-bin auto-shutoff aborted this cycle mid-pump.
 				# Halt + freeze the label; the user resolves via Reset
 				# and clicks the action button again to retry.
 				if self._purge_halted_for_waste:
 					ctx["after_id"] = None
 					self.pump_controller.set_relay(False)
+					ctx["is_pumping"] = False
+					ctx["cycle_phase"] = None
 					progress_lbl.config(text=(
 						f"{phase_text}: HALTED at {monotonic() - start:.0f} s "
 						"(waste bin full; click Reset Waste Counter and "
@@ -4377,7 +5112,7 @@ class App(tk.Tk):
 					action_btn.state(["!disabled"])
 					return
 				elapsed = monotonic() - start
-				remaining = max(0.0, duration - elapsed)
+				remaining = max(0.0, cycle_duration - elapsed)
 				progress_lbl.config(text=(
 					f"{phase_text}: {elapsed:.0f} s elapsed / "
 					f"{remaining:.0f} s remaining"
@@ -4385,10 +5120,13 @@ class App(tk.Tk):
 				if remaining > 0:
 					ctx["after_id"] = self.after(250, _tick)
 					return
-				# Done. Turn pump off, log the row, charge the waste
-				# estimate (duration × peristaltic rate), hand off.
+				# Done. Turn pump off, log the row (with the extension
+				# suffix when applicable), charge the waste estimate
+				# (duration × peristaltic rate), hand off.
 				ctx["after_id"] = None
 				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				ctx["cycle_phase"] = None
 				end_iso = datetime.now().isoformat(timespec="milliseconds")
 				if self.run_logger is not None:
 					self.run_logger.purge_committed(
@@ -4396,68 +5134,145 @@ class App(tk.Tk):
 						waste_x_cm=s.waste_bin_table,
 						waste_y_cm=s.waste_bin_carriage,
 						start_iso=start_iso, end_iso=end_iso,
-						duration_s=elapsed,
+						duration_s=elapsed, extension=extension_idx,
 					)
 				ml = elapsed * (self._live_peristaltic_rate() / 60.0)
 				self._add_waste(ml)
-				on_complete()
+				on_cycle_done()
 			_tick()
 
+		def _run_phase(title, phase, phase_text, action_label,
+				start_body_text, complete_template, on_advance):
+			"""Build the phase modal. The operator clicks the action
+			button to run the initial pump cycle; on completion the
+			modal flips to the "purge complete" state (Continue focused).
+			Space triggers another pump cycle (extension). Enter or
+			Continue calls ``on_advance`` so the workflow proceeds to
+			the next phase.
+			"""
+			if ctx["cancelled"]:
+				return
+			# Mutable counter so Space extensions can increment; passed
+			# into the log row as the well_id ``_ext{N}`` suffix.
+			phase_state = {"ext": 0}
+
+			def _do_cycle():
+				if ctx["is_pumping"] or ctx["cancelled"]:
+					return
+				# Re-read purge_time per cycle so a mid-workflow edit
+				# applies to the next pump-on (per spec).
+				_run_pump_cycle(
+					phase=phase, progress_lbl=progress_lbl,
+					action_btn=action_btn, phase_text=phase_text,
+					cycle_duration=float(s.purge_time),
+					extension_idx=phase_state["ext"],
+					on_cycle_done=_enter_complete_state,
+				)
+
+			def _enter_complete_state():
+				if ctx["cancelled"]:
+					return
+				# Re-evaluate purge_time so the body text + Space-hint
+				# numbers reflect the value at modal-display time.
+				cur_pt = float(s.purge_time)
+				msg_lbl.config(text=complete_template.format(purge_time=cur_pt))
+				progress_lbl.config(text="")
+				action_btn.config(text="Continue", command=_on_continue)
+				action_btn.state(["!disabled"])
+				action_btn.focus_set()
+
+			def _on_continue(_e=None):
+				if ctx["is_pumping"] or ctx["cancelled"]:
+					return
+				try:
+					dlg.unbind("<space>")
+					dlg.unbind("<Return>")
+				except Exception:
+					pass
+				if dlg.winfo_exists():
+					dlg.destroy()
+				ctx["modal"] = None
+				if not ctx["cancelled"]:
+					on_advance()
+
+			def _on_space(_e=None):
+				if ctx["is_pumping"] or ctx["cancelled"]:
+					return "break"
+				phase_state["ext"] += 1
+				_do_cycle()
+				return "break"
+
+			dlg, msg_lbl, progress_lbl, action_btn = _build_modal(
+				title, start_body_text, action_label, _do_cycle,
+			)
+			# Top-level binding catches Space wherever focus lives in the
+			# modal; the per-button override is needed because the
+			# Continue button (focused in the complete state) would
+			# otherwise invoke its own command on Space-press.
+			dlg.bind("<space>", _on_space)
+			dlg.bind("<Return>", _on_continue)
+			action_btn.bind("<space>", _on_space)
+
 		def _phase_one():
+			cur_pt = float(s.purge_time)
 			body_text = (
 				"Disconnect the inlet line from the previous sample's "
 				"centrifuge tube and place it in the wash solution container."
 				"\n\n"
-				f"Click Start Purge to run the pump for {duration:g} seconds, "
+				f"Click Start Purge to run the pump for {cur_pt:g} seconds, "
 				"drawing wash solution through the tubing. The needle is "
 				f"currently at the waste bin "
-				f"({s.waste_bin_table:g} cm, {s.waste_bin_carriage:g} cm); "
+				f"({s.waste_bin_table:.2f} cm, {s.waste_bin_carriage:.2f} cm); "
 				"wash will dispense there."
 			)
-
-			def _start_purge():
-				_run_pump_phase(
-					phase="wash",
-					progress_lbl=progress_lbl,
-					action_btn=action_btn,
-					phase_text="Purging tubing with wash solution",
-					on_complete=lambda: (
-						ctx["modal"].destroy() if ctx["modal"] else None,
-						_phase_two() if not ctx["cancelled"] else None,
-					),
-				)
-
-			_, _msg, progress_lbl, action_btn = _build_modal(
-				"Inter-sample Purge — Step 1 of 3",
-				body_text, "Start Purge", _start_purge,
+			complete = (
+				"Phase 1 purge complete ({purge_time:.0f} s of wash through "
+				"tubing).\n\n"
+				"Inspect the tubing. If the wash has fully flowed through "
+				"and the line looks clean, click Continue to proceed to "
+				"Step 2.\n\n"
+				"If you need more time, press Space to add another "
+				"{purge_time:.0f} s of pumping. You can extend as many "
+				"times as needed."
+			)
+			_run_phase(
+				title="Inter-sample Purge — Step 1 of 3",
+				phase="wash",
+				phase_text="Purging tubing with wash solution",
+				action_label="Start Purge",
+				start_body_text=body_text,
+				complete_template=complete,
+				on_advance=_phase_two,
 			)
 
 		def _phase_two():
 			if ctx["cancelled"]:
 				return
+			cur_pt = float(s.purge_time)
 			body_text = (
 				"Remove the inlet line from the wash solution container, "
 				"leaving it in air."
 				"\n\n"
-				f"Click Continue to run the pump for {duration:g} seconds, "
+				f"Click Continue to run the pump for {cur_pt:g} seconds, "
 				"pushing air through the tubing to clear residual wash."
 			)
-
-			def _start_clear():
-				_run_pump_phase(
-					phase="clear",
-					progress_lbl=progress_lbl,
-					action_btn=action_btn,
-					phase_text="Clearing wash from tubing",
-					on_complete=lambda: (
-						ctx["modal"].destroy() if ctx["modal"] else None,
-						_phase_three() if not ctx["cancelled"] else None,
-					),
-				)
-
-			_, _msg, progress_lbl, action_btn = _build_modal(
-				"Inter-sample Purge — Step 2 of 3",
-				body_text, "Continue", _start_clear,
+			complete = (
+				"Phase 2 purge complete ({purge_time:.0f} s of air through "
+				"tubing).\n\n"
+				"Inspect the tubing. If residual wash is fully cleared, "
+				"click Continue to proceed to Step 3.\n\n"
+				"If you need more time, press Space to add another "
+				"{purge_time:.0f} s of pumping. You can extend as many "
+				"times as needed."
+			)
+			_run_phase(
+				title="Inter-sample Purge — Step 2 of 3",
+				phase="clear",
+				phase_text="Clearing wash from tubing",
+				action_label="Continue",
+				start_body_text=body_text,
+				complete_template=complete,
+				on_advance=_phase_three,
 			)
 
 		def _phase_three():
@@ -4502,6 +5317,186 @@ class App(tk.Tk):
 			# end_run() inside the dialog and returns None here).
 			return
 		self._commit_plate_swap(new_plate_id)
+
+	def _show_bulk_transition_dialog(self):
+		"""Modal Toplevel: either prepare the next bulk sample or
+		announce the bulk run complete. Returns True if the operator
+		clicked Continue (next-sample case); False on Cancel; True on
+		OK of the final "Bulk Run Complete" variant.
+
+		Side-effect: when next-sample Continue is clicked, applies the
+		(possibly edited) sample_id back to ``bulk_samples[next_idx]``
+		and populates the Run Parameters fields. The caller still
+		invokes ``continue_to_next_sample`` afterward.
+		"""
+		next_idx = self.bulk_current_index
+		# Final-sample case.
+		if next_idx >= len(self.bulk_samples):
+			dlg = tk.Toplevel(self)
+			dlg.title("Bulk Run Complete")
+			dlg.transient(self)
+			dlg.resizable(False, False)
+			body = tk.Frame(dlg, padx=14, pady=12)
+			body.pack(fill=tk.BOTH, expand=True)
+			tk.Label(body, justify="left", anchor="w", wraplength=420,
+				text=(
+					f"All {len(self.bulk_samples)} samples in the bulk "
+					"submission have completed fractionation.\n\n"
+					"Click End Run to save the run logs and finalize "
+					"the session."
+				),
+			).pack(anchor="w", pady=(0, 10))
+			result = {"ok": False}
+			def _ok(_e=None):
+				result["ok"] = True
+				dlg.destroy()
+			ttk.Button(body, text="OK", command=_ok,
+				style="Primary.TButton").pack(anchor="e")
+			dlg.bind("<Return>", _ok)
+			dlg.bind("<Escape>", _ok)
+			dlg.protocol("WM_DELETE_WINDOW", _ok)
+			dlg.update_idletasks()
+			x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+			y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+			dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+			dlg.grab_set()
+			self.wait_window(dlg)
+			return result["ok"]
+
+		# Next-sample case.
+		next_sample = self.bulk_samples[next_idx]
+		just_done_idx = next_idx - 1
+		total = len(self.bulk_samples)
+
+		current_plate = self.automated_frame.plate_id_te.get().strip()
+		next_plate = next_sample.get("plate_id") or current_plate
+
+		dlg = tk.Toplevel(self)
+		dlg.title("Prepare Next Sample")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body, justify="left", anchor="w", wraplength=440,
+			text=f"Sample {just_done_idx + 1} of {total} just completed.\n\n"
+				 f"Please prepare Sample {next_idx + 1} for fractionation:",
+		).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+		# Editable Sample ID.
+		tk.Label(body, text="Sample ID:", anchor="w").grid(
+			row=1, column=0, sticky="w", padx=(0, 8))
+		sid_var = tk.StringVar(value=next_sample["sample_id"])
+		sid_entry = ttk.Entry(body, textvariable=sid_var, width=28)
+		sid_entry.grid(row=1, column=1, sticky="we")
+
+		# Display-only metadata.
+		def _detail(row, label, value):
+			tk.Label(body, text=label, anchor="w").grid(
+				row=row, column=0, sticky="w", padx=(0, 8))
+			tk.Label(body, text=value, anchor="w").grid(
+				row=row, column=1, sticky="w")
+
+		_detail(2, "Plate ID:", next_plate or "(unset)")
+		# N + D combined display
+		n_display = (
+			str(next_sample["number_of_fractions"])
+			if next_sample.get("number_of_fractions") is not None
+			else self.automated_frame.n_fractions_te.get() or "(current)"
+		)
+		d_display = (
+			str(next_sample["discard_fractions"])
+			if next_sample.get("discard_fractions") is not None
+			else self.automated_frame.discard_te.get() or "(current)"
+		)
+		_detail(3, "Fractions:", f"{n_display}  (Discard: {d_display})")
+		v_display = (
+			f"{next_sample['volume_per_well_ml']:g} mL"
+			if next_sample.get("volume_per_well_ml") is not None
+			else f"{self.automated_frame.vol_text_entry.get() or '?'} mL"
+		)
+		_detail(4, "Volume per well:", v_display)
+		row_next = 5
+		notes = next_sample.get("notes", "")
+		if notes:
+			tk.Label(body, text="Notes:", anchor="w").grid(
+				row=row_next, column=0, sticky="nw", padx=(0, 8))
+			tk.Label(body, text=notes, anchor="w", wraplength=320,
+				justify="left").grid(row=row_next, column=1, sticky="w")
+			row_next += 1
+
+		# Plate-ID comparison message.
+		if not next_sample.get("plate_id") or next_plate == current_plate:
+			plate_msg_text = "✓ Plate ID matches the current plate."
+			plate_msg_fg = "#1e7d20"
+		else:
+			plate_msg_text = (
+				f"⚠ Plate ID changes from {current_plate} to {next_plate}. "
+				"After clicking Continue, you may need to perform a "
+				"plate swap when the current plate fills."
+			)
+			plate_msg_fg = "#b25e09"
+		tk.Label(body, text=plate_msg_text, wraplength=440, justify="left",
+			anchor="w", fg=plate_msg_fg).grid(
+			row=row_next, column=0, columnspan=2, sticky="we", pady=(8, 0))
+		row_next += 1
+
+		err_lbl = tk.Label(body, text="", fg="red", anchor="w", wraplength=440)
+		err_lbl.grid(row=row_next, column=0, columnspan=2, sticky="we")
+		row_next += 1
+
+		btn_row = tk.Frame(body)
+		btn_row.grid(row=row_next, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+		result = {"confirmed": False}
+		def _cancel(_e=None):
+			dlg.destroy()
+		def _continue(_e=None):
+			ok, _ = validation.sample_id(sid_var.get())
+			if not ok:
+				return
+			result["confirmed"] = True
+			dlg.destroy()
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
+		continue_btn = ttk.Button(btn_row, text="Continue",
+			command=_continue, style="Primary.TButton")
+		continue_btn.pack(side=tk.RIGHT, padx=4)
+
+		def _sync(*_):
+			ok, msg = validation.sample_id(sid_var.get())
+			if ok:
+				err_lbl.config(text="")
+				continue_btn.state(["!disabled"])
+			else:
+				err_lbl.config(text=str(msg))
+				continue_btn.state(["disabled"])
+		sid_var.trace_add("write", _sync)
+		_sync()
+
+		dlg.bind("<Return>", _continue)
+		dlg.bind("<Escape>", _cancel)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		dlg.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		dlg.grab_set()
+		sid_entry.focus_set()
+		sid_entry.select_range(0, tk.END)
+		sid_entry.icursor(tk.END)
+		self.wait_window(dlg)
+
+		if not result["confirmed"]:
+			return False
+		# Apply edit + populate Run Parameters.
+		new_sid = sid_var.get().strip()
+		if new_sid != next_sample["spreadsheet_sample_id"]:
+			next_sample["edited"] = True
+		next_sample["sample_id"] = new_sid
+		# Run Parameters fields are disabled in bulk mode; .set() goes
+		# through the StringVar and works regardless of widget state.
+		self._apply_bulk_sample_to_fields(next_sample)
+		return True
 
 	def _show_sample_id_confirm_dialog(self):
 		"""Modal Toplevel for the unchanged-Sample-ID confirm path.
@@ -4762,6 +5757,9 @@ class App(tk.Tk):
 			s.is_paused = False
 			s.plate_full_with_sample_complete = False
 			s.phase = "collect"
+			# Plate-full auto-pause froze Elapsed; the new plate is in
+			# place and collection resumes -- restart the clock.
+			self.automated_frame.progress.resume_elapsed()
 			self.set_status(f"Resuming on plate {new_plate_id}...")
 			self.pump_liquid()
 			self._update_run_control_buttons()

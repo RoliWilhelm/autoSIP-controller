@@ -214,6 +214,48 @@ def save_last_pump_used(name):
 		json.dump(existing, f, indent=2)
 
 
+# -- return_to_origin_on_exit -----------------------------------------
+
+# Top-level boolean preference (alongside ``last_pump_used``). Defaults
+# True so a fresh install gets the safe behavior of parking the needle
+# at the origin before the window closes.
+
+def load_return_to_origin_on_exit():
+	"""Return the persisted close-handler preference. True if the
+	value is missing, malformed, or the config file doesn't exist."""
+	path = get_config_path()
+	if not path.exists():
+		return True
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return True
+	if not isinstance(data, dict):
+		return True
+	val = data.get("return_to_origin_on_exit", True)
+	return bool(val)
+
+
+def save_return_to_origin_on_exit(enabled):
+	"""Persist the close-handler preference to config.json. Preserves
+	all other top-level keys."""
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["return_to_origin_on_exit"] = bool(enabled)
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
 # -- starter profiles --------------------------------------------------
 
 def seed_starter_profiles(source_dir):

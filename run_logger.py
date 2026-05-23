@@ -29,6 +29,7 @@ manager, navigate to the autoSIP folder, and see their runs at a glance.
 import csv
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -62,6 +63,18 @@ def _iso_for_dirname(iso):
 
 def _well_id(x, y):
 	return f"{chr(ord('A') + y)}{x + 1}"
+
+
+def _fmt_coord(value):
+	"""Format a coordinate (cm or column-index) as two decimal places
+	for log.csv consistency. Empty strings pass through unchanged so
+	rows without a coordinate value still write blank columns."""
+	if value is None or value == "":
+		return ""
+	try:
+		return f"{float(value):.2f}"
+	except (TypeError, ValueError):
+		return str(value)
 
 
 def _well_sort_key(well_id):
@@ -217,7 +230,7 @@ class RunLogger:
 		return self.run_dir
 
 	def end(self, final_status, snapshot=None, plates_used=None, well_records=None,
-			file_suffix=None, waste_context=None):
+			file_suffix=None, waste_context=None, bulk_context=None):
 		"""Write ``end.json``, ``summary.md``, plus one ``summary_{id}.md``
 		per plate used, then close the CSV.
 
@@ -316,7 +329,7 @@ class RunLogger:
 			try:
 				self._write_summary(timestamp_end, final_status, snapshot,
 					wells_completed, wells_planned, actual_total_time_s,
-					plates_used, suffix, waste_context)
+					plates_used, suffix, waste_context, bulk_context)
 			except (OSError, Exception) as exc:
 				logger.warning("Failed to write summary.md: %s", exc)
 			# Per-plate summaries: filtered slices of the run summary for
@@ -387,7 +400,7 @@ class RunLogger:
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			well["well_id"], well["plate_x"], well["plate_y"],
+			well["well_id"], _fmt_coord(well["plate_x"]), _fmt_coord(well["plate_y"]),
 			well["dispense_start_iso"], well["dispense_end_iso"],
 			duration, status,
 		])
@@ -457,7 +470,7 @@ class RunLogger:
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			_well_id(next_x, next_y), next_x, next_y,
+			_well_id(next_x, next_y), _fmt_coord(next_x), _fmt_coord(next_y),
 			now, now, "0.000", "resume",
 		])
 
@@ -509,21 +522,24 @@ class RunLogger:
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			f"{suffix}_{count}", 0, 0,
+			f"{suffix}_{count}", _fmt_coord(0), _fmt_coord(0),
 			now, now, "0.000", kind,
 		])
 		self._status_counts[kind] = self._status_counts.get(kind, 0) + 1
 
 	def purge_committed(self, phase, series_index,
-			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s):
+			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s,
+			extension=0):
 		"""Append a status="purge_wash" or "purge_clear" row marking one
 		inter-sample purge pump phase.
 
 		``phase`` is ``"wash"`` or ``"clear"``. ``series_index`` is the
 		1-based index of the NEW sample series (so ``purge_wash_2`` means
-		"the purge run between sample 1 and sample 2"). Coordinates are
-		the waste-bin position; the needle is parked there during all
-		three phases of the purge workflow.
+		"the purge run between sample 1 and sample 2"). ``extension`` is
+		0 for the initial pump cycle and 1+ for each operator-triggered
+		Space-bar extension; encoded in the ``well_id`` suffix as
+		``_ext{N}``. Coordinates are the waste-bin position; the needle
+		is parked there during all three phases of the purge workflow.
 		"""
 		if self.run_dir is None:
 			return
@@ -531,13 +547,42 @@ class RunLogger:
 			logger.warning("Unknown purge phase %r; skipping log row", phase)
 			return
 		status = f"purge_{phase}"
+		well_id = f"{status}_{series_index}"
+		if extension:
+			well_id += f"_ext{extension}"
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			f"{status}_{series_index}", waste_x_cm, waste_y_cm,
+			well_id, _fmt_coord(waste_x_cm), _fmt_coord(waste_y_cm),
 			start_iso, end_iso, f"{duration_s:.3f}", status,
 		])
 		self._status_counts[status] = self._status_counts.get(status, 0) + 1
+
+	def purge_emergency_stopped(self, phase, series_index,
+			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s,
+			extension=0):
+		"""Append a status="emergency_stopped" row marking a purge pump
+		cycle that was halted mid-flight by Escape / Terminate Run.
+
+		``well_id`` mirrors :meth:`purge_committed` so the row is
+		recognizable as the partial of a specific cycle:
+		``purge_{phase}_{N}`` for the initial cycle,
+		``purge_{phase}_{N}_ext{M}`` for an interrupted extension.
+		"""
+		if self.run_dir is None:
+			return
+		if phase not in ("wash", "clear"):
+			logger.warning("Unknown purge phase %r; skipping log row", phase)
+			return
+		well_id = f"purge_{phase}_{series_index}"
+		if extension:
+			well_id += f"_ext{extension}"
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			well_id, _fmt_coord(waste_x_cm), _fmt_coord(waste_y_cm),
+			start_iso, end_iso, f"{duration_s:.3f}", "emergency_stopped",
+		])
 
 	def plate_swap_breadcrumb(self, swap_index):
 		"""Append a status="plate_swap" row marking a physical plate change.
@@ -554,7 +599,7 @@ class RunLogger:
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			f"plate_swap_{swap_index}", 0, 0,
+			f"plate_swap_{swap_index}", _fmt_coord(0), _fmt_coord(0),
 			now, now, "0.000", "plate_swap",
 		])
 
@@ -578,7 +623,7 @@ class RunLogger:
 
 	def _write_summary(self, timestamp_end, final_status, snapshot,
 			wells_completed, wells_planned, actual_total_time_s,
-			plates_used=None, suffix="", waste_context=None):
+			plates_used=None, suffix="", waste_context=None, bulk_context=None):
 		m = self._metadata
 		params = m.get("parameters", {})
 		rows = int(params.get("rows", 0) or 0)
@@ -681,16 +726,41 @@ class RunLogger:
 			out.append(f"- Resets during run: {int(waste_context.get('waste_resets_during_run') or 0)}")
 			out.append("")
 
+		# Bulk submission: spreadsheet source + sample sequence with
+		# edit markers. Only present when the operator imported a
+		# Bulk Sample Submission CSV for this run.
+		if bulk_context:
+			out.append("## Bulk submission")
+			out.append(f"- Source: {bulk_context.get('source_path', '')}")
+			out.append(
+				f"- Total samples in spreadsheet: "
+				f"{bulk_context.get('total_samples', 0)}"
+			)
+			seq = bulk_context.get("sample_sequence") or []
+			if seq:
+				out.append(f"- Sample sequence (as run): {', '.join(seq)}")
+				out.append("  (\"b\" suffix marks samples whose Sample ID was edited)")
+			out.append("")
+
 		# Inter-sample purges: list each transition with its measured
 		# wash + clear durations. Omitted entirely when no purge rows
 		# were written (Skip checked, or single-sample run).
 		purges = self._compute_intersample_purges()
 		if purges:
 			out.append("## Inter-sample purges")
-			for prev_sid, next_sid, wash_s, clear_s in purges:
+			for prev_sid, next_sid, wash_s, clear_s, wash_ext, clear_ext in purges:
+				wash_note = (
+					f" ({wash_ext} extension{'s' if wash_ext != 1 else ''})"
+					if wash_ext else ""
+				)
+				clear_note = (
+					f" ({clear_ext} extension{'s' if clear_ext != 1 else ''})"
+					if clear_ext else ""
+				)
 				out.append(
 					f"- Between {prev_sid} → {next_sid}: "
-					f"{wash_s:.1f} s wash + {clear_s:.1f} s clear"
+					f"{wash_s:.1f} s wash{wash_note} + "
+					f"{clear_s:.1f} s clear{clear_note}"
 				)
 			out.append("")
 
@@ -907,23 +977,28 @@ class RunLogger:
 
 	def _compute_intersample_purges(self):
 		"""Walk log.csv and return a list of
-		``(prev_sample_id, next_sample_id, wash_s, clear_s)`` tuples,
-		one per inter-sample transition that wrote purge rows.
+		``(prev_sample_id, next_sample_id, wash_s, clear_s,
+		wash_extensions, clear_extensions)`` tuples, one per
+		inter-sample transition that wrote purge rows.
 
 		The purge rows themselves carry the NEW sample's sample_id (the
 		``get_current_run_id`` callback is read at write time, after the
 		Sample ID entry has been updated for the new sample). To
 		reconstruct the previous sample, we walk the CSV in order and
 		track the last seen ``completed`` row's sample_id.
+
+		``well_id`` is parsed as ``purge_{phase}_{N}`` for the initial
+		cycle and ``purge_{phase}_{N}_ext{M}`` for operator-triggered
+		extensions; cycle durations sum into the phase total and the
+		``_ext{M}`` rows are counted into ``{phase}_extensions``.
 		"""
 		csv_path = self.run_dir / "log.csv"
 		if not csv_path.exists():
 			return []
-		out = []
+		well_re = re.compile(r"^purge_(wash|clear)_(\d+)(?:_ext(\d+))?$")
 		last_completed_sid = ""
-		# Pending dict keyed by series_index (parsed from well_id suffix)
-		# so a wash row followed later by a clear row can pair up even
-		# if they're not strictly adjacent in the file.
+		# Pending dict keyed by series_index so wash/clear rows pair up
+		# even if not strictly adjacent in the file.
 		pending = {}
 		try:
 			with open(csv_path) as f:
@@ -940,27 +1015,37 @@ class RunLogger:
 					except (TypeError, ValueError):
 						duration = 0.0
 					next_sid = row.get("sample_id", "") or "(unset)"
-					# series_index comes after the underscore in the well_id.
 					well = row.get("well_id", "")
-					try:
-						idx = int(well.rsplit("_", 1)[-1])
-					except ValueError:
+					m = well_re.match(well)
+					if m:
+						idx = int(m.group(2))
+						is_extension = m.group(3) is not None
+					else:
 						idx = len(pending)
+						is_extension = False
 					entry = pending.setdefault(
 						idx,
 						{"prev": last_completed_sid or "(unset)",
-							"next": next_sid, "wash": 0.0, "clear": 0.0},
+							"next": next_sid,
+							"wash": 0.0, "clear": 0.0,
+							"wash_ext": 0, "clear_ext": 0},
 					)
-					entry["next"] = next_sid  # in case wash and clear disagree
+					entry["next"] = next_sid
 					if status == "purge_wash":
-						entry["wash"] = duration
+						entry["wash"] += duration
+						if is_extension:
+							entry["wash_ext"] += 1
 					else:
-						entry["clear"] = duration
+						entry["clear"] += duration
+						if is_extension:
+							entry["clear_ext"] += 1
 		except OSError as exc:
 			logger.warning("Failed to read log.csv for purge breakdown: %s", exc)
 			return []
+		out = []
 		for _, e in sorted(pending.items()):
-			out.append((e["prev"], e["next"], e["wash"], e["clear"]))
+			out.append((e["prev"], e["next"], e["wash"], e["clear"],
+				e["wash_ext"], e["clear_ext"]))
 		return out
 
 	def _compute_provenance(self):

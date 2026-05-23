@@ -161,9 +161,34 @@ move:
 - **Volume per well (mL)** — float in `[0.1, 2.0]`, e.g. `0.22`.
   The pump runs for `volume / pump_rate` seconds per well.
 
+**Bulk Sample Submission** — preload metadata for a multi-sample
+session from a spreadsheet, so you don't have to retype Sample ID /
+Plate ID / fraction counts between tubes:
+
+- **Generate Template** — writes a starter CSV (`sample_id`,
+  `plate_id`, `number_of_fractions`, `discard_fractions`,
+  `volume_per_well_ml`, `notes`) with header comments and a couple of
+  example rows. Only `sample_id` is required per row; blank optional
+  cells inherit the current Run Parameters values at import time.
+- **Import Submission** — parses the CSV, validates each row, and
+  loads the samples. On success, Run Parameters auto-populate from
+  the first row and lock (except **Project name**, which stays
+  editable so you can adjust the log folder before clicking Begin
+  Fractionation). On any validation error the import is rejected
+  whole (the panel never half-activates).
+- **Exit Bulk Mode** — appears when a submission is loaded; clears
+  the loaded samples after a confirmation prompt and re-enables the
+  Run Parameters entries.
+
+When bulk mode is active and a sample finishes (auto-pause at "Total
+reached"), a transition dialog opens showing the next sample's
+spreadsheet values. You can edit the Sample ID inline before clicking
+**Continue** — edits are remembered in `summary.md` with a `b`
+suffix. End Run and Terminate Run both implicitly exit bulk mode.
+
 **Plate Parameters** — what the labware looks like and where it sits:
 
-- **Load well plate file** — at the top of the section. Browse for
+- **Load labware specs** — at the top of the section. Browse for
   an Opentrons-format JSON file; autoSIP reads `ordering`,
   `dimensions`, and per-well `x`/`y` and uses them to populate the
   rows, columns, well-width, and starting-point fields below.

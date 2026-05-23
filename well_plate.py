@@ -186,6 +186,7 @@ class WellPlateProgress(tk.Frame):
 
 	def __init__(self, parent, min_width=420, min_height=260):
 		super().__init__(parent)
+		logger.debug("WellPlateProgress created (id=%s)", id(self))
 
 		# Explicit width= on each label (in character cells) so the labels'
 		# requested widths don't fluctuate as text changes -- otherwise the
@@ -241,8 +242,20 @@ class WellPlateProgress(tk.Frame):
 		self._pulse_thick = False
 		self._pulse_after = None
 
-		# Elapsed/Remaining clock
-		self._start_time = None
+		# Elapsed clock. ``_elapsed_accum_s`` holds the running total of
+		# active-time accrued through the most recent pause; ``_active_since_mono``
+		# is the monotonic timestamp the run last resumed (or None when
+		# the clock is paused). Elapsed at any instant =
+		#   _elapsed_accum_s + (monotonic() - _active_since_mono if active else 0).
+		# This intentionally excludes operator-blocking pauses (inter-sample
+		# purge modal phases, plate-swap dialog, manual Pause) and the
+		# auto-pause states (total_reached, plate_full, e-stop). The widget
+		# exposes pause_elapsed() / resume_elapsed() for App to call; the
+		# Remaining estimate that previously sat next to Elapsed was removed
+		# because its inputs (operator-controlled modal pauses, purge
+		# extensions, plate-swap dwell) are unbounded by design.
+		self._elapsed_accum_s = 0.0
+		self._active_since_mono = None
 		self._clock_after = None
 
 		# Tooltip state
@@ -270,7 +283,8 @@ class WellPlateProgress(tk.Frame):
 		self.well_records = {}
 		self.dispensing_xy = None
 		self._stop_pulse()
-		self._start_time = monotonic()
+		self._elapsed_accum_s = 0.0
+		self._active_since_mono = monotonic()
 		self._start_clock()
 		self._redraw()
 		self._update_header_count()
@@ -328,11 +342,12 @@ class WellPlateProgress(tk.Frame):
 		self._update_header_count()
 
 	def end_run(self):
-		"""Stop the pulsing border and the elapsed/remaining clock tick.
+		"""Stop the pulsing border and the elapsed clock tick.
 
 		Wells keep whatever status they have so the final state stays on
 		screen until the next ``begin_run``.
 		"""
+		self.pause_elapsed()
 		self._stop_pulse()
 		self._stop_clock()
 		self.dispensing_xy = None
@@ -394,12 +409,38 @@ class WellPlateProgress(tk.Frame):
 		self.error_reasons = {}
 		self.well_records = {}
 		self.dispensing_xy = None
-		self._start_time = None
+		self._elapsed_accum_s = 0.0
+		self._active_since_mono = None
 		self.plate_lbl["text"] = ""
 		self.current_lbl["text"] = ""
 		self.count_lbl["text"] = ""
 		self.time_lbl["text"] = ""
 		self._redraw()
+
+	def refresh_from_state(self):
+		"""Force a full canvas repaint from the widget's own
+		``status_grid`` + ``well_records`` and refresh the header
+		labels. Safe to call any time -- a no-op until ``begin_run``
+		has been called (``rows``/``cols`` still zero).
+
+		Called when the AutomatedFrame becomes visible again after a
+		mode switch: the state machine kept ``status_grid`` up to date
+		while the frame was hidden, but a stray ``<Configure>`` during
+		the hidden period may have cleared the canvas item cache. This
+		method rebuilds it.
+		"""
+		logger.debug(
+			"WellPlateProgress refresh_from_state: records=%d wells_done=%d dispensing=%s",
+			len(self.well_records),
+			sum(1 for s in self.status_grid.values() if s != UNVISITED),
+			self.dispensing_xy,
+		)
+		self._redraw()
+		self._update_header_count()
+		self._update_time_label()
+		if self.dispensing_xy is not None:
+			self._update_current_label(*self.dispensing_xy)
+			self._start_pulse()
 
 	def snapshot(self):
 		"""Return a structured summary of the current plate state.
@@ -625,22 +666,50 @@ class WellPlateProgress(tk.Frame):
 		pct = (started / total * 100) if total else 0.0
 		self.count_lbl["text"] = f"Well {started} of {total} ({pct:.1f}%)"
 
+	def pause_elapsed(self):
+		"""Freeze the Elapsed counter at its current value. Called from
+		App on every state transition that stops active fractionation:
+		manual Pause, auto-pause-at-total-reached, plate-full auto-pause,
+		inter-sample purge modal display, plate-swap dialog display,
+		terminate, end_run.
+
+		Idempotent -- calling while already paused leaves the accumulator
+		unchanged. Safe to call before begin_run too.
+		"""
+		if self._active_since_mono is None:
+			return
+		self._elapsed_accum_s += monotonic() - self._active_since_mono
+		self._active_since_mono = None
+		self._update_time_label()
+
+	def resume_elapsed(self):
+		"""Unfreeze the Elapsed counter so it starts accruing again.
+		Called from App when the run transitions back into active
+		fractionation: Resume button, Continue to Next Sample (after
+		the purge workflow completes), Continue to Next Plate (after
+		the plate swap completes), Space-bar extension cycle in the
+		purge modal.
+
+		Idempotent -- calling while already running is a no-op.
+		"""
+		if self._active_since_mono is not None:
+			return
+		self._active_since_mono = monotonic()
+		self._update_time_label()
+
 	def _update_time_label(self):
-		if self._start_time is None:
+		# Remaining was removed because operator-controlled modal pauses
+		# (inter-sample purge phases, plate swap, Space extensions) make
+		# any estimate unbounded; a wrong number is worse than no number.
+		# Elapsed is the accumulator-driven "active fractionation time"
+		# tally; it pauses across the same modal/auto-pause states.
+		elapsed = self._elapsed_accum_s
+		if self._active_since_mono is not None:
+			elapsed += monotonic() - self._active_since_mono
+		if elapsed <= 0 and self._active_since_mono is None:
 			self.time_lbl["text"] = ""
 			return
-		elapsed = monotonic() - self._start_time
-
-		total = self.rows * self.cols
-		started = sum(1 for s in self.status_grid.values() if s != UNVISITED)
-		remaining_wells = max(0, total - started)
-		per_well_s = self.pump_time * 2 + ESTIMATED_MOVE_TIME_S
-		remaining_s = remaining_wells * per_well_s
-
-		self.time_lbl["text"] = (
-			f"Elapsed: {_fmt_hms(elapsed)}   "
-			f"Remaining: ~{_fmt_hms(remaining_s)}"
-		)
+		self.time_lbl["text"] = f"Elapsed: {_fmt_hms(elapsed)}"
 
 	# -- Tooltips --------------------------------------------------------
 
