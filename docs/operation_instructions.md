@@ -55,6 +55,16 @@ confirmation before switching modes.
 
 ## 6.2 Software Interface
 
+autoSIP's window carries three mode tabs at the top — **Automated**,
+**Manual**, **Cleaning**. The status bar (bottom of the window)
+shows the current pump state, status messages, a waste-bin fill
+indicator labeled *Waste:* with a flask icon + Reset button, and a
+red octagon **Terminate Run** button (Automated mode only).
+Switching modes mid-run is safe — the fractionation state machine
+continues to tick in the background while the operator visits
+Manual or Cleaning mode, and the plate-progress canvas re-paints
+from its current state on return to Automated.
+
 ### 6.2.1 Automated Mode
 
 Automated mode is the main fractionation workflow. The window is laid
@@ -87,6 +97,22 @@ five run-control buttons sits at the top-right of the frame.
 - **Volume per well (mL)** — float in `[0.1, 2.0]`. The pump runs for
   `volume / pump_rate` seconds per well.
 
+**Bulk Sample Submission.** Preload Sample ID, Plate ID, fraction
+counts, and volume for an entire multi-sample session from a CSV so
+the operator does not have to retype Run Parameters between samples.
+Two buttons:
+
+- **Generate Template** — writes a starter CSV with header comments
+  and example rows. Only `sample_id` is required per row; blank
+  optional cells inherit the current Run Parameters values at the
+  moment of import.
+- **Import Submission** — parses + validates the CSV; on success,
+  Run Parameters auto-populate from row 1 and lock (except Project
+  name). A third button — **Exit Bulk Mode** — appears once a
+  submission is loaded; clears the loaded samples after confirmation.
+
+Full workflow: §6.3.7.
+
 **Plate Parameters.** Labware geometry and positions:
 
 - **Load labware specs** — at the top of the section. Browse for an
@@ -107,23 +133,25 @@ five run-control buttons sits at the top-right of the frame.
 - **Waste bin position (y-axis)** — Y position of the waste container
   in cm, `[0.0, 15.0]`.
 
-**Pump.** Flow control:
+**Syringe Pump.** Settings for the Razel R-200 used during
+fractionation (column 0, below Run Parameters):
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
-  the syringe pump's gear-set or the peristaltic pump's calibration.
+  the syringe pump's gear-set.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`, default `1.0`. The
   dwell time *after* the pump shuts off and *before* the carriage moves
   to the next well, so a dispensed drop has time to detach cleanly.
   Longer waits improve volume consistency; shorter waits speed up the
   run.
+
+**Cleaning Parameters.** Settings for the Adafruit 3910 peristaltic
+pump used during inter-sample purges, manual purges, and Cleaning
+Purge (column 1, below Plate Parameters):
+
 - **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
   per-phase duration of the inter-sample purge (see §6.3.2). Use
   Cleaning mode's *Purge Time Calibration* panel (§6.2.3) to measure
   the right value for your tubing geometry.
-- **Skip inter-sample purge** (checkbox) — when checked, Continue to
-  Next Sample bypasses the three-phase purge workflow and goes
-  directly to the new sample's discard + collection. Leave unchecked
-  for multi-sample runs to prevent carryover between samples.
 - **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
   default `100.0`. Used by the waste-bin estimator (see §6.5) to
   convert purge-phase pump-on time into a volume contribution.
@@ -135,6 +163,10 @@ five run-control buttons sits at the top-right of the frame.
   estimate is based on configured pump rates × pump-on time, not a
   real measurement; the *Reset* button in the status bar is the
   ground-truth mechanism after a physical empty.
+
+The *Skip inter-sample purge* behavioral preference moved to **Tools
+→ Preferences** (§6.2.4) so it persists across launches alongside
+*Return needle to origin on exit*.
 
 **Run controls** (top-right of the Automated frame):
 
@@ -196,12 +228,17 @@ those live in Automated mode.
   distance as typing `1.0` cm into a Starting well position field).
 - **Home** — moves both motors to origin `(0, 0)` and re-zeros the
   software's tracked angle counters. The Position readout then
-  reads exactly `Position: X = 0.000 cm, Y = 0.000 cm`. Stepper
+  reads exactly `Position: X = 0.00 cm, Y = 0.00 cm`. Stepper
   motors can lose steps over a long session; periodically re-park
   the carriage against the upper-left mechanical limit by hand and
-  click Home to recalibrate.
-- **Position readout** — `Position: X = {x:.3f} cm, Y = {y:.3f} cm`,
-  updated after every jog and Home action.
+  click Home to recalibrate. A fresh app launch also reads
+  `(0.00, 0.00)` — the seating wiggle that initializes lead-screw
+  backlash is tared immediately after.
+- **Position readout** — `Position: X = {x:.2f} cm, Y = {y:.2f} cm`,
+  updated after every jog and Home action. All coordinate displays
+  across the GUI use two decimal places (0.01 cm = 0.1 mm
+  precision); user-typed values in the Automated-mode coordinate
+  entries are normalized on focus-out (`12.6` → `12.60`).
 
 Soft travel limits are enforced on every jog: the X axis is bounded
 `[0, 20]` cm and the Y axis `[-15, 0]` cm. With this Y range, pressing
@@ -267,6 +304,30 @@ your actual hardware:
 Use **Reset** to clear the measurement state between attempts. The
 calibration measurement is *not* recorded in `log.csv` — it is a
 setup operation, not a fractionation event.
+
+### 6.2.4 Preferences
+
+Two persistent behavioral preferences live under **Tools →
+Preferences**. Both are stored at the top level of
+`~/.autosip/config.json` and apply across launches.
+
+- **Return needle to origin when closing the application**
+  (default `True`) — when the operator clicks the window's close
+  button, the application drives both motors to `(0, 0)` and re-tares
+  the position counters before the window goes away. Skipped during
+  an active run, after a Terminate Run e-stop, and while the waste-
+  bin lockdown is active — those signal a hardware issue that
+  warrants inspection before any further motion.
+
+- **Skip inter-sample purge** (default `False`) — when checked,
+  Continue to Next Sample bypasses the three-phase purge workflow
+  and goes directly to the new sample's discard + collection.
+  Leave unchecked for multi-sample runs to prevent carryover
+  between samples; useful for solvent-compatible same-sample-type
+  sessions where the purge between tubes is wasted effort.
+
+OK saves both checkboxes and applies the new values immediately
+(no app restart needed); Cancel discards.
 
 ## 6.3 Common Workflows
 
@@ -371,8 +432,16 @@ two discard fractions each, total 100 dispense cycles = 90 collected
    your calibration (§6.3.1) and your pump's gear-set or calibration
    table.
 
-3. **Click Begin Fractionation.** A summary dialog lists every
-   parameter and the estimated run time. Confirm to start.
+3. **Click Begin Fractionation.** A compact confirmation dialog
+   opens. It shows the Sample ID and Plate ID prominently (these
+   are the parameters most worth a final glance), prompts the
+   operator to verify them, and presents a 4-row waste-bin
+   projection table (current volume, estimated added this run,
+   projected end-of-run, capacity). A ⚠ row appears if the
+   projection exceeds capacity. Other run parameters are visible
+   in the main window behind the dialog and are not duplicated.
+   Click **Begin Fractionation** to start; **Cancel** returns to
+   the input fields without launching.
 
 4. **The discard phase runs first.** The needle moves to the waste bin
    and dispenses the two discard fractions there. The progress
@@ -401,14 +470,21 @@ two discard fractions each, total 100 dispense cycles = 90 collected
    you mean to update it for the new sample? Continue anyway?"*
 
 10. **The inter-sample purge workflow runs** (unless *Skip inter-sample
-    purge* is checked in the Pump section). The needle first moves to
-    the waste bin, then the application opens a three-step modal
-    sequence:
+    purge* is checked in **Tools → Preferences**, §6.2.4). The needle
+    first moves to the waste bin, then the application opens a
+    three-step modal sequence. Each step leads with a checklist of
+    the physical actions to perform; the primary-action button is
+    disabled until every box is ticked. Two helpers sit beneath the
+    checklist: **Select All** ticks every box at once, and **Skip
+    Checklist (Expert)** bypasses the gate without ticking and writes
+    an audit row to `log.csv` (`status="checklist_skipped"`,
+    `well_id="checklist_skipped_purge_phase_{N}_{series}"`) so the
+    record of which checklists were bypassed survives.
 
-    1. **Step 1 of 3 — wash.** Disconnect the inlet line from the
-       previous sample tube and place it in the wash solution
-       container. Click **Start Purge** to run the pump for
-       *Purge time* seconds, drawing wash through the tubing. A
+    1. **Step 1 of 3 — wash.** Checklist: *Disconnected inlet line
+       from previous sample tube* / *Placed inlet line in wash
+       solution*. Click **Start Purge** to run the pump for *Purge
+       time* seconds, drawing wash through the tubing. A
        remaining-time label ticks down once per second. When the
        pump shuts off the modal enters a *purge complete* state:
        inspect the tubing, then click **Continue** (or press Enter)
@@ -416,17 +492,17 @@ two discard fractions each, total 100 dispense cycles = 90 collected
        when the countdown ends, press Space to add another full
        *Purge time* of pumping. Extensions can be triggered as
        many times as needed for each of Phase 1 and Phase 2.**
-    2. **Step 2 of 3 — clear.** Remove the inlet line from the wash
-       container, leaving it in air. Click **Continue** to run the
-       pump for another *Purge time* seconds, pushing air through
-       the tubing to clear residual wash. As in Step 1, the modal
-       enters a *purge complete* state on cycle completion — press
-       Space to add another *Purge time* of pumping if residual
-       wash is still visible, or click **Continue** to advance to
-       Step 3.
-    3. **Step 3 of 3 — connect new sample.** Connect the inlet line
-       to the new sample tube. Click **Begin Fractionation** to
-       proceed.
+    2. **Step 2 of 3 — clear.** Checklist: *Removed inlet line from
+       wash solution* / *Line is in air, nothing dripping*. Click
+       **Continue** to run the pump for another *Purge time*
+       seconds, pushing air through the tubing to clear residual
+       wash. As in Step 1, the modal enters a *purge complete*
+       state on cycle completion — press Space to add another
+       *Purge time* of pumping if residual wash is still visible,
+       or click **Continue** to advance to Step 3.
+    3. **Step 3 of 3 — connect new sample.** Checklist: *Connected
+       inlet line to sample {sample_id}'s tube* / *Connection is
+       secure*. Click **Begin Fractionation** to proceed.
 
     Each modal has a **Cancel** button that aborts the workflow and
     returns the run to the auto-paused state (you can click
@@ -437,9 +513,9 @@ two discard fractions each, total 100 dispense cycles = 90 collected
     `well_id`, and `summary.md` reports extension counts next to
     the per-transition durations.
 
-    If *Skip inter-sample purge* was checked, this workflow is
-    bypassed entirely — the new sample's discard phase starts
-    immediately after the pre-flight dialogs.
+    If *Skip inter-sample purge* is enabled in Preferences, this
+    workflow is bypassed entirely — the new sample's discard phase
+    starts immediately after the pre-flight dialogs.
 
 11. **The new sample's discard phase runs at the waste bin**, then
     collection resumes at the next available plate well in a
@@ -447,10 +523,13 @@ two discard fractions each, total 100 dispense cycles = 90 collected
 
 12. Repeat steps 6–11 for each additional sample.
 
-13. **When the last sample finishes, click End Run.** The save/discard
-    confirmation appears: *"Save the run logs for project '…' /
-    sample '…'?"* Click **Yes** to write `end_*.json`,
-    `summary_*.md`, and `summary_Plate-1_*.md` to the run directory.
+13. **When the last sample finishes, click End Run.** A three-button
+    confirmation appears (*"Save the logs for project '…' / sample
+    '…'?"*): **Save and End** writes `end_*.json`, `summary_*.md`,
+    and `summary_Plate-1_*.md` to the run directory; **Don't Save**
+    leaves only the raw `metadata.json` + `log.csv` on disk; **Cancel**
+    returns to the run without changing state. Enter activates
+    Save and End by default; Escape activates Cancel.
 
 After End Run, the progress canvas clears, all run counters reset to
 zero, and the run-control buttons return to their idle state. Click
@@ -490,22 +569,30 @@ discards — 144 total collected wells, requiring two 96-well plates.
    **Continue to Next Plate** button enables; **Continue to Next
    Sample** stays disabled (sample 6 is not complete).
 
-5. **Click Continue to Next Plate.** A modal dialog opens with five
-   numbered steps:
+5. **Click Continue to Next Plate.** A clickable checklist dialog
+   opens with four items:
 
-   1. Remove the current plate (`Plate-1`) from the stage and store
-      it for downstream processing.
-   2. Return the dispensing needle to home position — click the
-      **Move Needle to Home** button. The button changes to
-      `✓ Needle at home` once the carriage reaches origin.
-   3. Place a new plate on the stage.
-   4. Enter the new Plate ID — pre-filled as `Plate-2` (the
-      application auto-increments the trailing integer; you can
-      override).
-   5. Click **Continue** to resume fractionation.
+   1. *Removed previous plate (`Plate-1`) and stored it*.
+   2. *Moved needle to home* — ticking this checkbox drives the
+      carriage to `(0, 0)` directly (no separate Move button).
+   3. *Placed new plate on stage*.
+   4. *New plate ID:* `Plate-2` (auto-incremented suggestion; the
+      checkbox is auto-ticked once the Entry holds a value that
+      passes validation, so a fresh dialog already counts this row
+      as checked).
 
-   The dialog cannot be dismissed via the window's close box — you
-   must either click **Continue** or **Cancel Run**.
+   The **Continue** button stays disabled until every checkbox is
+   ticked. Two helpers sit beneath the list: **Select All** ticks
+   every box at once (and triggers the home move via the home
+   checkbox's trace), and **Skip Checklist (Expert)** enables
+   Continue without forcing the operator to tick each box —
+   intended for users who have done the procedure enough times
+   that the checklist is redundant. Skipping writes a
+   `checklist_skipped_plate_swap_{N}` row to `log.csv` so the
+   bypass is recorded.
+
+   The dialog cannot be dismissed via the window's close box —
+   you must either click **Continue** or **Cancel Run**.
 
 6. **After Continue, autoSIP moves to well A1 of Plate-2** and
    resumes sample 6's collection. The fraction counter continues
@@ -547,7 +634,7 @@ what files they produce.
 | **Return to Origin** (mid-pause) | While the run is paused                                                   | Moves motors to `(0, 0)` and tares the counters; captures the paused position on the first click. Used for mid-run recalibration against stepper drift (§6.3.6). | Yes — on Resume, the application moves the needle back to the captured position and shows a Confirm Calibration dialog. | No row in `log.csv`. |
 | **Continue to Next Sample** | After auto-pause at "Total reached"                                            | Starts a new series: increments series_index, runs the discard phase, then collects at the next available well. | Continues the run                                                | `resume` breadcrumb row                                                                           |
 | **Continue to Next Plate**  | After auto-pause at "Plate full"                                               | Opens the plate-swap dialog. After Continue, moves the carriage to A1 of the new plate and resumes.             | Continues the run after the dialog                               | `plate_swap` breadcrumb row                                                                       |
-| **End Run**                 | Any active run state (running, paused, total reached, plate full)              | Save-or-discard prompt; pump off; motors released; visuals reset; FractionatorState counters zeroed.            | No — the run terminates                                          | On "Yes, save": `end_{ts}.json`, `summary_{ts}.md`, `summary_{plate_id}_{ts}.md`. On "No": none.  |
+| **End Run**                 | Any active run state (running, paused, total reached, plate full)              | Three-button prompt (Cancel / Don't Save / Save and End); pump off; motors released; visuals reset; FractionatorState counters zeroed. | Cancel stays in the run; Save and End / Don't Save terminate it. | On **Save and End**: `end_{ts}.json`, `summary_{ts}.md`, `summary_{plate_id}_{ts}.md`. On **Don't Save**: none.  |
 | **Terminate Run**           | Visible in Automated mode (bottom-right of the status bar, red octagon button) | Hard-halt: pump off, motors released, run-control buttons disabled. Confirmation dialog required.               | After clicking **Return to Origin** the controls re-enable | In-flight entry stamped `emergency_stopped` in `log.csv`; `end.json` + `summary.md` written       |
 
 When to use each:
@@ -564,8 +651,8 @@ When to use each:
 - **End-of-plate** (autoSIP triggers this automatically):
   **Continue to Next Plate**, then follow the five-step swap dialog.
 - **Intentional finish** at the end of a session: **End Run**, then
-  "Yes, save" to keep the end/summary files (or "No, discard" if the
-  run was a test).
+  **Save and End** to keep the end/summary files (or **Don't Save**
+  if the run was a test).
 - **Safety emergency** (smell, collision, fluid leak):
   **Terminate Run**. Stops the pump and motors immediately on
   confirming the dialog. After the rig is verified safe, click
@@ -780,13 +867,27 @@ Status values:
 - `plate_swap` — breadcrumb at the start of a new plate (Continue to
   Next Plate); the `well_id` for these rows is `plate_swap_1`,
   `plate_swap_2`, etc.
+- `purge_wash` / `purge_clear` — inter-sample purge pump phases.
+  `well_id` is `purge_{phase}_{series}` for the initial cycle and
+  `purge_{phase}_{series}_ext{N}` for each Space-bar extension; the
+  `dispense_duration_s` column carries the measured per-cycle pump
+  duration.
+- `checklist_skipped` — emitted when the operator clicks **Skip
+  Checklist (Expert)** on a plate-swap or inter-sample-purge dialog.
+  `well_id` is `checklist_skipped_plate_swap_{N}` or
+  `checklist_skipped_purge_phase_{N}_{series}` so the bypass is
+  pinpointed in the log.
+- `waste_warning` / `waste_shutoff` / `waste_reset` — breadcrumb
+  rows for waste-bin events (80 % warning, 100 % auto-shutoff,
+  Reset Waste Counter click).
 - `emergency_stopped` — the run was terminated while this well or
-  discard cycle was mid-dispense.
+  discard cycle was mid-dispense. Also used for purge pump cycles
+  interrupted by Escape or Terminate Run.
 
-**end_{end_timestamp}.json** — written only if you choose "Yes, save"
-at End Run. Contains the final status (`completed`, `manual_abort`,
-or `emergency_stopped`), wells completed, wells planned, actual total
-time, and the list of plates used.
+**end_{end_timestamp}.json** — written only if you choose **Save and
+End** at End Run. Contains the final status (`completed`,
+`manual_abort`, or `emergency_stopped`), wells completed, wells
+planned, actual total time, and the list of plates used.
 
 **summary_{end_timestamp}.md** — human-readable run summary.
 
@@ -797,10 +898,10 @@ processing.
 
 `metadata.json` and `log.csv` are written **continuously during the
 run**; the three `_{end_timestamp}` files are written **only when End
-Run is confirmed with "Yes, save"**. If you choose "No, discard," the
-metadata.json and log.csv remain on disk but no end/summary files are
-produced — useful when the run was a test or calibration you do not
-want to archive.
+Run is confirmed with Save and End**. If you choose **Don't Save**,
+the metadata.json and log.csv remain on disk but no end/summary files
+are produced — useful when the run was a test or calibration you do
+not want to archive.
 
 ## 6.5 Safety Controls
 
@@ -877,7 +978,10 @@ configured maximum:
 - If an inter-sample purge phase was mid-pump, its modal stays open
   showing a "HALTED" message; re-click the modal's action button
   after Reset to retry the phase from the start.
-- A blocking modal appears with the recovery instructions.
+- A concise blocking modal appears: *"Estimated waste reached
+  {max} mL. Pump halted."* followed by the three-step recovery
+  list (empty container / click Reset next to flask icon / click
+  Resume).
 - A `waste_shutoff` row is appended to `log.csv`.
 
 **Reset workflow.** After physically emptying the waste container,

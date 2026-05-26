@@ -29,7 +29,7 @@ FIELDS = (
 	"project", "sample_id", "plate_id",
 	"number_of_fractions", "discard_fractions",
 	"rows", "cols", "well_size", "pump_rate", "drip_wait_time",
-	"purge_time", "skip_intersample_purge",
+	"purge_time",
 	"peristaltic_rate", "max_waste_volume",
 	"volume_per_well",
 	"table_start", "carriage_start",
@@ -252,6 +252,49 @@ def save_return_to_origin_on_exit(enabled):
 	if not isinstance(existing, dict):
 		existing = {}
 	existing["return_to_origin_on_exit"] = bool(enabled)
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
+# -- skip_intersample_purge -------------------------------------------
+
+# Top-level boolean preference. Was previously stored under ``last_used``
+# but moved here because it's a behavioral preference (like
+# ``return_to_origin_on_exit``), not a per-run parameter.
+
+def load_skip_intersample_purge():
+	"""Return the persisted Skip-purge preference. False if missing,
+	malformed, or the config file doesn't exist (safe default: a
+	multi-sample run does a full inter-sample flush)."""
+	path = get_config_path()
+	if not path.exists():
+		return False
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return False
+	if not isinstance(data, dict):
+		return False
+	val = data.get("skip_intersample_purge", False)
+	return bool(val)
+
+
+def save_skip_intersample_purge(enabled):
+	"""Persist the Skip-purge preference to config.json. Preserves all
+	other top-level keys."""
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["skip_intersample_purge"] = bool(enabled)
 	with open(path, "w") as f:
 		json.dump(existing, f, indent=2)
 

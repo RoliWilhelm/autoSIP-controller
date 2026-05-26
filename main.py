@@ -1071,7 +1071,11 @@ class AutomatedFrame(tk.Frame):
 		# Sits above Run Parameters because it acts as a configuration
 		# upstream of the per-sample fields below.
 		bulk = tk.LabelFrame(self, text="Bulk Sample Submission", padx=8, pady=2)
-		bulk.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 4))
+		# Spans both columns so the two-column layout below (Run Params +
+		# Syringe Pump | Plate Params + Cleaning Parameters) sits flush
+		# beneath it.
+		bulk.grid(row=1, column=0, columnspan=2, sticky="new",
+			padx=(2, 2), pady=(0, 4))
 		bulk.grid_columnconfigure(0, weight=1)
 		self.bulk_status_var = tk.StringVar(
 			value="Status: No bulk submission active."
@@ -1168,9 +1172,10 @@ class AutomatedFrame(tk.Frame):
 		# waste-bin). The plate-start fields used to live in the table/carriage
 		# move row; they're now part of plate definition.
 		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=2)
-		# Row 1 col 1, spanning rows 1-3 so Plate Parameters covers the
-		# height of the Bulk + Run Parameters + Pump stack on the left.
-		platep.grid(row=1, column=1, rowspan=3, sticky="new", padx=(4, 2), pady=(0, 2))
+		# Row 2 col 1: Plate Parameters sits opposite Run Parameters in
+		# the two-column layout. Cleaning Parameters fills row 3 col 1
+		# below it, mirroring Run Params + Syringe Pump on the left.
+		platep.grid(row=2, column=1, sticky="new", padx=(4, 2), pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
 		# JSON loader -- first row of Plate Parameters because loading a
 		# file populates the rows/cols/well-width/starting-point entries
@@ -1240,16 +1245,17 @@ class AutomatedFrame(tk.Frame):
 			"Ignored when Discard fractions = 0.",
 		)
 
-		# ----- Pump ------------------------------------------------------
-		# Sits in column 0 below Run Parameters, flush against it so the
-		# two LabelFrames read as a single visual stack alongside
-		# Plate Parameters in column 1.
-		pumpp = tk.LabelFrame(self, text="Pump", padx=8, pady=2)
-		pumpp.grid(row=3, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
-		pumpp.grid_columnconfigure(0, weight=1)
-		self.pump_rate_text_entry = TextEntry(pumpp, "Pump rate (mL/hr — see your syringe pump spec):")
+		# ----- Syringe Pump ---------------------------------------------
+		# Column 0, row 3 — directly under Run Parameters so the
+		# fractionation-controlling stack reads top-down. The
+		# Skip-inter-sample-purge toggle moved to Tools → Preferences.
+		syringe_pump = tk.LabelFrame(self, text="Syringe Pump", padx=8, pady=2)
+		syringe_pump.grid(row=3, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
+		syringe_pump.grid_columnconfigure(0, weight=1)
+		self.pump_rate_text_entry = TextEntry(syringe_pump,
+			"Pump rate (mL/hr — see your syringe pump spec):")
 		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
-		self.drip_wait_te = TextEntry(pumpp, "Drip wait time (s):")
+		self.drip_wait_te = TextEntry(syringe_pump, "Drip wait time (s):")
 		self.drip_wait_te.grid(row=1, column=0, sticky="we")
 		self.drip_wait_te.set("1.0")
 		Tooltip(
@@ -1257,10 +1263,18 @@ class AutomatedFrame(tk.Frame):
 			"Wait time between pump-off and moving to the next well. "
 			"Longer waits improve volume consistency; shorter waits run faster.",
 		)
+
+		# ----- Cleaning Parameters --------------------------------------
+		# Column 1, row 3 — under Plate Parameters and opposite Syringe
+		# Pump. Groups everything related to the peristaltic pump used
+		# for inter-sample purges, manual purges, and Cleaning Purge.
+		cleaning_params = tk.LabelFrame(self, text="Cleaning Parameters", padx=8, pady=2)
+		cleaning_params.grid(row=3, column=1, sticky="new", padx=(4, 2), pady=(0, 2))
+		cleaning_params.grid_columnconfigure(0, weight=1)
 		self.purge_time_te = TextEntry(
-			pumpp, "Purge time (s):", textvariable=app.purge_time_var,
+			cleaning_params, "Purge time (s):", textvariable=app.purge_time_var,
 		)
-		self.purge_time_te.grid(row=2, column=0, sticky="we")
+		self.purge_time_te.grid(row=0, column=0, sticky="we")
 		Tooltip(
 			self.purge_time_te.entry,
 			"Per-phase duration of the inter-sample purge. Two pump phases "
@@ -1268,22 +1282,11 @@ class AutomatedFrame(tk.Frame):
 			"many seconds. Use Cleaning mode's Purge Time Calibration to "
 			"measure the right value for your tubing.",
 		)
-		self.skip_purge_chk = ttk.Checkbutton(
-			pumpp, text="Skip inter-sample purge",
-			variable=app.skip_intersample_purge_var,
-		)
-		self.skip_purge_chk.grid(row=3, column=0, sticky="w", pady=(2, 0))
-		Tooltip(
-			self.skip_purge_chk,
-			"When checked, Continue to Next Sample goes straight to the "
-			"new sample's discard phase with no tubing flush. Leave "
-			"unchecked for multi-sample runs to prevent carryover.",
-		)
 		self.peristaltic_rate_te = TextEntry(
-			pumpp, "Peristaltic pump rate (mL/min):",
+			cleaning_params, "Peristaltic pump rate (mL/min):",
 			textvariable=app.peristaltic_rate_var,
 		)
-		self.peristaltic_rate_te.grid(row=4, column=0, sticky="we")
+		self.peristaltic_rate_te.grid(row=1, column=0, sticky="we")
 		Tooltip(
 			self.peristaltic_rate_te.entry,
 			"Flow rate of the peristaltic pump used for purges. Drives "
@@ -1291,10 +1294,10 @@ class AutomatedFrame(tk.Frame):
 			"purges, Manual Purge, Cleaning Purge, Purge Time Calibration).",
 		)
 		self.max_waste_te = TextEntry(
-			pumpp, "Max waste bin volume (mL):",
+			cleaning_params, "Max waste bin volume (mL):",
 			textvariable=app.max_waste_volume_var,
 		)
-		self.max_waste_te.grid(row=5, column=0, sticky="we")
+		self.max_waste_te.grid(row=2, column=0, sticky="we")
 		Tooltip(
 			self.max_waste_te.entry,
 			"Capacity of your waste container. autoSIP warns at 80% and "
@@ -1406,8 +1409,6 @@ class AutomatedFrame(tk.Frame):
 		for field in config_store.FIELDS:
 			if field == "labware_file":
 				out[field] = self.json_entry.get()
-			elif field == "skip_intersample_purge":
-				out[field] = "true" if self.app.skip_intersample_purge_var.get() else "false"
 			else:
 				w = self._entry_for(field)
 				out[field] = w.get() if w is not None else ""
@@ -1437,8 +1438,6 @@ class AutomatedFrame(tk.Frame):
 			if field == "labware_file":
 				self.json_entry.delete(0, tk.END)
 				self.json_entry.insert(0, val)
-			elif field == "skip_intersample_purge":
-				self.app.skip_intersample_purge_var.set(val == "true")
 			else:
 				# Coordinate fields are normalized to 2 decimals so a
 				# legacy config.json with "13.650" or "12" displays as
@@ -2465,9 +2464,12 @@ class App(tk.Tk):
 		# Purge Time Calibration panel can write a measured value here and
 		# Automated mode's Purge time entry picks it up immediately.
 		self.purge_time_var = tk.StringVar(value="30.0")
-		# Skip flag for the inter-sample purge workflow. BooleanVar so the
-		# Skip checkbox in Automated mode binds directly to it.
-		self.skip_intersample_purge_var = tk.BooleanVar(value=False)
+		# Skip flag for the inter-sample purge workflow. Toggled via the
+		# Tools → Preferences dialog and persisted as a top-level field
+		# in config.json (not under last_used).
+		self.skip_intersample_purge_var = tk.BooleanVar(
+			value=config_store.load_skip_intersample_purge()
+		)
 		# Peristaltic pump rate (mL/min) used by all purge-claim waste
 		# tracking. Live value -- mid-run edits affect subsequent waste
 		# calculations.
@@ -2622,9 +2624,8 @@ class App(tk.Tk):
 		self.config(menu=menubar)
 
 	def _show_preferences_dialog(self):
-		"""Modal preferences dialog. Single checkbox for the
-		return-to-origin-on-exit preference; OK persists to
-		config.json, Cancel discards."""
+		"""Modal preferences dialog. OK persists each checkbox to
+		config.json and applies immediately; Cancel discards."""
 		dlg = tk.Toplevel(self)
 		dlg.title("Preferences")
 		dlg.transient(self)
@@ -2632,20 +2633,32 @@ class App(tk.Tk):
 		body = tk.Frame(dlg, padx=18, pady=14)
 		body.pack(fill=tk.BOTH, expand=True)
 
-		var = tk.BooleanVar(value=self.return_to_origin_on_exit)
+		return_var = tk.BooleanVar(value=self.return_to_origin_on_exit)
 		tk.Checkbutton(
-			body, variable=var,
+			body, variable=return_var,
 			text="Return needle to origin when closing the application",
+		).pack(anchor="w", pady=(0, 8))
+
+		skip_var = tk.BooleanVar(value=self.skip_intersample_purge_var.get())
+		tk.Checkbutton(
+			body, variable=skip_var,
+			text="Skip inter-sample purge",
 		).pack(anchor="w", pady=(0, 12))
 
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
 
 		def _ok():
-			new_val = bool(var.get())
-			self.return_to_origin_on_exit = new_val
+			new_return = bool(return_var.get())
+			new_skip = bool(skip_var.get())
+			self.return_to_origin_on_exit = new_return
+			# Push into the live BooleanVar so the state-machine read
+			# (state.skip_intersample_purge at Begin) sees the new value
+			# without an app restart.
+			self.skip_intersample_purge_var.set(new_skip)
 			try:
-				config_store.save_return_to_origin_on_exit(new_val)
+				config_store.save_return_to_origin_on_exit(new_return)
+				config_store.save_skip_intersample_purge(new_skip)
 			except Exception as exc:
 				logger.warning("Could not persist preferences: %s", exc)
 			dlg.destroy()
@@ -3779,12 +3792,11 @@ class App(tk.Tk):
 		messagebox.showwarning(
 			"⚠ Waste Bin Full",
 			(
-				f"The estimated waste volume has reached the configured "
-				f"maximum ({max_v:.0f} mL). All pump activity has been "
-				"halted to prevent overflow.\n\n"
-				"  1. Empty the waste container.\n"
-				"  2. Click Reset Waste Counter in the status bar.\n"
-				"  3. Resume your run (or End Run if you'd rather stop)."
+				f"Estimated waste reached {max_v:.0f} mL. Pump halted.\n\n"
+				"To resume:\n"
+				"  1. Empty waste container\n"
+				"  2. Click Reset (next to flask icon)\n"
+				"  3. Click Resume"
 			),
 			parent=self,
 		)
@@ -3965,6 +3977,185 @@ class App(tk.Tk):
 
 		self._update_run_control_buttons()
 
+	# -- Dialog helpers ---------------------------------------------------
+
+	def _center_over_main(self, dlg):
+		"""Center a Toplevel over the main window. Call after the
+		dialog has been packed/gridded and ``update_idletasks`` so
+		``winfo_width()`` reflects the requested size."""
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+	def _build_kv_table(self, parent, rows, *, value_anchor="e"):
+		"""Render a 2-column key/value table inside ``parent``. ``rows``
+		is a list of ``(label, value, [fg])`` tuples; the optional
+		``fg`` overrides the value cell's foreground (used for ⚠ rows).
+		Returns the table Frame so callers can pack/grid it.
+		"""
+		table = tk.Frame(parent, bg="#cccccc", bd=1, relief="solid")
+		for r, row in enumerate(rows):
+			label, value = row[0], row[1]
+			fg = row[2] if len(row) > 2 else None
+			tk.Label(table, text=label, anchor="w", padx=8, pady=3,
+				bg="white",
+			).grid(row=r, column=0, sticky="nsew", padx=(0, 1), pady=(0 if r == 0 else 1, 0))
+			tk.Label(table, text=value, anchor=value_anchor, padx=8, pady=3,
+				bg="white", fg=fg or PALETTE["fg_text"],
+			).grid(row=r, column=1, sticky="nsew", pady=(0 if r == 0 else 1, 0))
+		table.grid_columnconfigure(0, weight=1)
+		table.grid_columnconfigure(1, weight=0)
+		return table
+
+	def _build_checklist(self, parent, items, *,
+			on_change=None, side_effects=None):
+		"""Render a vertical checklist of items inside ``parent``.
+
+		``items`` is a list of label strings. ``on_change(all_checked)``
+		fires whenever a box toggles; the primary-action button uses
+		this to enable itself once everything is ticked.
+		``side_effects`` is an optional dict {index: callable} run by
+		Select All to trigger button-style items (e.g. Move Needle).
+		Returns ``(vars_list, frame)``.
+		"""
+		vars_list = []
+		frame = tk.Frame(parent)
+		for i, label in enumerate(items):
+			var = tk.IntVar(value=0)
+			vars_list.append(var)
+			cb = ttk.Checkbutton(frame, text=label, variable=var)
+			cb.grid(row=i, column=0, sticky="w", pady=1)
+
+		def _evaluate(*_):
+			all_checked = all(v.get() == 1 for v in vars_list)
+			if on_change is not None:
+				on_change(all_checked)
+		for v in vars_list:
+			v.trace_add("write", _evaluate)
+		_evaluate()
+		return vars_list, frame
+
+	def _show_begin_fractionation_dialog(self, *,
+			sample_id, plate_id,
+			waste_now, waste_added, waste_projected, waste_max):
+		"""Compact Begin Fractionation confirmation. Prompts for the
+		Sample ID (the parameter most worth a final glance), shows a
+		2-column waste-bin projection table, and offers Cancel /
+		Begin Fractionation. All other run parameters are visible in
+		the main window behind the dialog and are not duplicated.
+
+		Returns True if Begin Fractionation is clicked, False on
+		Cancel / Escape / window-close.
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title("Begin Fractionation")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=18, pady=14)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		# Header: the two identifiers the operator is most likely to
+		# have mis-set when starting a new run.
+		id_table = self._build_kv_table(body, [
+			("Sample ID:", sample_id),
+			("Plate ID:", plate_id),
+		], value_anchor="w")
+		id_table.pack(fill=tk.X, pady=(0, 8))
+
+		tk.Label(body, justify="left", anchor="w", wraplength=440,
+			text=("Verify the Sample ID above is correct for this run. "
+				"Other parameters are visible in the window behind this "
+				"dialog — review and adjust them before continuing if "
+				"needed."),
+		).pack(anchor="w", pady=(0, 10))
+
+		tk.Label(body, text="Waste bin projection:", anchor="w",
+			font=FONTS["bold"]).pack(anchor="w", pady=(0, 4))
+		waste_rows = [
+			("At run start", f"{waste_now:.0f} mL"),
+			("Estimated added this run", f"{waste_added:.0f} mL"),
+			("Projected end-of-run", f"{waste_projected:.0f} mL"),
+			("Capacity", f"{waste_max:.0f} mL"),
+		]
+		if waste_projected > waste_max and waste_max > 0:
+			waste_rows.append(
+				("⚠ Projected to exceed capacity", "Empty bin first?",
+				 "#b25e09"),
+			)
+		self._build_kv_table(body, waste_rows).pack(fill=tk.X, pady=(0, 12))
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+		result = {"go": False}
+		def _ok(_e=None):
+			result["go"] = True
+			dlg.destroy()
+		def _cancel(_e=None):
+			dlg.destroy()
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
+		begin_btn = ttk.Button(btn_row, text="Begin Fractionation",
+			command=_ok, style="Primary.TButton")
+		begin_btn.pack(side=tk.RIGHT, padx=4)
+		dlg.bind("<Return>", _ok)
+		dlg.bind("<Escape>", _cancel)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+		dlg.grab_set()
+		begin_btn.focus_set()
+		self.wait_window(dlg)
+		return result["go"]
+
+	def _show_end_run_dialog(self, *, project, sample_id, bulk_summary=None):
+		"""Three-button End Run confirmation. Returns ``"save"``,
+		``"discard"``, or ``"cancel"``. ``bulk_summary`` (when set)
+		shows a short bulk-progress line in place of the
+		project/sample prompt.
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title("End Run")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=18, pady=14)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		if bulk_summary:
+			prompt = bulk_summary
+		else:
+			prompt = (
+				f"Save the logs for project '{project}' / "
+				f"sample '{sample_id}'?"
+			)
+		tk.Label(body, text=prompt, justify="left", anchor="w",
+			wraplength=420).pack(anchor="w", pady=(0, 12))
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+		result = {"choice": "cancel"}
+		def _save(_e=None):
+			result["choice"] = "save"; dlg.destroy()
+		def _discard():
+			result["choice"] = "discard"; dlg.destroy()
+		def _cancel(_e=None):
+			result["choice"] = "cancel"; dlg.destroy()
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
+		save_btn = ttk.Button(btn_row, text="Save and End",
+			command=_save, style="Primary.TButton")
+		save_btn.pack(side=tk.RIGHT, padx=4)
+		ttk.Button(btn_row, text="Don't Save",
+			command=_discard, style="Danger.TButton").pack(side=tk.RIGHT, padx=4)
+		dlg.bind("<Return>", _save)
+		dlg.bind("<Escape>", _cancel)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+		dlg.grab_set()
+		save_btn.focus_set()
+		self.wait_window(dlg)
+		return result["choice"]
+
 	def _show_calibration_confirm_dialog(self, paused_x_cm, paused_y_cm):
 		"""Modal Toplevel asking the operator to verify the needle is
 		correctly positioned over the expected well after a mid-pause
@@ -4089,121 +4280,23 @@ class App(tk.Tk):
 		)
 		estimated_total_s = discard_seconds + plate_seconds
 
-		# Pre-build the confirmation dialog text. D == 0 omits both the
-		# discard line and the waste-container reminder.
-		discard_lines = ""
-		waste_reminder = ""
-		if discard_fractions > 0:
-			discard_lines = (
-				f"    - {discard_fractions} will be discarded to waste at "
-				f"({waste_bin_table:.2f} cm, {waste_bin_carriage:.2f} cm)\n"
-			)
-			waste_reminder = (
-				f"  - Verify a waste container is positioned at "
-				f"({waste_bin_table:.2f} cm, {waste_bin_carriage:.2f} cm).\n"
-			)
-		plate_line = (
-			f"    - {plate_count} will be collected to the plate, starting at A1\n"
-		)
-		runtime_breakdown = (
-			f"  (discard phase: {_fmt_hms(discard_seconds)}; "
-			f"plate phase: {_fmt_hms(plate_seconds)})"
-		)
-		# Inter-sample purge line: shown only when the run could have a
-		# transition (always shown; the user may not click Continue to
-		# Next Sample, but the configuration applies if they do). The
-		# wording is symmetric (skipped vs. configured), and the
-		# runtime estimate is annotated with a caveat about the
-		# user-controlled pauses since those are open-ended.
-		if skip_intersample_purge:
-			purge_line = (
-				"  • Inter-sample purge: SKIPPED (no tubing flush between "
-				"samples)\n"
-			)
-			runtime_caveat = ""
-		else:
-			purge_line = (
-				f"  • Inter-sample purge: {purge_time:g} s wash + "
-				f"{purge_time:g} s clear per transition\n"
-				f"    (each transition also requires three user-controlled "
-				f"pauses to swap the line.)\n"
-			)
-			runtime_caveat = (
-				f"  Note: inter-sample purges add ~{2 * purge_time:g} s of "
-				f"pumping per transition plus user-controlled pause time; "
-				f"not included in the estimate above.\n"
-			)
-
-		# Waste-bin projection: estimate the discard + purge contributions
-		# for one sample's worth of activity, then call out the bin status
-		# at start and projected end. If the operator runs multiple
-		# samples, each additional sample adds the same per-sample amount.
+		# Waste-bin projection table values. Operators get a compact
+		# 2-column summary of bin state and projected per-sample
+		# additions; the bin is the one parameter without a visible
+		# main-window readout for its FORWARD projection.
 		waste_now = self.waste_volume_ml
 		waste_max = max_waste_volume_ml
 		discard_per_sample_ml = discard_fractions * volume
-		# Per-transition purge volume: 2 phases × purge_time × peristaltic
-		# rate. If Skip is checked, the purges don't fire so we don't add
-		# anything for transitions.
 		per_transition_ml = (
 			0.0 if skip_intersample_purge
 			else 2.0 * purge_time * (peristaltic_rate_ml_per_min / 60.0)
 		)
 		projected_end_ml = waste_now + discard_per_sample_ml
-		start_pct = waste_now / waste_max if waste_max else 0.0
-		waste_projection_lines = [
-			f"  • Waste bin: {waste_now:.0f} mL of {waste_max:.0f} mL "
-			f"({start_pct:.0%}) at start.\n",
-			f"    Estimated added per sample: ~{discard_per_sample_ml:.1f} mL "
-			f"from discards.\n",
-		]
-		if per_transition_ml > 0:
-			waste_projection_lines.append(
-				f"    Each inter-sample transition adds ~{per_transition_ml:.1f} mL "
-				f"(2 × {purge_time:g} s × {peristaltic_rate_ml_per_min:g} mL/min).\n"
-			)
-		waste_projection_lines.append(
-			f"    Projected after first sample: ~{projected_end_ml:.0f} mL "
-			f"of {waste_max:.0f} mL.\n"
-		)
-		if projected_end_ml > waste_max:
-			waste_projection_lines.append(
-				"    ⚠ Projected to exceed max bin capacity during this "
-				"run. Consider emptying the bin before starting.\n"
-			)
-		waste_projection = "".join(waste_projection_lines)
-		bulk_line = ""
-		if self.bulk_mode_active:
-			bulk_line = (
-				f"  • Bulk mode: starting sample 1 of "
-				f"{len(self.bulk_samples)} ({sample_id_at_start}).\n"
-			)
-		summary = (
-			f"Begin fractionation:\n"
-			f"{bulk_line}"
-			f"  • Project: {project}\n"
-			f"  • Sample ID: {sample_id_at_start}\n"
-			f"  • Plate ID: {plate_id_at_start}\n"
-			f"  • Total fractions: {number_of_fractions}\n"
-			f"{discard_lines}"
-			f"{plate_line}"
-			f"  • Volume per fraction: {volume:g} mL\n"
-			f"  • Pump rate: {pump_rate:g} mL/hr\n"
-			f"  • Drip wait: {drip_wait_time:g} s\n"
-			f"{purge_line}"
-			f"{waste_projection}"
-			f"  • Estimated total runtime: {_fmt_hms(estimated_total_s)}\n"
-			f"{runtime_breakdown}\n"
-			f"{runtime_caveat}"
-			"\n"
-			"Before continuing:\n"
-			f"{waste_reminder}"
-			f"  - Verify the plate is positioned with A1 at "
-			f"({table_start:.2f} cm, {carriage_start:.2f} cm).\n"
-			"Continue?"
-		)
-		if not messagebox.askyesno(
-			"Begin fractionation", summary, parent=self,
-		):
+
+		if not self._show_begin_fractionation_dialog(
+				sample_id=sample_id_at_start, plate_id=plate_id_at_start,
+				waste_now=waste_now, waste_added=discard_per_sample_ml,
+				waste_projected=projected_end_ml, waste_max=waste_max):
 			return
 
 		# Persist the entry values to ~/.autosip/config.json before the run
@@ -4628,9 +4721,10 @@ class App(tk.Tk):
 		pump claim cleared, visuals reset, FractionatorState run counters
 		zeroed so a fresh Begin Fractionation starts from a clean slate.
 
-		There is no Cancel path -- this is a one-way exit. Operators who
-		clicked End Run by mistake can re-enter inputs and click Begin
-		Fractionation again.
+		The confirmation dialog has three buttons: Save and End writes
+		end_*.json + summary*.md; Don't Save leaves metadata.json + the
+		raw log.csv on disk without finalization; Cancel returns out of
+		end_run without changing run state.
 		"""
 		s = self.state
 		# Nothing to end if no run is active.
@@ -4640,29 +4734,22 @@ class App(tk.Tk):
 		project_at_click = s.project or "(unset)"
 		sample_at_click = s.current_sample_id or "(unset)"
 		if self.bulk_mode_active:
-			# bulk_current_index advances on each completed sample (in
-			# _auto_pause_total_reached), so it doubles as the count of
-			# completed samples at End Run time.
 			completed = min(self.bulk_current_index, len(self.bulk_samples))
-			save = messagebox.askyesno(
-				"End Run",
+			bulk_prompt = (
 				f"End bulk run with {completed} of "
-				f"{len(self.bulk_samples)} samples completed? "
-				"Logs from completed samples will be saved if you "
-				"click Yes.",
-				parent=self,
+				f"{len(self.bulk_samples)} samples completed?"
+			)
+			choice = self._show_end_run_dialog(
+				project=project_at_click, sample_id=sample_at_click,
+				bulk_summary=bulk_prompt,
 			)
 		else:
-			save = messagebox.askyesno(
-				"End Run",
-				f"Save the run logs for project '{project_at_click}' / "
-				f"sample '{sample_at_click}'?\n\n"
-				"Yes: finalize and write end_*.json + summary*.md with a "
-				"timestamp suffix.\n"
-				"No: discard finalization (metadata.json + log.csv remain "
-				"on disk; delete manually if not needed).",
-				parent=self,
+			choice = self._show_end_run_dialog(
+				project=project_at_click, sample_id=sample_at_click,
 			)
+		if choice == "cancel":
+			return
+		save = (choice == "save")
 
 		# Cancel any pending after()
 		if s.taskId is not None:
@@ -5026,7 +5113,20 @@ class App(tk.Tk):
 				"still at auto-pause; click Continue to Next Sample to retry."
 			)
 
-		def _build_modal(title, body_text, action_label, action_cmd):
+		def _build_modal(title, body_text, action_label, action_cmd, *,
+				checklist=None, skip_context=None):
+			"""Build the purge-phase modal. ``checklist`` (optional) is a
+			list of label strings that gate the action button: the button
+			stays disabled until every box is ticked OR the operator
+			clicks Skip Checklist (Expert), which writes a
+			``checklist_skipped_{skip_context}`` audit row and enables
+			the button. Returns the standard
+			``(dlg, msg_lbl, progress_lbl, action_btn, checklist_frame)``
+			tuple; ``checklist_frame`` is ``None`` when no checklist was
+			requested. Callers hide ``checklist_frame`` when the modal
+			flips into a state where the checklist is no longer relevant
+			(e.g. post-pump-cycle "purge complete").
+			"""
 			dlg = tk.Toplevel(self)
 			dlg.title(title)
 			dlg.transient(self)
@@ -5042,6 +5142,40 @@ class App(tk.Tk):
 
 			body = tk.Frame(dlg, padx=14, pady=12)
 			body.pack(fill=tk.BOTH, expand=True)
+
+			# Optional checklist above the prose body. The Select All /
+			# Skip Checklist (Expert) row sits underneath the checkboxes.
+			checklist_frame = None
+			check_vars = []
+			bypass = {"skipped": False}
+			if checklist:
+				checklist_frame = tk.Frame(body)
+				checklist_frame.pack(anchor="w", fill=tk.X, pady=(0, 8))
+				for i, item in enumerate(checklist):
+					v = tk.IntVar(value=0)
+					check_vars.append(v)
+					ttk.Checkbutton(checklist_frame, text=item, variable=v,
+						).grid(row=i, column=0, sticky="w", pady=1)
+				bulk_row = tk.Frame(checklist_frame)
+				bulk_row.grid(row=len(checklist), column=0, sticky="w",
+					pady=(6, 0))
+				def _select_all():
+					for v in check_vars:
+						v.set(1)
+				def _skip():
+					bypass["skipped"] = True
+					action_btn.state(["!disabled"])
+					if self.run_logger is not None and skip_context:
+						try:
+							self.run_logger.checklist_skipped(skip_context)
+						except Exception as exc:
+							logger.warning(
+								"Failed to log skipped checklist: %s", exc)
+				ttk.Button(bulk_row, text="Select All",
+					command=_select_all).pack(side=tk.LEFT, padx=4)
+				ttk.Button(bulk_row, text="Skip Checklist (Expert)",
+					command=_skip).pack(side=tk.LEFT, padx=4)
+
 			msg_lbl = tk.Label(body, text=body_text, justify="left",
 				wraplength=460, anchor="w")
 			msg_lbl.pack(anchor="w", pady=(0, 10))
@@ -5061,14 +5195,27 @@ class App(tk.Tk):
 				command=action_cmd, style="Primary.TButton")
 			action_btn.pack(side=tk.RIGHT, padx=4)
 
+			# Gate the action button on checklist completion (or skip).
+			if checklist:
+				action_btn.state(["disabled"])
+				def _evaluate(*_):
+					if bypass["skipped"]:
+						return
+					if all(v.get() == 1 for v in check_vars):
+						action_btn.state(["!disabled"])
+					else:
+						action_btn.state(["disabled"])
+				for v in check_vars:
+					v.trace_add("write", _evaluate)
+				_evaluate()
+
 			ctx["modal"] = dlg
 			dlg.update_idletasks()
-			# Center over the main window.
 			x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
 			y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
 			dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
 			dlg.grab_set()
-			return dlg, msg_lbl, progress_lbl, action_btn
+			return dlg, msg_lbl, progress_lbl, action_btn, checklist_frame
 
 		def _run_pump_cycle(phase, progress_lbl, action_btn, phase_text,
 				cycle_duration, extension_idx, on_cycle_done):
@@ -5142,7 +5289,8 @@ class App(tk.Tk):
 			_tick()
 
 		def _run_phase(title, phase, phase_text, action_label,
-				start_body_text, complete_template, on_advance):
+				start_body_text, complete_template, on_advance,
+				checklist=None, skip_context=None):
 			"""Build the phase modal. The operator clicks the action
 			button to run the initial pump cycle; on completion the
 			modal flips to the "purge complete" state (Continue focused).
@@ -5172,6 +5320,10 @@ class App(tk.Tk):
 			def _enter_complete_state():
 				if ctx["cancelled"]:
 					return
+				# Pre-pump checklist is irrelevant once the cycle is done;
+				# hide it so the complete-state body reads cleanly.
+				if checklist_frame is not None:
+					checklist_frame.pack_forget()
 				# Re-evaluate purge_time so the body text + Space-hint
 				# numbers reflect the value at modal-display time.
 				cur_pt = float(s.purge_time)
@@ -5202,8 +5354,9 @@ class App(tk.Tk):
 				_do_cycle()
 				return "break"
 
-			dlg, msg_lbl, progress_lbl, action_btn = _build_modal(
+			dlg, msg_lbl, progress_lbl, action_btn, checklist_frame = _build_modal(
 				title, start_body_text, action_label, _do_cycle,
+				checklist=checklist, skip_context=skip_context,
 			)
 			# Top-level binding catches Space wherever focus lives in the
 			# modal; the per-button override is needed because the
@@ -5216,14 +5369,8 @@ class App(tk.Tk):
 		def _phase_one():
 			cur_pt = float(s.purge_time)
 			body_text = (
-				"Disconnect the inlet line from the previous sample's "
-				"centrifuge tube and place it in the wash solution container."
-				"\n\n"
-				f"Click Start Purge to run the pump for {cur_pt:g} seconds, "
-				"drawing wash solution through the tubing. The needle is "
-				f"currently at the waste bin "
-				f"({s.waste_bin_table:.2f} cm, {s.waste_bin_carriage:.2f} cm); "
-				"wash will dispense there."
+				f"Click Start Purge to run the pump for {cur_pt:g} s, "
+				"drawing wash through the tubing."
 			)
 			complete = (
 				"Phase 1 purge complete ({purge_time:.0f} s of wash through "
@@ -5243,6 +5390,11 @@ class App(tk.Tk):
 				start_body_text=body_text,
 				complete_template=complete,
 				on_advance=_phase_two,
+				checklist=[
+					"Disconnected inlet line from previous sample tube",
+					"Placed inlet line in wash solution",
+				],
+				skip_context=f"purge_phase_1_{next_series_index}",
 			)
 
 		def _phase_two():
@@ -5250,10 +5402,7 @@ class App(tk.Tk):
 				return
 			cur_pt = float(s.purge_time)
 			body_text = (
-				"Remove the inlet line from the wash solution container, "
-				"leaving it in air."
-				"\n\n"
-				f"Click Continue to run the pump for {cur_pt:g} seconds, "
+				f"Click Continue to run the pump for {cur_pt:g} s, "
 				"pushing air through the tubing to clear residual wash."
 			)
 			complete = (
@@ -5273,18 +5422,17 @@ class App(tk.Tk):
 				start_body_text=body_text,
 				complete_template=complete,
 				on_advance=_phase_three,
+				checklist=[
+					"Removed inlet line from wash solution",
+					"Line is in air, nothing dripping",
+				],
+				skip_context=f"purge_phase_2_{next_series_index}",
 			)
 
 		def _phase_three():
 			if ctx["cancelled"]:
 				return
-			body_text = (
-				f"Connect the inlet line to the new sample tube "
-				f"({new_sample_id}). Verify the connection is secure."
-				"\n\n"
-				f"Click Begin Fractionation to proceed with sample "
-				f"{new_sample_id}'s discard phase and collection."
-			)
+			body_text = ""
 
 			def _begin():
 				if ctx["modal"] is not None:
@@ -5296,6 +5444,11 @@ class App(tk.Tk):
 			_build_modal(
 				"Inter-sample Purge — Step 3 of 3",
 				body_text, "Begin Fractionation", _begin,
+				checklist=[
+					f"Connected inlet line to sample {new_sample_id}'s tube",
+					"Connection is secure",
+				],
+				skip_context=f"purge_phase_3_{next_series_index}",
 			)
 
 		_phase_one()
@@ -5602,68 +5755,107 @@ class App(tk.Tk):
 		return result["confirmed"]
 
 	def _show_plate_swap_dialog(self, old_plate_id, suggested_new_id):
-		"""Modal Toplevel for the plate-swap flow.
+		"""Modal Toplevel for the plate-swap flow, presented as a
+		clickable checklist. Continue stays disabled until every box
+		is ticked (and the new Plate ID validates) OR the operator
+		clicks Skip Checklist (Expert), which logs a
+		``checklist_skipped_plate_swap_N`` row and enables Continue.
 
-		Returns the validated new Plate ID on Continue, or None if the user
-		cancels / aborts the run. The dialog's "Move Needle to Home" button
-		actually moves the carriage; the result dict keeps track of whether
-		the user took that step so the post-swap safety-home can be skipped
-		when redundant.
+		Returns the validated new Plate ID on Continue, or None on
+		Cancel Run. The "Move Needle to Home" checkbox doubles as the
+		button that drives the physical move -- ticking it triggers
+		``carriage_return``. The dialog records whether the home step
+		was taken so the post-swap safety-home can be skipped when
+		redundant.
 		"""
 		result = {"plate_id": None, "needle_at_home": False}
 
 		dlg = tk.Toplevel(self)
-		dlg.title(f"Plate Full — {old_plate_id}")
+		dlg.title(f"Plate Swap — {old_plate_id}")
 		dlg.transient(self)
 		dlg.grab_set()
 		dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # X disabled; force a choice
 
-		body = tk.Frame(dlg, padx=12, pady=12)
+		body = tk.Frame(dlg, padx=14, pady=12)
 		body.pack(fill=tk.BOTH, expand=True)
 
-		tk.Label(body, anchor="w", justify="left",
-			text="The current plate is full. Follow these steps in order:",
-		).grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 8))
+		# Checklist rows. Indices 0..3 correspond to:
+		#   0 removed old plate, 1 moved needle home, 2 placed new plate,
+		#   3 new plate ID entered (auto-checked when validation passes).
+		removed_var = tk.IntVar(value=0)
+		home_var = tk.IntVar(value=0)
+		placed_var = tk.IntVar(value=0)
+		plateid_var = tk.IntVar(value=0)
 
-		tk.Label(body, anchor="w", justify="left", wraplength=480,
-			text=f"  1. Remove the current plate ({old_plate_id}) from the "
-			"stage and store it for downstream processing.",
-		).grid(row=1, column=0, columnspan=2, sticky="we", pady=2)
+		ttk.Checkbutton(body, variable=removed_var,
+			text=f"Removed previous plate ({old_plate_id}) and stored it",
+		).grid(row=0, column=0, columnspan=2, sticky="w", pady=2)
 
-		tk.Label(body, anchor="w", justify="left",
-			text="  2. Return the dispensing needle to home position:",
-		).grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 2))
-
-		home_btn = ttk.Button(body, text="Move Needle to Home", style="Primary.TButton")
-		def _home_click():
+		def _drive_home():
+			"""Run carriage_return + tick the home checkbox. Idempotent
+			(second click while already home is a no-op move)."""
 			self.carriage_return()
 			result["needle_at_home"] = True
-			home_btn["text"] = "✓ Needle at home"
-			home_btn["state"] = tk.DISABLED
-		home_btn["command"] = _home_click
-		home_btn.grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+			home_var.set(1)
+		home_cb = ttk.Checkbutton(body, variable=home_var,
+			text="Moved needle to home")
+		home_cb.grid(row=1, column=0, sticky="w", pady=2)
+		# Ticking the box drives the physical move (instead of leaving the
+		# operator unsure whether they need to also click a button).
+		home_var.trace_add("write", lambda *_: (
+			self.carriage_return() if home_var.get() == 1
+				and not result["needle_at_home"] else None,
+			result.__setitem__("needle_at_home",
+				bool(result["needle_at_home"] or home_var.get() == 1)),
+		))
 
-		tk.Label(body, anchor="w", justify="left",
-			text="  3. Place a new plate on the stage.",
-		).grid(row=4, column=0, columnspan=2, sticky="we", pady=(8, 2))
+		ttk.Checkbutton(body, variable=placed_var,
+			text="Placed new plate on stage",
+		).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
 
-		tk.Label(body, anchor="w", justify="left",
-			text="  4. Enter the new Plate ID:",
-		).grid(row=5, column=0, columnspan=2, sticky="we", pady=(8, 2))
-
-		plate_te = TextEntry(body, "  Plate ID:")
-		plate_te.grid(row=6, column=0, columnspan=2, sticky="we", padx=20)
+		# Plate-ID entry row. Counted as "checked" the moment the field
+		# holds a value that passes validation.plate_id (the auto-incremented
+		# default already passes, so the box ticks on dialog open).
+		id_row = tk.Frame(body)
+		id_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=2)
+		id_cb = ttk.Checkbutton(id_row, variable=plateid_var,
+			text="New plate ID:")
+		id_cb.pack(side=tk.LEFT)
+		id_cb.state(["disabled"])  # driven by validation, not user-clickable
+		plate_te = TextEntry(id_row, "")  # label-less, just the entry
+		plate_te.label.grid_remove()
+		plate_te.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 		plate_te.set(suggested_new_id)
-		tk.Label(body, anchor="w", text=f"  (suggested: {suggested_new_id})",
-			fg="#666",
-		).grid(row=7, column=0, columnspan=2, sticky="we", padx=20)
+		tk.Label(body, anchor="w",
+			text=f"   (suggested: {suggested_new_id})", fg="#666",
+		).grid(row=4, column=0, columnspan=2, sticky="we", padx=(20, 0))
 
-		tk.Label(body, anchor="w", justify="left",
-			text="  5. Click Continue to resume fractionation.",
-		).grid(row=8, column=0, columnspan=2, sticky="we", pady=(8, 8))
+		# Select All / Skip Checklist (Expert) row.
+		bulk_row = tk.Frame(body)
+		bulk_row.grid(row=5, column=0, columnspan=2, sticky="we", pady=(10, 4))
+		def _select_all():
+			removed_var.set(1)
+			if home_var.get() == 0:
+				home_var.set(1)  # also fires the home move via trace
+			placed_var.set(1)
+		bypass = {"skipped": False}
+		def _skip():
+			bypass["skipped"] = True
+			cont_btn.state(["!disabled"])
+			if self.run_logger is not None:
+				try:
+					self.run_logger.checklist_skipped(
+						f"plate_swap_{self.state.plate_swaps_done + 1}")
+				except Exception as exc:
+					logger.warning(
+						"Failed to log skipped plate-swap checklist: %s", exc)
+		ttk.Button(bulk_row, text="Select All",
+			command=_select_all).pack(side=tk.LEFT, padx=4)
+		ttk.Button(bulk_row, text="Skip Checklist (Expert)",
+			command=_skip).pack(side=tk.LEFT, padx=4)
 
 		btn_row = tk.Frame(body)
-		btn_row.grid(row=9, column=0, columnspan=2, sticky="we", pady=(8, 0))
+		btn_row.grid(row=6, column=0, columnspan=2, sticky="we", pady=(8, 0))
 		btn_row.grid_columnconfigure(0, weight=1)
 		btn_row.grid_columnconfigure(1, weight=1)
 
@@ -5677,19 +5869,33 @@ class App(tk.Tk):
 			dlg.destroy()
 
 		def _cancel_run():
-			# Forward to End Run; it has its own confirmation dialog.
 			dlg.destroy()
 			self.end_run()
 
 		ttk.Button(btn_row, text="Cancel Run", command=_cancel_run,
 			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
-		ttk.Button(btn_row, text="Continue", command=_continue,
-			style="Primary.TButton").grid(row=0, column=1, sticky="e", padx=4)
+		cont_btn = ttk.Button(btn_row, text="Continue", command=_continue,
+			style="Primary.TButton")
+		cont_btn.grid(row=0, column=1, sticky="e", padx=4)
+		cont_btn.state(["disabled"])
 
-		# Modal -- block until destroyed.
+		def _evaluate(*_):
+			if bypass["skipped"]:
+				return
+			ok, _ = validation.plate_id(plate_te.get())
+			plateid_var.set(1 if ok else 0)
+			all_checked = (removed_var.get() and home_var.get()
+				and placed_var.get() and plateid_var.get())
+			if all_checked:
+				cont_btn.state(["!disabled"])
+			else:
+				cont_btn.state(["disabled"])
+		for v in (removed_var, home_var, placed_var):
+			v.trace_add("write", _evaluate)
+		plate_te.var.trace_add("write", _evaluate)
+		_evaluate()
+
 		self.wait_window(dlg)
-		# Stash the home-clicked flag on self so _commit_plate_swap can read
-		# it without dragging another argument through the call chain.
 		self._plate_swap_pre_homed = result["needle_at_home"]
 		return result["plate_id"]
 

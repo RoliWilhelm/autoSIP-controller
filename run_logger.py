@@ -584,6 +584,25 @@ class RunLogger:
 			start_iso, end_iso, f"{duration_s:.3f}", "emergency_stopped",
 		])
 
+	def checklist_skipped(self, context_id):
+		"""Append a status="checklist_skipped" row marking a pre-flight
+		checklist that the operator bypassed via the Skip (Expert)
+		button. ``context_id`` is appended to the well_id (e.g.
+		``"plate_swap_2"``, ``"purge_phase_1"``) so the row pinpoints
+		which checklist was skipped. Useful for audit -- a run with
+		many skipped checklists may indicate UI friction or expert
+		usage; either way the log carries the trail.
+		"""
+		if self.run_dir is None:
+			return
+		now = _now_iso()
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			f"checklist_skipped_{context_id}", _fmt_coord(0), _fmt_coord(0),
+			now, now, "0.000", "checklist_skipped",
+		])
+
 	def plate_swap_breadcrumb(self, swap_index):
 		"""Append a status="plate_swap" row marking a physical plate change.
 
