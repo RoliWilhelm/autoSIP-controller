@@ -299,6 +299,52 @@ def save_skip_intersample_purge(enabled):
 		json.dump(existing, f, indent=2)
 
 
+# -- purge_protocol ----------------------------------------------------
+
+# Top-level string preference selecting the inter-sample purge
+# workflow. ``"basic"`` is the default three-phase water flush + air
+# clear + syringe priming. ``"decontamination"`` expands to a
+# five-phase water → bleach → water → air → prime sequence.
+
+def load_purge_protocol():
+	"""Return the persisted protocol id (``"basic"`` or
+	``"decontamination"``). ``"basic"`` when missing, malformed, or the
+	config file doesn't exist."""
+	path = get_config_path()
+	if not path.exists():
+		return "basic"
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return "basic"
+	if not isinstance(data, dict):
+		return "basic"
+	val = data.get("purge_protocol", "basic")
+	return val if val in ("basic", "decontamination") else "basic"
+
+
+def save_purge_protocol(protocol):
+	"""Persist the protocol id to config.json. Preserves other top-level
+	keys. Silently ignores unknown values."""
+	if protocol not in ("basic", "decontamination"):
+		return
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["purge_protocol"] = protocol
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
 # -- starter profiles --------------------------------------------------
 
 def seed_starter_profiles(source_dir):

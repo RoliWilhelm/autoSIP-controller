@@ -57,13 +57,15 @@ confirmation before switching modes.
 
 autoSIP's window carries three mode tabs at the top — **Automated**,
 **Manual**, **Cleaning**. The status bar (bottom of the window)
-shows the current pump state, status messages, a waste-bin fill
-indicator labeled *Waste:* with a flask icon + Reset button, and a
-red octagon **Terminate Run** button (Automated mode only).
-Switching modes mid-run is safe — the fractionation state machine
-continues to tick in the background while the operator visits
-Manual or Cleaning mode, and the plate-progress canvas re-paints
-from its current state on return to Automated.
+shows the current pump state and a waste-bin fill indicator labeled
+*Waste:* with a flask icon + Reset button. Status messages during
+an Automated run appear above the well-plate canvas (next to the
+plate they describe); outside a run the status-bar middle area
+reads "System idle." Switching modes mid-run is safe — the
+fractionation state machine continues to tick in the background
+while the operator visits Manual or Cleaning mode, and the plate-
+progress canvas re-paints from its current state on return to
+Automated.
 
 ### 6.2.1 Automated Mode
 
@@ -133,8 +135,9 @@ Full workflow: §6.3.7.
 - **Waste bin position (y-axis)** — Y position of the waste container
   in cm, `[0.0, 15.0]`.
 
-**Syringe Pump.** Settings for the Razel R-200 used during
-fractionation (column 0, below Run Parameters):
+**Fractionation Pump Parameters.** Settings for the Razel R-200
+syringe pump used during fractionation (column 0, below Run
+Parameters):
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
   the syringe pump's gear-set.
@@ -150,7 +153,7 @@ Purge (column 1, below Plate Parameters):
 
 - **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
   per-phase duration of the inter-sample purge (see §6.3.2). Use
-  Cleaning mode's *Purge Time Calibration* panel (§6.2.3) to measure
+  Cleaning mode's *Purge Time Calibration Tool* panel (§6.2.3) to measure
   the right value for your tubing geometry.
 - **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
   default `100.0`. Used by the waste-bin estimator (see §6.5) to
@@ -171,11 +174,12 @@ The *Skip inter-sample purge* behavioral preference moved to **Tools
 **Run controls** (top-right of the Automated frame):
 
 - **Return to Origin** — moves both motors to physical `(0, 0)` and
-  tares the software counters. Equivalent to Manual mode's Home
-  button. Also works while a run is paused: the first click in a
-  pause captures the current motor position so the matching Resume
-  can drive the needle back and pop a Confirm Calibration dialog.
-  This is the mid-run recalibration entry point (see §6.3.6).
+  tares the software counters. Same action as Manual mode's
+  Return to Origin button (the two are redundant by design). Also
+  works while a run is paused: the first click in a pause captures
+  the current motor position so the matching Resume can drive the
+  needle back and pop a Confirm Calibration dialog. This is the
+  mid-run recalibration entry point (see §6.3.6).
 - **Return to Start Well** — moves the needle to the plate-start
   (well A1) coordinates from Plate Parameters. Enabled only while
   idle; disabled mid-run since interrupting the snake-path would
@@ -226,16 +230,17 @@ those live in Automated mode.
   (default `1 mm`). The step size translates directly into the cm
   units used in Automated mode (a 10 mm jog covers the same physical
   distance as typing `1.0` cm into a Starting well position field).
-- **Home** — moves both motors to origin `(0, 0)` and re-zeros the
-  software's tracked angle counters. The Position readout then
-  reads exactly `Position: X = 0.00 cm, Y = 0.00 cm`. Stepper
-  motors can lose steps over a long session; periodically re-park
-  the carriage against the upper-left mechanical limit by hand and
-  click Home to recalibrate. A fresh app launch also reads
+- **Return to Origin** — sits above the directional pad. Moves
+  both motors to origin `(0, 0)` and re-zeros the software's
+  tracked angle counters. The Position readout then reads exactly
+  `Position: X = 0.00 cm, Y = 0.00 cm`. Stepper motors can lose
+  steps over a long session; periodically re-park the carriage
+  against the upper-left mechanical limit by hand and click
+  Return to Origin to recalibrate. A fresh app launch also reads
   `(0.00, 0.00)` — the seating wiggle that initializes lead-screw
   backlash is tared immediately after.
 - **Position readout** — `Position: X = {x:.2f} cm, Y = {y:.2f} cm`,
-  updated after every jog and Home action. All coordinate displays
+  updated after every jog and Return-to-Origin action. All coordinate displays
   across the GUI use two decimal places (0.01 cm = 0.1 mm
   precision); user-typed values in the Automated-mode coordinate
   entries are normalized on focus-out (`12.6` → `12.60`).
@@ -286,10 +291,10 @@ A typical cleaning cycle: switch to Cleaning mode, click **Move to
 Waste Bin**, click **Purge**, run the pump until the fluid path is
 clear, then click **Purge** again to stop.
 
-**Purge Time Calibration** — a sub-panel below the manual Purge
-controls measures how long wash takes to fully replace one tubing
-volume so the Automated mode *Purge time* parameter (§6.2.1) reflects
-your actual hardware:
+**Purge Time Calibration Tool** — a sub-panel below the manual
+Purge controls measures how long wash takes to fully replace one
+tubing volume so the Automated mode *Purge time* parameter (§6.2.1)
+reflects your actual hardware:
 
 1. Place the inlet line in your wash solution container.
 2. Click **Start**. The pump powers on (after the standard
@@ -307,17 +312,17 @@ setup operation, not a fractionation event.
 
 ### 6.2.4 Preferences
 
-Two persistent behavioral preferences live under **Tools →
-Preferences**. Both are stored at the top level of
+Three persistent behavioral preferences live under **Tools →
+Preferences**. All are stored at the top level of
 `~/.autosip/config.json` and apply across launches.
 
 - **Return needle to origin when closing the application**
   (default `True`) — when the operator clicks the window's close
   button, the application drives both motors to `(0, 0)` and re-tares
   the position counters before the window goes away. Skipped during
-  an active run, after a Terminate Run e-stop, and while the waste-
-  bin lockdown is active — those signal a hardware issue that
-  warrants inspection before any further motion.
+  an active run and while the waste-bin lockdown is active — those
+  signal a hardware issue that warrants inspection before any
+  further motion.
 
 - **Skip inter-sample purge** (default `False`) — when checked,
   Continue to Next Sample bypasses the three-phase purge workflow
@@ -326,8 +331,22 @@ Preferences**. Both are stored at the top level of
   between samples; useful for solvent-compatible same-sample-type
   sessions where the purge between tubes is wasted effort.
 
-OK saves both checkboxes and applies the new values immediately
-(no app restart needed); Cancel discards.
+- **Inter-sample purge protocol** (default *Water only*) — radio
+  group selecting the workflow used between samples:
+
+  - *Water only (water → sample)* — three phases: sterile water
+    flush, air clear, syringe priming.
+  - *Decontamination (water → bleach → water → sample)* — five
+    phases: sterile water flush, **0.5% sodium hypochlorite
+    (bleach) flush**, sterile water rinse, air clear, syringe
+    priming. Use when carryover between sample types must be
+    eliminated (e.g. between deuterated and undeuterated runs,
+    or between projects). *Prepare the 0.5% bleach solution
+    fresh on the day of use — dilute hypochlorite degrades
+    within 24 hours.*
+
+OK saves all three preferences and applies the new values
+immediately (no app restart needed); Cancel discards.
 
 ## 6.3 Common Workflows
 
@@ -472,46 +491,65 @@ two discard fractions each, total 100 dispense cycles = 90 collected
 10. **The inter-sample purge workflow runs** (unless *Skip inter-sample
     purge* is checked in **Tools → Preferences**, §6.2.4). The needle
     first moves to the waste bin, then the application opens a
-    three-step modal sequence. Each step leads with a checklist of
-    the physical actions to perform; the primary-action button is
-    disabled until every box is ticked. Two helpers sit beneath the
-    checklist: **Select All** ticks every box at once, and **Skip
-    Checklist (Expert)** bypasses the gate without ticking and writes
-    an audit row to `log.csv` (`status="checklist_skipped"`,
-    `well_id="checklist_skipped_purge_phase_{N}_{series}"`) so the
-    record of which checklists were bypassed survives.
+    multi-step modal sequence. The phase count depends on the
+    *Inter-sample purge protocol* preference: three steps for *Water
+    only* (default) or five steps for *Decontamination*.
 
-    1. **Step 1 of 3 — wash.** Checklist: *Disconnected inlet line
-       from previous sample tube* / *Placed inlet line in wash
-       solution*. Click **Start Purge** to run the pump for *Purge
-       time* seconds, drawing wash through the tubing. A
-       remaining-time label ticks down once per second. When the
-       pump shuts off the modal enters a *purge complete* state:
-       inspect the tubing, then click **Continue** (or press Enter)
-       to advance to Step 2. **If the tubing isn't fully purged
-       when the countdown ends, press Space to add another full
-       *Purge time* of pumping. Extensions can be triggered as
-       many times as needed for each of Phase 1 and Phase 2.**
-    2. **Step 2 of 3 — clear.** Checklist: *Removed inlet line from
-       wash solution* / *Line is in air, nothing dripping*. Click
-       **Continue** to run the pump for another *Purge time*
-       seconds, pushing air through the tubing to clear residual
-       wash. As in Step 1, the modal enters a *purge complete*
-       state on cycle completion — press Space to add another
-       *Purge time* of pumping if residual wash is still visible,
-       or click **Continue** to advance to Step 3.
-    3. **Step 3 of 3 — connect new sample.** Checklist: *Connected
-       inlet line to sample {sample_id}'s tube* / *Connection is
-       secure*. Click **Begin Fractionation** to proceed.
+    Each step leads with a checklist of the physical actions to
+    perform. Below the checklist is a pump-toggle status block —
+    `Pump: OFF`/`Pump: ON`, `This cycle: X.X s` (current on-period),
+    `Total pumping: X.X s` (cumulative for this phase). Press
+    **Space** to toggle the pump on/off; the operator decides when
+    enough fluid has flowed through. **Continue** is disabled while
+    the pump is currently ON and while the checklist is incomplete.
+
+    The button row reads `[Cancel] [Skip Checklist (Expert)]
+    [Continue]`. Skip bypasses the checklist gate without ticking
+    the boxes and writes an audit row to `log.csv`
+    (`status="checklist_skipped"`,
+    `well_id="checklist_skipped_purge_phase_{N}_{series}"`).
+
+    **Water only (3 phases):**
+
+    1. **Wash.** Checklist: *Disconnected inlet line from previous
+       sample tube* / *Placed inlet line in water container*. Toggle
+       the **peristaltic pump** until the tubing reads clean.
+    2. **Clear.** Checklist: *Removed inlet line from water
+       container* / *Line is in air, nothing dripping*. Toggle the
+       **peristaltic pump** to push air through and clear residual
+       liquid.
+    3. **Prime.** Checklist: *Connected inlet line to the new sample
+       tube* / *Connection is secure*. Toggle the **syringe pump**
+       to walk fractionation fluid through the tubing until even
+       droplets exit the needle — this displaces the air gap left by
+       Phase 2 so the dispense pressure is consistent across wells.
+
+    **Decontamination (5 phases):**
+
+    1. **Sterile water flush** (peristaltic) — initial rinse of the
+       previous sample's residues.
+    2. **Bleach flush** (peristaltic) — toggle through **0.5% sodium
+       hypochlorite (bleach) solution** to decontaminate. *Prepare
+       the 0.5% bleach solution fresh on the day of use — dilute
+       hypochlorite degrades within 24 hours.*
+    3. **Sterile water rinse** (peristaltic) — flush thoroughly to
+       remove residual bleach before the next sample contacts the
+       lines.
+    4. **Air clear** (peristaltic) — push air through to clear
+       residual liquid.
+    5. **Prime** (syringe pump) — same as the Water-only Phase 3.
 
     Each modal has a **Cancel** button that aborts the workflow and
     returns the run to the auto-paused state (you can click
-    *Continue to Next Sample* again to restart from Step 1). The
-    measured wash and clear durations are recorded in `log.csv` as
-    `purge_wash` and `purge_clear` rows; Space-triggered extensions
-    are recorded as additional rows with `_ext{N}` suffixes on the
-    `well_id`, and `summary.md` reports extension counts next to
-    the per-transition durations.
+    *Continue to Next Sample* again to restart from Step 1). Each
+    Space-toggle press-on → press-off pair writes its own row to
+    `log.csv`: `purge_wash` / `purge_clear` / `purge_bleach` /
+    `purge_prime` with `well_id` of the form
+    `purge_{phase}_{series}` for the first cycle and
+    `purge_{phase}_{series}_cycle{N}` for subsequent toggles. The
+    decontamination rinse phase uses `purge_wash` with `well_id`
+    suffix `_rinse` to distinguish it from the initial wash.
+    `summary.md` reports total seconds and cycle counts per phase.
 
     If *Skip inter-sample purge* is enabled in Preferences, this
     workflow is bypassed entirely — the new sample's discard phase
@@ -635,7 +673,6 @@ what files they produce.
 | **Continue to Next Sample** | After auto-pause at "Total reached"                                            | Starts a new series: increments series_index, runs the discard phase, then collects at the next available well. | Continues the run                                                | `resume` breadcrumb row                                                                           |
 | **Continue to Next Plate**  | After auto-pause at "Plate full"                                               | Opens the plate-swap dialog. After Continue, moves the carriage to A1 of the new plate and resumes.             | Continues the run after the dialog                               | `plate_swap` breadcrumb row                                                                       |
 | **End Run**                 | Any active run state (running, paused, total reached, plate full)              | Three-button prompt (Cancel / Don't Save / Save and End); pump off; motors released; visuals reset; FractionatorState counters zeroed. | Cancel stays in the run; Save and End / Don't Save terminate it. | On **Save and End**: `end_{ts}.json`, `summary_{ts}.md`, `summary_{plate_id}_{ts}.md`. On **Don't Save**: none.  |
-| **Terminate Run**           | Visible in Automated mode (bottom-right of the status bar, red octagon button) | Hard-halt: pump off, motors released, run-control buttons disabled. Confirmation dialog required.               | After clicking **Return to Origin** the controls re-enable | In-flight entry stamped `emergency_stopped` in `log.csv`; `end.json` + `summary.md` written       |
 
 When to use each:
 
@@ -649,19 +686,21 @@ When to use each:
   autoSIP fires this auto-pause on its own when the per-sample
   fraction target is reached; update Sample ID and click Continue.
 - **End-of-plate** (autoSIP triggers this automatically):
-  **Continue to Next Plate**, then follow the five-step swap dialog.
+  **Continue to Next Plate**, then follow the four-item swap
+  checklist.
 - **Intentional finish** at the end of a session: **End Run**, then
   **Save and End** to keep the end/summary files (or **Don't Save**
   if the run was a test).
 - **Safety emergency** (smell, collision, fluid leak):
-  **Terminate Run**. Stops the pump and motors immediately on
-  confirming the dialog. After the rig is verified safe, click
-  **Return to Origin** to re-enable controls.
+  **End Run** → **Don't Save** (or **Save and End** if the partial
+  run logs are worth keeping) is the manual halt path. The
+  application's automatic waste-bin lockdown (§6.5.1) covers the
+  one autonomous emergency case.
 
 Pause is reversible and silent; Continue advances the run; End Run
-finishes cleanly; Terminate Run is the heavy hammer and writes
-`emergency_stopped` to the log so the interruption is unmistakable in
-the audit trail.
+finishes cleanly and writes the appropriate finalization files for
+either choice (Save and End writes end/summary; Don't Save leaves
+only the raw `metadata.json` + `log.csv`).
 
 ### 6.3.5 Cleaning between sample types
 
@@ -882,7 +921,7 @@ Status values:
   Reset Waste Counter click).
 - `emergency_stopped` — the run was terminated while this well or
   discard cycle was mid-dispense. Also used for purge pump cycles
-  interrupted by Escape or Terminate Run.
+  interrupted by Escape or window close.
 
 **end_{end_timestamp}.json** — written only if you choose **Save and
 End** at End Run. Contains the final status (`completed`,
@@ -905,38 +944,20 @@ not want to archive.
 
 ## 6.5 Safety Controls
 
-The **Terminate Run** button is a red octagonal button in the
-bottom-right corner of the status bar, visible only in Automated
-mode. It serves as the application's emergency-stop control.
+Operator-initiated halts go through **Pause** (reversible, the cycle
+resumes from the same phase) or **End Run → Don't Save** (one-way,
+no finalization files). Both pump activity and motor motion stop
+immediately on either. There is no dedicated emergency-stop button
+or keyboard shortcut — the only keyboard shortcut in the
+application is **Space**, which toggles the most-recently-used pump
+in Manual mode.
 
-![Figure: Terminate Run button in the status bar](figures/terminate_run.png)
-
-Clicking Terminate Run opens a confirmation dialog
-(*"Are you sure that you wish to stop the whole run?"*). On
-confirmation, the application:
-
-- Cancels any pending pump or move callback.
-- Turns the relay off and releases the pump claim.
-- Releases both stepper motors so they do not overheat.
-- Sets the in-flight log entry to `emergency_stopped` if a dispense
-  was in progress.
-- Writes `end.json` + `summary.md` with `final_status =
-  "emergency_stopped"`.
-- Offers to save a plate-state snapshot to a `.txt` file before
-  clearing the progress view.
-- Disables every run-control button until the operator clicks
-  **Return to Origin**, which re-enables the controls and
-  clears the terminated state.
-
-Use Terminate Run for safety emergencies (smell, collision, fluid
-leak) where an immediate hardware stop matters more than a clean
-log. For planned interruptions (operator break, tube swap,
-troubleshooting), use **Pause** instead — Pause is reversible and
-does not write any `emergency_stopped` rows.
-
-There is no global keyboard shortcut for Terminate Run; the only
-keyboard shortcut in the application is **Space**, which toggles the
-most-recently-used pump in Manual mode.
+The one autonomous emergency path is the waste-bin overflow
+lockdown described in §6.5.1: the application halts pump activity
+on its own when the running waste-volume estimate reaches the
+configured maximum, and a `waste_shutoff` row is appended to
+`log.csv`. The operator clears the lockdown via the **Reset**
+button next to the flask icon in the status bar.
 
 ### 6.5.1 Waste-bin overflow protection
 

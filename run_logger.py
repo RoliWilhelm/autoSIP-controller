@@ -501,23 +501,34 @@ class RunLogger:
 		self._committed = set()
 
 	def waste_event(self, kind, count):
-		"""Append a status="waste_warning" / "waste_shutoff" / "waste_reset"
-		row marking a waste-bin threshold or reset event.
+		"""Append a waste-bin event row to log.csv.
+
+		``kind`` is one of:
+		  ``"waste_autopause"`` — 80% threshold reached; pump auto-paused.
+		  ``"waste_hardstop"``  — 100% reached; failsafe hard stop.
+		  ``"waste_reset"``     — operator emptied the bin + clicked Reset.
+		  ``"waste_warning"`` / ``"waste_shutoff"`` — legacy aliases kept
+		    so older code paths still write a row; treated identically
+		    to ``waste_autopause`` / ``waste_hardstop`` in the suffix.
 
 		``count`` is a 1-based counter (incremented in App-level state)
 		so log.csv readers can distinguish individual events; it shows
-		up in the row's well_id as e.g. ``warning_1``, ``shutoff_1``,
+		up in the row's well_id as e.g. ``autopause_1``, ``hardstop_1``,
 		``reset_3``.
 		"""
 		if self.run_dir is None:
 			return
-		if kind not in ("waste_warning", "waste_shutoff", "waste_reset"):
+		suffix_map = {
+			"waste_autopause": "autopause",
+			"waste_hardstop": "hardstop",
+			"waste_reset": "reset",
+			"waste_warning": "warning",
+			"waste_shutoff": "shutoff",
+		}
+		if kind not in suffix_map:
 			logger.warning("Unknown waste-event kind %r", kind)
 			return
-		# Short suffix for the well_id column.
-		suffix = {"waste_warning": "warning",
-			"waste_shutoff": "shutoff",
-			"waste_reset": "reset"}[kind]
+		suffix = suffix_map[kind]
 		now = _now_iso()
 		rid = self._get_current_run_id()
 		self._write_row([
@@ -527,29 +538,41 @@ class RunLogger:
 		])
 		self._status_counts[kind] = self._status_counts.get(kind, 0) + 1
 
+	_VALID_PURGE_PHASES = ("wash", "clear", "bleach", "prime")
+
 	def purge_committed(self, phase, series_index,
 			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s,
-			extension=0):
-		"""Append a status="purge_wash" or "purge_clear" row marking one
-		inter-sample purge pump phase.
+			cycle=1, sub_phase=""):
+		"""Append a ``status="purge_{phase}"`` row marking one operator-
+		toggled pump cycle within an inter-sample purge phase.
 
-		``phase`` is ``"wash"`` or ``"clear"``. ``series_index`` is the
-		1-based index of the NEW sample series (so ``purge_wash_2`` means
-		"the purge run between sample 1 and sample 2"). ``extension`` is
-		0 for the initial pump cycle and 1+ for each operator-triggered
-		Space-bar extension; encoded in the ``well_id`` suffix as
-		``_ext{N}``. Coordinates are the waste-bin position; the needle
-		is parked there during all three phases of the purge workflow.
+		``phase`` is one of ``"wash"``, ``"clear"``, ``"bleach"``,
+		``"prime"``. ``series_index`` is the 1-based index of the NEW
+		sample series. ``cycle`` is the 1-based cycle number within
+		this phase (each Space-toggle press-on → press-off pair writes
+		its own row, so a phase the operator toggled three times
+		produces ``cycle=1, 2, 3``). ``sub_phase`` (default empty) is
+		an optional suffix like ``"rinse"`` for the post-bleach water
+		flush in the decontamination protocol, inserted between the
+		series index and the cycle suffix.
+
+		Resulting ``well_id``:
+		  - ``purge_{phase}_{series}``                  (cycle 1, no sub)
+		  - ``purge_{phase}_{series}_cycle{N}``         (cycle ≥ 2)
+		  - ``purge_{phase}_{series}_{sub}``            (cycle 1, sub)
+		  - ``purge_{phase}_{series}_{sub}_cycle{N}``   (cycle ≥ 2, sub)
 		"""
 		if self.run_dir is None:
 			return
-		if phase not in ("wash", "clear"):
+		if phase not in self._VALID_PURGE_PHASES:
 			logger.warning("Unknown purge phase %r; skipping log row", phase)
 			return
 		status = f"purge_{phase}"
 		well_id = f"{status}_{series_index}"
-		if extension:
-			well_id += f"_ext{extension}"
+		if sub_phase:
+			well_id += f"_{sub_phase}"
+		if cycle > 1:
+			well_id += f"_cycle{cycle}"
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
@@ -558,31 +581,13 @@ class RunLogger:
 		])
 		self._status_counts[status] = self._status_counts.get(status, 0) + 1
 
-	def purge_emergency_stopped(self, phase, series_index,
-			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s,
-			extension=0):
-		"""Append a status="emergency_stopped" row marking a purge pump
-		cycle that was halted mid-flight by Escape / Terminate Run.
-
-		``well_id`` mirrors :meth:`purge_committed` so the row is
-		recognizable as the partial of a specific cycle:
-		``purge_{phase}_{N}`` for the initial cycle,
-		``purge_{phase}_{N}_ext{M}`` for an interrupted extension.
-		"""
-		if self.run_dir is None:
-			return
-		if phase not in ("wash", "clear"):
-			logger.warning("Unknown purge phase %r; skipping log row", phase)
-			return
-		well_id = f"purge_{phase}_{series_index}"
-		if extension:
-			well_id += f"_ext{extension}"
-		rid = self._get_current_run_id()
-		self._write_row([
-			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
-			well_id, _fmt_coord(waste_x_cm), _fmt_coord(waste_y_cm),
-			start_iso, end_iso, f"{duration_s:.3f}", "emergency_stopped",
-		])
+	# (purge_emergency_stopped was used by the old timed-countdown design
+	# to log partial cycles when Escape→Terminate fired mid-pump. The new
+	# operator-toggle design always commits a finished cycle on pump-off,
+	# so partial-cycle e-stop logging is no longer needed. The Terminate
+	# Run UI was removed in a later pass; this method is kept as dead
+	# code in case a future caller wants a status="emergency_stopped"
+	# purge row.)
 
 	def checklist_skipped(self, context_id):
 		"""Append a status="checklist_skipped" row marking a pre-flight
@@ -767,19 +772,22 @@ class RunLogger:
 		purges = self._compute_intersample_purges()
 		if purges:
 			out.append("## Inter-sample purges")
-			for prev_sid, next_sid, wash_s, clear_s, wash_ext, clear_ext in purges:
-				wash_note = (
-					f" ({wash_ext} extension{'s' if wash_ext != 1 else ''})"
-					if wash_ext else ""
-				)
-				clear_note = (
-					f" ({clear_ext} extension{'s' if clear_ext != 1 else ''})"
-					if clear_ext else ""
-				)
+			phase_order = ("wash", "bleach", "rinse", "clear", "prime")
+			for p in purges:
+				parts = []
+				for phase in phase_order:
+					seconds, cycles = p[phase]
+					if cycles == 0:
+						continue
+					cycle_note = (
+						f" ({cycles} cycle{'s' if cycles != 1 else ''})"
+						if cycles > 1 else ""
+					)
+					parts.append(f"{seconds:.1f} s {phase}{cycle_note}")
+				if not parts:
+					continue
 				out.append(
-					f"- Between {prev_sid} → {next_sid}: "
-					f"{wash_s:.1f} s wash{wash_note} + "
-					f"{clear_s:.1f} s clear{clear_note}"
+					f"- Between {p['prev']} → {p['next']}: " + " + ".join(parts)
 				)
 			out.append("")
 
@@ -995,30 +1003,57 @@ class RunLogger:
 		return discard_ml, discard_n, purge_ml, purge_n
 
 	def _compute_intersample_purges(self):
-		"""Walk log.csv and return a list of
-		``(prev_sample_id, next_sample_id, wash_s, clear_s,
-		wash_extensions, clear_extensions)`` tuples, one per
-		inter-sample transition that wrote purge rows.
+		"""Walk log.csv and return a list of per-transition dicts, one
+		per inter-sample transition that wrote purge rows.
 
-		The purge rows themselves carry the NEW sample's sample_id (the
-		``get_current_run_id`` callback is read at write time, after the
-		Sample ID entry has been updated for the new sample). To
-		reconstruct the previous sample, we walk the CSV in order and
-		track the last seen ``completed`` row's sample_id.
+		Each dict carries::
 
-		``well_id`` is parsed as ``purge_{phase}_{N}`` for the initial
-		cycle and ``purge_{phase}_{N}_ext{M}`` for operator-triggered
-		extensions; cycle durations sum into the phase total and the
-		``_ext{M}`` rows are counted into ``{phase}_extensions``.
+		    {
+		      "prev": str,                # previous sample_id
+		      "next": str,                # next sample_id
+		      "wash": (seconds, cycles),  # pre-bleach water flush
+		      "rinse": (seconds, cycles), # post-bleach water flush (decon)
+		      "bleach": (seconds, cycles),# bleach phase (decon)
+		      "clear": (seconds, cycles), # air clear
+		      "prime": (seconds, cycles), # syringe priming
+		    }
+
+		Missing phases come back as ``(0.0, 0)``. The purge rows
+		themselves carry the NEW sample's sample_id (``get_current_run_id``
+		is read at write time, after the Sample ID entry has been updated
+		for the new sample). To reconstruct the previous sample we walk
+		the CSV in order and track the last seen ``completed`` row's
+		sample_id.
+
+		``well_id`` parsing:
+		  purge_{phase}_{N}                  → phase, series N, cycle 1
+		  purge_{phase}_{N}_cycle{M}         → phase, series N, cycle M
+		  purge_wash_{N}_rinse(_cycle{M})    → rinse (decontamination),
+		                                       cycle M (default 1)
 		"""
 		csv_path = self.run_dir / "log.csv"
 		if not csv_path.exists():
 			return []
-		well_re = re.compile(r"^purge_(wash|clear)_(\d+)(?:_ext(\d+))?$")
+		# Two patterns: the rinse sub-phase (post-bleach water flush) and
+		# the regular per-phase row.
+		rinse_re = re.compile(r"^purge_wash_(\d+)_rinse(?:_cycle(\d+))?$")
+		phase_re = re.compile(
+			r"^purge_(wash|clear|bleach|prime)_(\d+)(?:_cycle(\d+))?$"
+		)
 		last_completed_sid = ""
-		# Pending dict keyed by series_index so wash/clear rows pair up
-		# even if not strictly adjacent in the file.
 		pending = {}
+
+		def _ensure(series_idx, next_sid):
+			e = pending.setdefault(series_idx, {
+				"prev": last_completed_sid or "(unset)",
+				"next": next_sid,
+				"wash": [0.0, 0], "rinse": [0.0, 0],
+				"bleach": [0.0, 0], "clear": [0.0, 0],
+				"prime": [0.0, 0],
+			})
+			e["next"] = next_sid
+			return e
+
 		try:
 			with open(csv_path) as f:
 				reader = csv.DictReader(f)
@@ -1027,7 +1062,7 @@ class RunLogger:
 					if status == "completed":
 						last_completed_sid = row.get("sample_id", "") or last_completed_sid
 						continue
-					if status not in ("purge_wash", "purge_clear"):
+					if not status.startswith("purge_"):
 						continue
 					try:
 						duration = float(row.get("dispense_duration_s") or 0.0)
@@ -1035,36 +1070,34 @@ class RunLogger:
 						duration = 0.0
 					next_sid = row.get("sample_id", "") or "(unset)"
 					well = row.get("well_id", "")
-					m = well_re.match(well)
-					if m:
-						idx = int(m.group(2))
-						is_extension = m.group(3) is not None
-					else:
-						idx = len(pending)
-						is_extension = False
-					entry = pending.setdefault(
-						idx,
-						{"prev": last_completed_sid or "(unset)",
-							"next": next_sid,
-							"wash": 0.0, "clear": 0.0,
-							"wash_ext": 0, "clear_ext": 0},
-					)
-					entry["next"] = next_sid
-					if status == "purge_wash":
-						entry["wash"] += duration
-						if is_extension:
-							entry["wash_ext"] += 1
-					else:
-						entry["clear"] += duration
-						if is_extension:
-							entry["clear_ext"] += 1
+					m_rinse = rinse_re.match(well)
+					if m_rinse:
+						idx = int(m_rinse.group(1))
+						entry = _ensure(idx, next_sid)
+						entry["rinse"][0] += duration
+						entry["rinse"][1] += 1
+						continue
+					m = phase_re.match(well)
+					if not m:
+						continue
+					phase = m.group(1)
+					idx = int(m.group(2))
+					entry = _ensure(idx, next_sid)
+					entry[phase][0] += duration
+					entry[phase][1] += 1
 		except OSError as exc:
 			logger.warning("Failed to read log.csv for purge breakdown: %s", exc)
 			return []
 		out = []
 		for _, e in sorted(pending.items()):
-			out.append((e["prev"], e["next"], e["wash"], e["clear"],
-				e["wash_ext"], e["clear_ext"]))
+			out.append({
+				"prev": e["prev"], "next": e["next"],
+				"wash": tuple(e["wash"]),
+				"rinse": tuple(e["rinse"]),
+				"bleach": tuple(e["bleach"]),
+				"clear": tuple(e["clear"]),
+				"prime": tuple(e["prime"]),
+			})
 		return out
 
 	def _compute_provenance(self):

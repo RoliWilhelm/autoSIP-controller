@@ -91,27 +91,23 @@ Two consequences follow from that convention:
   the waste container. These same two values are mirrored in
   Cleaning mode — editing them in either mode updates the other.
 
-Three buttons sound similar but do different things:
+Two button names cover the same action in different places:
 
-- **Return to Origin** (Automated mode, run-controls row) and **Home**
-  (Manual mode, Jog Controls) are equivalent: both move the motors
-  to origin `(0, 0)` and re-zero the software's tracked angle
-  counters. Return to Origin in Automated mode is also the mid-run
-  recalibration entry point — clicking it while paused captures the
-  current motor position so Resume can drive back there and pop a
-  Confirm Calibration dialog.
-- **Return to Start Well** (Automated mode, run-controls row) moves
-  the needle to the plate-start coordinates — well **A1** of the plate
-  — *not* to origin. Enabled only while idle; disabled mid-run.
-- **Home** (Manual mode, Jog Controls) moves both motors to origin
-  `(0, 0)` and re-zeros the software's tracked angle counters. The
-  Position readout will then read exactly `X = 0.000 cm,
-  Y = 0.000 cm`.
+- **Return to Origin** (Automated mode, run-controls row, AND
+  Manual mode, Jog Controls — the same name in both, redundant by
+  design) moves the motors to origin `(0, 0)` and re-zeros the
+  software's tracked angle counters. In Automated mode it's also
+  the mid-run recalibration entry point — clicking it while paused
+  captures the current motor position so Resume can drive back
+  there and pop a Confirm Calibration dialog.
+- **Return to Start Well** (Automated mode only) moves the needle
+  to the plate-start coordinates — well **A1** of the plate — *not*
+  to origin. Enabled only while idle; disabled mid-run.
 
 The re-zeroing matters: stepper motors can miss steps over a long
 session, and the software counters drift away from the true physical
 position. Periodically re-park the carriage manually against the
-upper-left limit and click **Home** to recalibrate.
+upper-left limit and click **Return to Origin** to recalibrate.
 
 ### The three operating modes
 
@@ -184,7 +180,7 @@ When bulk mode is active and a sample finishes (auto-pause at "Total
 reached"), a transition dialog opens showing the next sample's
 spreadsheet values. You can edit the Sample ID inline before clicking
 **Continue** — edits are remembered in `summary.md` with a `b`
-suffix. End Run and Terminate Run both implicitly exit bulk mode.
+suffix. End Run implicitly exits bulk mode.
 
 **Plate Parameters** — what the labware looks like and where it sits:
 
@@ -204,24 +200,27 @@ suffix. End Run and Terminate Run both implicitly exit bulk mode.
 - **Waste bin position (y-axis)** — Y position of the waste
   container, `[0.0, 15.0]` cm.
 
-**Pump** — flow rate and per-well drip wait:
+**Fractionation Pump Parameters** (column 0, below Run Parameters)
+— settings for the Razel R-200 syringe pump used during
+fractionation:
 
-- **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
-  your syringe pump's gear-set or peristaltic-pump calibration.
+- **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value
+  to your syringe pump's gear-set.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`. The dwell time
   *after* the pump shuts off, *before* the carriage moves to the next
   well, so the dispensed drop has time to detach cleanly. Default
   `1.0`. Longer waits improve volume consistency; shorter waits
   speed up the run.
+
+**Cleaning Parameters** (column 1, below Plate Parameters) —
+settings for the Adafruit 3910 peristaltic pump used during
+inter-sample purges, manual purges, and Cleaning Purge:
+
 - **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
   duration of each of two pump phases run between samples: one
   flushing wash solution through the tubing, one pushing air through
-  to clear the wash. Use Cleaning mode's *Purge Time Calibration*
-  panel to measure the right value for your tubing.
-- **Skip inter-sample purge** (checkbox) — when checked, Continue to
-  Next Sample goes straight to the new sample's discard phase with
-  no tubing flush. Leave unchecked for multi-sample runs to prevent
-  carryover.
+  to clear the wash. Use Cleaning mode's *Purge Time Calibration
+  Tool* panel to measure the right value for your tubing.
 - **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
   default `100.0`. Used by the waste-bin estimator to convert
   purge-phase pump-on time into a volume contribution.
@@ -235,14 +234,18 @@ suffix. End Run and Terminate Run both implicitly exit bulk mode.
   reopening the app produces a fresh counter — empty the bin first
   if you want the new counter to reflect reality).
 
+The *Skip inter-sample purge* preference moved to **Tools →
+Preferences** so it persists across launches alongside *Return
+needle to origin on exit*.
+
 **Run controls** (top-right of the Automated frame):
 
 - **Return to Origin** — moves the motors to `(0, 0)` and tares the
-  software counters. Equivalent to Manual mode's Home button. Also
-  works mid-pause: clicking it captures the current position so the
-  matching Resume can drive the needle back and pop a Confirm
-  Calibration dialog. Used to recover from stepper-motor drift
-  without aborting the run.
+  software counters. Same action as Manual mode's Return to Origin
+  button (the two are redundant by design). Also works mid-pause:
+  clicking it captures the current position so the matching Resume
+  can drive the needle back and pop a Confirm Calibration dialog.
+  Used to recover from stepper-motor drift without aborting the run.
 - **Return to Start Well** — moves the needle to the plate-start
   coordinates (well A1) entered in Plate Parameters. Enabled only
   while idle; disabled mid-run.
@@ -294,10 +297,11 @@ the fraction's position within that sample.
   translates directly to the cm units used in Automated mode (a
   10 mm jog covers the same distance as typing `1.0` cm into a
   Starting well position field).
-- **Home** — moves both motors to origin `(0, 0)` and re-zeros the
-  software's tracked angle counters.
-- **Position readout** — `Position: X = 0.000 cm, Y = 0.000 cm`,
-  updated after every jog and Home.
+- **Return to Origin** — sits above the directional pad. Moves
+  both motors to origin `(0, 0)` and re-zeros the software's
+  tracked angle counters.
+- **Position readout** — `Position: X = 0.00 cm, Y = 0.00 cm`,
+  updated after every jog and Return-to-Origin action.
 
 Soft travel limits are enforced on every jog: X axis `[0, 20]` cm,
 Y axis `[-15, 0]` cm (the Y range is negative so that pressing
@@ -367,30 +371,24 @@ The state machine claims Fractionate at the start of an Automated
 run and holds it across the entire run (even during the drip wait
 when the relay is briefly off).
 
-### Terminate Run (emergency stop)
+### Halting a run
 
-The red octagonal **Terminate Run** button lives at the
-bottom-right of the status bar, visible in Automated mode. Click it
-to hard-halt a run: pump off, motors released, all run-control
-buttons disabled. A confirmation dialog ("Are you sure that you
-wish to stop the whole run?") guards against accidental clicks.
+There is no dedicated emergency-stop button. Two operator paths
+cover halt needs:
 
-After a Terminate Run:
+- **Pause** — reversible. Pump off, motors hold position, claim
+  stays held. Click again to resume from the same cycle phase.
+- **End Run** — one-way. Three-button dialog: Cancel stays in the
+  run; **Don't Save** leaves only the raw `metadata.json` +
+  `log.csv` on disk; **Save and End** also writes `end_*.json` +
+  `summary_*.md`. Use **Don't Save** for the planned-interruption
+  halt path.
 
-- If autoSIP was mid-dispense or mid-drip-wait, the in-flight entry
-  is committed to `log.csv` with status `emergency_stopped`.
-- A "save plate snapshot" file dialog opens, offering to write the
-  current plate state to a `.txt` file before clearing the view.
-- The status bar reads `Run terminated — click Return to Start
-  Coords to re-enable controls.`
-- Clicking **Return to Origin** re-enables Manual jog and
-  Begin Fractionation.
-
-Use Terminate Run for safety emergencies (smell, collision, fluid
-leak) when an immediate stop matters more than a clean log. For
-planned interruptions (operator break, tube swap, troubleshooting),
-prefer **Pause** instead — Pause is reversible and does not write
-any `emergency_stopped` rows.
+The application's one autonomous emergency path is the waste-bin
+overflow lockdown: when the running waste-volume estimate reaches
+the configured maximum, all pump activity halts and a
+`waste_shutoff` row is appended to `log.csv`. Empty the container
+and click **Reset** next to the flask icon to clear the lockdown.
 
 ### Logging output
 

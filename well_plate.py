@@ -200,25 +200,31 @@ class WellPlateProgress(tk.Frame):
 			font=("TkDefaultFont", 10, "italic"), fg="#555",
 		)
 		self.plate_lbl.grid(row=0, column=0, sticky="w", padx=4, pady=(2, 0))
+		# current_lbl carries the detailed phase status (e.g.
+		# "Pumping well G2 (col 1, row 8)...") -- promoted from the
+		# system status bar's middle area so the plate-area header is
+		# self-contained. App.set_status mirrors its text here while a
+		# run is active.
 		self.current_lbl = tk.Label(
 			self, text="", anchor="w", justify="left", width=60,
 			font=("TkDefaultFont", 11, "bold"),
 		)
-		self.current_lbl.grid(row=1, column=0, sticky="w", padx=4, pady=(2, 0))
+		self.current_lbl.grid(row=1, column=0, sticky="w", padx=4, pady=(2, 4))
+		# count_lbl + time_lbl still exist as Tk objects so calling
+		# code that updates them is a harmless no-op; they're not
+		# gridded so they take no vertical space.
 		self.count_lbl = tk.Label(self, text="", anchor="w", width=40)
-		self.count_lbl.grid(row=2, column=0, sticky="w", padx=4)
 		self.time_lbl = tk.Label(self, text="", anchor="w", width=60)
-		self.time_lbl.grid(row=3, column=0, sticky="w", padx=4, pady=(0, 4))
 
 		self.canvas = tk.Canvas(
 			self, bg="white", bd=0, highlightthickness=1,
 			highlightbackground="#bbbbbb",
 			width=min_width, height=min_height,
 		)
-		self.canvas.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 4))
+		self.canvas.grid(row=2, column=0, sticky="nsew", padx=4, pady=(0, 4))
 
 		self.grid_columnconfigure(0, weight=1)
-		self.grid_rowconfigure(4, weight=1)
+		self.grid_rowconfigure(2, weight=1)
 
 		# Plate state
 		self.rows = 0
