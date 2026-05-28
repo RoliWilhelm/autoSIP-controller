@@ -1,6 +1,6 @@
 # 6 Operation Instructions
 
-autoSIP (version 0.2.0) is a Python/Tkinter graphical controller for the
+autoSIP (version 1.0.0) is a Python/Tkinter graphical controller for the
 Raspberry-Pi-based isopycnic gradient fractionator described in earlier
 sections. This section walks through setup, the three operating modes,
 five common workflows, the run-logging output, and the safety-stop
@@ -18,9 +18,12 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Before each session, **park the dispensing carriage at the upper-left
-mechanical limit** of the lead screws — gently slide both axes against
-their stops by hand while the autoSIP is powered off. This physical
+Before each session, **park the dispensing carriage at the
+orientation-specific mechanical-limit corner** of the lead screws —
+gently slide both axes against their stops by hand while the autoSIP
+is powered off. In **portrait** orientation (Tools → Preferences
+default) this corner is the **bottom-left** mechanical limit; in
+**landscape** orientation it is the **upper-left**. This physical
 position becomes the software's coordinate origin `(0, 0)` once the
 application launches.
 
@@ -235,8 +238,9 @@ those live in Automated mode.
   tracked angle counters. The Position readout then reads exactly
   `Position: X = 0.00 cm, Y = 0.00 cm`. Stepper motors can lose
   steps over a long session; periodically re-park the carriage
-  against the upper-left mechanical limit by hand and click
-  Return to Origin to recalibrate. A fresh app launch also reads
+  against the orientation-appropriate mechanical-limit corner
+  (upper-left in landscape, bottom-left in portrait) by hand and
+  click Return to Origin to recalibrate. A fresh app launch also reads
   `(0.00, 0.00)` — the seating wiggle that initializes lead-screw
   backlash is tared immediately after.
 - **Position readout** — `Position: X = {x:.2f} cm, Y = {y:.2f} cm`,
@@ -249,8 +253,14 @@ Soft travel limits are enforced on every jog: the X axis is bounded
 `[0, 20]` cm and the Y axis `[-15, 0]` cm. With this Y range, pressing
 **▼ Y−** from origin moves the needle into the plate-side travel
 range; pressing **▲ Y+** from origin is refused with a status-bar
-message. The Y readout therefore shows a **negative** value as the
-needle moves below the upper-left origin.
+message. The Y readout shows a **negative** value as the needle moves
+away from origin. Which compass direction the +Y / −Y buttons
+correspond to physically depends on plate orientation: in
+**landscape** orientation +Y points UP (toward the upper-left
+origin); in **portrait** orientation the carriage motor's reverse
+flag inverts, so +Y points the opposite way relative to the chosen
+origin corner. Hover the Y+ / Y− buttons in Manual mode for the
+orientation-specific direction text.
 
 **Pump Controls.** Two pump buttons:
 
@@ -286,10 +296,21 @@ for flushing the fluid path between sample types.
 - **Move to Waste Bin** — jogs the needle to the waste-bin coordinates.
 - **Purge** — toggles the relay (same semantics as Manual mode's Purge
   button; same confirmation dialog on first activation).
+- **System Clean** — runs an on-demand four-phase decontamination
+  routine (bleach fill → soak → water rinse 1 → water rinse 2). More
+  stringent than the inter-sample purge: the bleach is held static in
+  the line for a configurable soak period before rinsing. Use at
+  session start or during a paused automated run; the button is
+  disabled only during active (non-paused) dispensing. System Clean
+  intentionally stops after the second water rinse — priming with
+  sample solution is the job of the pre-fractionation prime workflow
+  (§6.3.1) or the inter-sample purge's final phase (§6.3.4).
 
 A typical cleaning cycle: switch to Cleaning mode, click **Move to
 Waste Bin**, click **Purge**, run the pump until the fluid path is
-clear, then click **Purge** again to stop.
+clear, then click **Purge** again to stop. For a stringent end-of-
+session decontamination, click **System Clean** instead and step
+through the four-phase routine.
 
 **Purge Time Calibration Tool** — a sub-panel below the manual
 Purge controls measures how long wash takes to fully replace one
@@ -363,9 +384,11 @@ well A1 and to the waste container.
 
 ![Figure: Manual mode jog controls and Position readout](figures/calibration.png)
 
-1. **Park the carriage at the upper-left mechanical limit.** With the
-   autoSIP powered off, gently slide the carriage by hand until it
-   rests against the upper-left lead-screw stops on both axes. This
+1. **Park the carriage at the origin mechanical-limit corner.** With
+   the autoSIP powered off, gently slide the carriage by hand until it
+   rests against the lead-screw stops on both axes. In **portrait**
+   (Tools → Preferences default) the origin corner is the
+   **bottom-left**; in **landscape** it is the **upper-left**. This
    physical position becomes origin `(0, 0)` once you launch the
    software.
 
@@ -421,8 +444,9 @@ well A1 and to the waste container.
 
 **Drift over a long session.** autoSIP does not automatically detect
 lost stepper steps. Periodically re-park the carriage against the
-upper-left mechanical limit by hand and click **Home** in Manual mode
-to re-zero the counters.
+orientation-appropriate mechanical-limit corner (upper-left in
+landscape, bottom-left in portrait) by hand and click **Home** in
+Manual mode to re-zero the counters.
 
 ### 6.3.2 Fractionating multiple samples on a single plate
 
@@ -743,8 +767,9 @@ deuterated one, to clear residual buffer or DNA from the tubing.
 Stepper motors occasionally miss steps, so the software's tracked
 position can drift away from the true physical position over a long
 run. autoSIP supports a mid-run recalibration that re-zeros the
-counters against the upper-left mechanical limit without aborting
-the run.
+counters against the origin mechanical-limit corner without aborting
+the run. The origin corner depends on plate orientation (upper-left
+in landscape, bottom-left in portrait).
 
 1. **Notice the drift.** The dispensed drop lands slightly off-well,
    or the snake path looks visibly shifted. Click **Pause**.
@@ -754,11 +779,13 @@ the run.
    position at the moment of the click is captured so the matching
    Resume can drive the needle back to it. Status bar:
    *"Returned to origin. Manually re-park the carriage against the
-   upper-left limit, then click Resume."*
+   {origin} limit, then click Resume."* — where `{origin}` is
+   `upper-left` in landscape or `bottom-left` in portrait.
 
-3. **Manually re-park the carriage** against the upper-left
-   mechanical stops. The software's `(0, 0)` now matches the
-   physical upper-left position — drift is corrected.
+3. **Manually re-park the carriage** against the
+   orientation-appropriate mechanical-limit stops. The software's
+   `(0, 0)` now matches the physical origin corner — drift is
+   corrected.
 
 4. **Click Resume.** The application drives the needle from the
    freshly-calibrated origin to the position captured in step 2,

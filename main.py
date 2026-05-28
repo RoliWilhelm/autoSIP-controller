@@ -25,13 +25,14 @@ from styling import (
 	make_centrifuge_tube_canvas, primary_button,
 )
 from well_plate import WellPlateProgress, format_snapshot_log
+import run_logger
 from run_logger import RunLogger, _fmt_hms
 
 # GitHub URL displayed (clickable) in the About dialog. Hard-coded here so
 # the About dialog has a single source of truth.
 _GITHUB_URL = "https://github.com/RoliWilhelm/autoSIP-controller"
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 logger = logging.getLogger("autosip")
 
@@ -635,6 +636,10 @@ class FractionatorState:
 	# runs for this many seconds between samples. Bypassed when
 	# skip_intersample_purge is True.
 	purge_time: float = 30.0
+	# Bleach soak time (minutes) for the on-demand System Clean routine.
+	# Live value — mid-routine edits don't apply to an in-flight soak,
+	# but the next System Clean starts with the current value.
+	soak_time_min: float = 5.0
 	skip_intersample_purge: bool = False
 	# Peristaltic-pump flow rate (mL/min) for purge-claim pumping (Manual
 	# Purge, Cleaning Purge, Purge Time Calibration, inter-sample purges).
@@ -1213,15 +1218,6 @@ class AutomatedFrame(tk.Frame):
 			"Per-fraction dispense volume. The pump runs for "
 			"volume / pump_rate seconds at each well.",
 		)
-		self.prime_time_te = TextEntry(runp, "Prime time (s):",
-			textvariable=app.prime_time_var)
-		self.prime_time_te.grid(row=6, column=0, sticky="we")
-		Tooltip(
-			self.prime_time_te.entry,
-			"Time to automatically walk the sample fractionation "
-			"solution from the tube to approximately 5 cm below the "
-			"syringe dispenser. Set based on your tubing length.",
-		)
 
 		# ----- Plate Parameters (middle) ---------------------------------
 		# Plate geometry + the two coordinate pairs (plate-start and
@@ -1352,6 +1348,15 @@ class AutomatedFrame(tk.Frame):
 			"Wait time between pump-off and moving to the next well. "
 			"Longer waits improve volume consistency; shorter waits run faster.",
 		)
+		self.prime_time_te = TextEntry(frac_pump, "Prime time (s):",
+			textvariable=app.prime_time_var)
+		self.prime_time_te.grid(row=2, column=0, sticky="we")
+		Tooltip(
+			self.prime_time_te.entry,
+			"Time to automatically walk the sample fractionation "
+			"solution from the tube to approximately 5 cm below the "
+			"syringe dispenser. Set based on your tubing length.",
+		)
 
 		# ----- Cleaning Parameters --------------------------------------
 		# Column 1, row 3 — under Plate Parameters and opposite Syringe
@@ -1371,11 +1376,22 @@ class AutomatedFrame(tk.Frame):
 			"many seconds. Use Cleaning mode's Purge Time Calibration to "
 			"measure the right value for your tubing.",
 		)
+		self.soak_time_te = TextEntry(
+			cleaning_params, "Bleach soak time (min):",
+			textvariable=app.soak_time_var,
+		)
+		self.soak_time_te.grid(row=1, column=0, sticky="we")
+		Tooltip(
+			self.soak_time_te.entry,
+			"Duration the bleach sits in the line during a System "
+			"Clean before rinsing. 5 min is standard for nucleic-acid "
+			"decontamination.",
+		)
 		self.peristaltic_rate_te = TextEntry(
 			cleaning_params, "Peristaltic pump rate (mL/min):",
 			textvariable=app.peristaltic_rate_var,
 		)
-		self.peristaltic_rate_te.grid(row=1, column=0, sticky="we")
+		self.peristaltic_rate_te.grid(row=2, column=0, sticky="we")
 		Tooltip(
 			self.peristaltic_rate_te.entry,
 			"Flow rate of the peristaltic pump used for purges. Drives "
@@ -1386,7 +1402,7 @@ class AutomatedFrame(tk.Frame):
 			cleaning_params, "Max waste bin volume (mL):",
 			textvariable=app.max_waste_volume_var,
 		)
-		self.max_waste_te.grid(row=2, column=0, sticky="we")
+		self.max_waste_te.grid(row=3, column=0, sticky="we")
 		Tooltip(
 			self.max_waste_te.entry,
 			"Capacity of your waste container. autoSIP warns at 80% and "
@@ -1482,6 +1498,7 @@ class AutomatedFrame(tk.Frame):
 			"pump_rate": self.pump_rate_text_entry,
 			"drip_wait_time": self.drip_wait_te,
 			"purge_time": self.purge_time_te,
+			"soak_time": self.soak_time_te,
 			"peristaltic_rate": self.peristaltic_rate_te,
 			"max_waste_volume": self.max_waste_te,
 			"volume_per_well": self.vol_text_entry,
@@ -1638,6 +1655,7 @@ class AutomatedFrame(tk.Frame):
 			self.n_fractions_te, self.discard_te,
 			self.rows_text_entry, self.cols_text_entry, self.ws_text_entry,
 			self.pump_rate_text_entry, self.drip_wait_te, self.purge_time_te,
+			self.soak_time_te,
 			self.peristaltic_rate_te, self.max_waste_te,
 			self.vol_text_entry,
 			self.table_te, self.carriage_te,
@@ -1769,6 +1787,7 @@ class AutomatedFrame(tk.Frame):
 			(self.pump_rate_text_entry, validation.pump_rate),
 			(self.drip_wait_te, validation.drip_wait_time),
 			(self.purge_time_te, validation.purge_time),
+			(self.soak_time_te, validation.soak_time),
 			(self.peristaltic_rate_te, validation.peristaltic_rate),
 			(self.max_waste_te, validation.max_waste_volume),
 			(self.prime_time_te, validation.prime_time),
@@ -1789,7 +1808,7 @@ class AutomatedFrame(tk.Frame):
 		if not errors:
 			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
 				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v,
-				drip_v, purge_v, peri_v, max_waste_v, prime_v) = parsed
+				drip_v, purge_v, soak_v, peri_v, max_waste_v, prime_v) = parsed
 			capacity = rows_v * cols_v
 
 			# N must fit on the plate
@@ -1881,6 +1900,7 @@ class AutomatedFrame(tk.Frame):
 			table_start=table_v, carriage_start=carriage_v,
 			drip_wait_time=drip_v,
 			purge_time=purge_v,
+			soak_time_min=soak_v,
 			prime_time_s=prime_v,
 			skip_intersample_purge=self.app.skip_intersample_purge_var.get(),
 			peristaltic_rate_ml_per_min=peri_v,
@@ -1890,7 +1910,8 @@ class AutomatedFrame(tk.Frame):
 	# -- WellPlateProgress shortcuts (called by App's state machine) ----
 
 	def begin_run(self, cols, rows, volume_per_well, pump_time):
-		self.progress.begin_run(cols, rows, volume_per_well, pump_time)
+		self.progress.begin_run(cols, rows, volume_per_well, pump_time,
+			orientation=self.app.plate_orientation)
 
 	def well_dispensing(self, x, y):
 		self.progress.well_dispensing(x, y)
@@ -1928,9 +1949,19 @@ class ManualFrame(tk.Frame):
 
 	# Soft travel limits (matches validation.TABLE_POS_MAX / CARRIAGE_POS_MAX
 	# but enforced here on the jog path rather than at submit time).
-	# The Y range is [-15, 0] (not [0, 15]) so from home (motor=0) the
-	# down arrow (Y-) is the one that moves the needle into valid travel;
-	# the up arrow (Y+) is refused, matching the plate's upper-left origin.
+	#
+	# Y range is [-15, 0] (not [0, 15]) so from home (motor=0) the
+	# direction that moves the needle into valid travel matches the
+	# motor's existing reverse=True wiring. The PHYSICAL direction "+Y"
+	# points depends on plate orientation: in landscape (origin
+	# upper-left, ``carriage_motor.reverse=True``) +Y physically goes
+	# UP toward the home corner; in portrait (origin bottom-left,
+	# ``carriage_motor.reverse=False`` per
+	# ``_apply_plate_orientation_to_motors``) +Y physically inverts.
+	# The numeric range stays the same so the operator's saved
+	# Starting Well / Waste Bin cm values still parse; recalibration
+	# after an orientation switch produces new values within this
+	# range.
 	_X_MIN, _X_MAX = 0.0, 20.0
 	_Y_MIN, _Y_MAX = -15.0, 0.0
 
@@ -1938,7 +1969,12 @@ class ManualFrame(tk.Frame):
 		super().__init__(master)
 		self.app = app
 
+		# Two-column grid: top sections (banner / Jog / Pump) span both
+		# columns; the two calibration LabelFrames sit side-by-side at
+		# the bottom (Position Calibration Tool col 0, Prime Time
+		# Calibration Tool col 1).
 		self.grid_columnconfigure(0, weight=1)
+		self.grid_columnconfigure(1, weight=1)
 
 		# Run-active banner: gridded only while an Automated run is in
 		# flight (managed by set_run_active_lock). Amber background so
@@ -1955,13 +1991,15 @@ class ManualFrame(tk.Frame):
 			),
 		)
 		# Stays unmapped until set_run_active_lock(True) is called.
-		self.run_active_banner.grid(row=0, column=0, sticky="we", padx=4, pady=(4, 0))
+		self.run_active_banner.grid(row=0, column=0, columnspan=2,
+			sticky="we", padx=4, pady=(4, 0))
 		self.run_active_banner.grid_remove()
 
 		# ---- Jog Controls ----
-		# Row 1 (was row 0 -- banner now occupies row 0).
+		# Row 1 (was row 0 -- banner now occupies row 0). Spans both
+		# columns so the directional pad + step radios stay full-width.
 		jog = tk.LabelFrame(self, text="Jog Controls", padx=8, pady=8)
-		jog.grid(row=1, column=0, sticky="new", padx=4, pady=4)
+		jog.grid(row=1, column=0, columnspan=2, sticky="new", padx=4, pady=4)
 		jog.grid_columnconfigure(0, weight=1)
 
 		# Return to Origin sits ABOVE the directional pad so the
@@ -1982,30 +2020,36 @@ class ManualFrame(tk.Frame):
 		# Plus-pad of directional buttons. Corners empty.
 		pad = tk.Frame(jog)
 		pad.grid(row=1, column=0, pady=(0, 8))
+		# Jog buttons. +X is always "right" in both orientations; the
+		# Y arrows' compass meaning depends on plate orientation, so
+		# the tooltip text refreshes via ``refresh_jog_tooltips``
+		# (called at construction time and again whenever the
+		# operator changes orientation in Preferences).
 		self.y_plus_btn = ttk.Button(
 			pad, text="▲ Y+", width=8,
 			command=lambda: self._jog("y", +1),
 		)
 		self.y_plus_btn.grid(row=0, column=1, padx=2, pady=2)
-		Tooltip(self.y_plus_btn, "Jog one step toward Y origin (refused if at the limit).")
+		self._y_plus_tooltip = Tooltip(self.y_plus_btn, "")
 		self.x_minus_btn = ttk.Button(
 			pad, text="◀ X−", width=8,
 			command=lambda: self._jog("x", -1),
 		)
 		self.x_minus_btn.grid(row=1, column=0, padx=2, pady=2)
-		Tooltip(self.x_minus_btn, "Jog one step in the −X direction.")
+		Tooltip(self.x_minus_btn, "Jog one step in the −X direction (left).")
 		self.x_plus_btn = ttk.Button(
 			pad, text="X+ ▶", width=8,
 			command=lambda: self._jog("x", +1),
 		)
 		self.x_plus_btn.grid(row=1, column=2, padx=2, pady=2)
-		Tooltip(self.x_plus_btn, "Jog one step in the +X direction.")
+		Tooltip(self.x_plus_btn, "Jog one step in the +X direction (right).")
 		self.y_minus_btn = ttk.Button(
 			pad, text="Y− ▼", width=8,
 			command=lambda: self._jog("y", -1),
 		)
 		self.y_minus_btn.grid(row=2, column=1, padx=2, pady=2)
-		Tooltip(self.y_minus_btn, "Jog one step away from Y origin (toward the plate).")
+		self._y_minus_tooltip = Tooltip(self.y_minus_btn, "")
+		self.refresh_jog_tooltips()
 
 		# Step-size radio group
 		self.step_var = tk.DoubleVar(value=0.1)  # default 1 mm
@@ -2029,7 +2073,7 @@ class ManualFrame(tk.Frame):
 
 		# ---- Pump Controls ----
 		pump = tk.LabelFrame(self, text="Pump Controls", padx=8, pady=8)
-		pump.grid(row=2, column=0, sticky="new", padx=4, pady=(0, 4))
+		pump.grid(row=2, column=0, columnspan=2, sticky="new", padx=4, pady=(0, 4))
 		pump.grid_columnconfigure(0, weight=1)
 		pump.grid_columnconfigure(1, weight=1)
 
@@ -2084,10 +2128,11 @@ class ManualFrame(tk.Frame):
 		# entries share variables with Automated's so the waste-bin
 		# save propagates to both modes.
 		cal = tk.LabelFrame(self, text="Position Calibration Tool", padx=8, pady=8)
-		cal.grid(row=3, column=0, sticky="new", padx=4, pady=(0, 4))
+		# Row 3 col 0 -- Prime Time Calibration Tool sits next to it at col 1.
+		cal.grid(row=3, column=0, sticky="new", padx=(4, 2), pady=(0, 4))
 		cal.grid_columnconfigure(0, weight=1)
 
-		tk.Label(cal, anchor="w", justify="left", wraplength=540, text=(
+		tk.Label(cal, anchor="w", justify="left", wraplength=320, text=(
 			"Use the jog controls above to position the needle, then click "
 			"the corresponding button to save the current position as a "
 			"parameter used by Automated mode."
@@ -2132,10 +2177,11 @@ class ManualFrame(tk.Frame):
 		# Automated mode's Prime time field picks it up immediately.
 		prime_cal = tk.LabelFrame(self, text="Prime Time Calibration",
 			padx=8, pady=8)
-		prime_cal.grid(row=4, column=0, sticky="new", padx=4, pady=(0, 4))
+		# Row 3 col 1 -- side-by-side with Position Calibration Tool.
+		prime_cal.grid(row=3, column=1, sticky="new", padx=(2, 4), pady=(0, 4))
 		prime_cal.grid_columnconfigure(0, weight=1)
 
-		tk.Label(prime_cal, anchor="w", justify="left", wraplength=540, text=(
+		tk.Label(prime_cal, anchor="w", justify="left", wraplength=320, text=(
 			"Connect a sample tube, click Start, and watch the line as "
 			"solution walks toward the dispenser. Click Stop when the "
 			"solution reaches ~5 cm below the needle. Save to apply as "
@@ -2449,6 +2495,38 @@ class ManualFrame(tk.Frame):
 		_update_pump_button(self.fractionate_btn, "fractionate", claimant, relay_on, in_run)
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
 
+	def refresh_jog_tooltips(self):
+		"""Update the Y+/Y- tooltips to reflect the current plate
+		orientation. +X is always "right" so its tooltips never change.
+		Called at construction and whenever the operator changes the
+		orientation in Tools → Preferences."""
+		orientation = self.app.plate_orientation
+		if orientation == "portrait":
+			y_plus = (
+				"Jog one step in the +Y direction. In portrait "
+				"orientation +Y physically moves the carriage UP, "
+				"away from the bottom-left origin (toward higher "
+				"column numbers)."
+			)
+			y_minus = (
+				"Jog one step in the −Y direction. In portrait "
+				"orientation −Y physically moves the carriage DOWN, "
+				"toward the bottom-left origin."
+			)
+		else:
+			y_plus = (
+				"Jog one step in the +Y direction. In landscape "
+				"orientation +Y physically moves the carriage UP, "
+				"toward the upper-left origin (refused at the limit)."
+			)
+			y_minus = (
+				"Jog one step in the −Y direction. In landscape "
+				"orientation −Y physically moves the carriage DOWN, "
+				"away from the upper-left origin (toward the plate)."
+			)
+		self._y_plus_tooltip.text = y_plus
+		self._y_minus_tooltip.text = y_minus
+
 	def set_run_active_lock(self, active):
 		"""Toggle the visible enabled-state of every Manual control
 		that could interfere with an active Automated run. The banner
@@ -2486,8 +2564,10 @@ class CleaningFrame(tk.Frame):
 		super().__init__(master)
 		self.app = app
 
+		# Two-column grid with equal weights so the Waste bin and
+		# System Clean panels at row 1 split the available width.
 		self.grid_columnconfigure(0, weight=1)
-		self.grid_columnconfigure(1, weight=0)
+		self.grid_columnconfigure(1, weight=1)
 
 		# Run-active banner: gridded only while an Automated run is in
 		# flight. Spans both columns and sits above all controls.
@@ -2507,9 +2587,11 @@ class CleaningFrame(tk.Frame):
 
 		# Waste-bin coords -- bound to the same App-level StringVars as
 		# Automated mode's Waste bin entries, so an edit in either mode
-		# propagates automatically.
+		# propagates automatically. Sits in column 0 of row 1, paired
+		# with the System Clean panel in column 1.
 		bin_frame = tk.LabelFrame(self, text="Waste bin", padx=8, pady=4)
-		bin_frame.grid(row=1, column=0, columnspan=2, sticky="we", padx=2, pady=(2, 4))
+		bin_frame.grid(row=1, column=0, sticky="new",
+			padx=(2, 2), pady=(2, 4))
 		bin_frame.grid_columnconfigure(0, weight=1)
 		self.waste_table_te = TextEntry(
 			bin_frame, "Waste bin position (x-axis):",
@@ -2530,6 +2612,39 @@ class CleaningFrame(tk.Frame):
 			self.waste_carriage_te.entry,
 			"Mirrors Automated mode's Waste bin position (y-axis). "
 			"Edits propagate in both directions.",
+		)
+
+		# System Clean: on-demand 4-phase decontamination routine
+		# (bleach fill → soak → water rinse ×2). Sits in column 1 of
+		# row 1 alongside the Waste bin panel. Runnable both from idle
+		# and during an operator-paused automated run; the button
+		# gates itself off only during ACTIVE (non-paused) runs.
+		sysclean_frame = tk.LabelFrame(self, text="System Clean",
+			padx=8, pady=4)
+		sysclean_frame.grid(row=1, column=1, sticky="new",
+			padx=(2, 2), pady=(2, 4))
+		sysclean_frame.grid_columnconfigure(0, weight=1)
+		tk.Label(
+			sysclean_frame, justify="left", anchor="w", wraplength=260,
+			text=(
+				"Four-phase decontamination: bleach fill → soak → "
+				"water rinse ×2. Use at session start or during a "
+				"paused run."
+			),
+			fg=PALETTE["fg_muted"],
+		).grid(row=0, column=0, sticky="we", pady=(0, 6))
+		self.sysclean_btn = primary_button(
+			sysclean_frame, text="System Clean",
+			command=self.system_clean_clicked,
+		)
+		self.sysclean_btn.grid(row=1, column=0, sticky="we")
+		Tooltip(
+			self.sysclean_btn,
+			"Four-phase decontamination: pump bleach, soak, then "
+			"double water rinse. Use at session start or during a "
+			"paused run for a stringent line clean. Priming with "
+			"sample is a separate workflow (inter-sample purge or "
+			"pre-fractionation prime).",
 		)
 
 		self.move_btn = primary_button(
@@ -2754,6 +2869,17 @@ class CleaningFrame(tk.Frame):
 
 	def refresh_pump_buttons(self, claimant, relay_on, in_run):
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
+		self._refresh_sysclean_gate()
+
+	def _refresh_sysclean_gate(self):
+		"""Enable System Clean when no automated run is active OR the
+		run is operator-paused. Disable during active (non-paused)
+		dispensing. Idempotent."""
+		s = self.app.state
+		paused = bool(s.is_paused)
+		active_dispense = (s.phase != "idle") and not paused
+		self.sysclean_btn["state"] = (
+			tk.DISABLED if active_dispense else tk.NORMAL)
 
 	def set_run_active_lock(self, active):
 		"""Disable every Cleaning control that could interfere with an
@@ -2761,6 +2887,10 @@ class CleaningFrame(tk.Frame):
 		coordinate entries are made read-only because their Tk variable
 		is shared with Automated mode's Waste bin entries -- a mid-run
 		edit here would silently redirect the live run's waste target.
+
+		The System Clean button is NOT disabled by this lock — it has
+		its own gating (``_refresh_sysclean_gate``) that keeps it
+		clickable during a paused run.
 		"""
 		if active:
 			self.run_active_banner.grid()
@@ -2777,6 +2907,24 @@ class CleaningFrame(tk.Frame):
 			self.cal_reset_btn, self.cal_save_btn,
 		):
 			btn["state"] = state
+		# System Clean stays clickable during a paused run.
+		self._refresh_sysclean_gate()
+
+	def system_clean_clicked(self):
+		"""Launch the 5-phase System Clean routine. Re-checks the gate
+		(button could have been clicked just before a non-paused run
+		state landed) and delegates to App._start_system_clean."""
+		s = self.app.state
+		paused = bool(s.is_paused)
+		if s.phase != "idle" and not paused:
+			messagebox.showinfo(
+				"Run in progress",
+				"System Clean cannot be started while the automated run "
+				"is actively dispensing. Pause the run first.",
+				parent=self,
+			)
+			return
+		self.app._start_system_clean(launched_during_pause=paused)
 
 	def move_clicked(self):
 		"""Move the needle to the waste-bin position. Both coords are
@@ -2869,6 +3017,15 @@ class App(tk.Tk):
 		# a mid-session change applies to the next transition.
 		self.purge_protocol = config_store.load_purge_protocol()
 
+		# Plate orientation: "portrait" (default for fresh installs;
+		# plate rows on X-axis, columns on Y-axis, A1 at bottom-left,
+		# +Y up) or "landscape" (columns on X, rows on Y, A1 at
+		# upper-left, +Y down). Top-level preference persisted in
+		# config.json; consulted by _snake_step for iteration order
+		# and applied to carriage_motor.reverse for direction inversion.
+		self.plate_orientation = config_store.load_plate_orientation()
+		self._apply_plate_orientation_to_motors()
+
 		# Bulk Sample Submission. Operator imports a CSV of sample
 		# metadata before clicking Begin Fractionation. Each entry of
 		# ``bulk_samples`` is a dict with keys:
@@ -2911,6 +3068,10 @@ class App(tk.Tk):
 		self.skip_intersample_purge_var = tk.BooleanVar(
 			value=config_store.load_skip_intersample_purge()
 		)
+		# Bleach soak time in minutes. Read by Cleaning Mode's System
+		# Clean routine when the operator launches it. Default 5 min
+		# matches the standard nucleic-acid decontamination soak.
+		self.soak_time_var = tk.StringVar(value="5")
 		# Peristaltic pump rate (mL/min) used by all purge-claim waste
 		# tracking. Live value -- mid-run edits affect subsequent waste
 		# calculations.
@@ -3118,6 +3279,28 @@ class App(tk.Tk):
 			text="Decontamination (water → bleach → water → sample)",
 		).pack(anchor="w", padx=(16, 0), pady=(0, 12))
 
+		tk.Label(body, text="Plate orientation:", anchor="w",
+			).pack(anchor="w", pady=(0, 2))
+		orientation_var = tk.StringVar(value=self.plate_orientation)
+		tk.Radiobutton(body, variable=orientation_var, value="portrait",
+			text="Portrait (default — rows on X-axis, A1 at bottom-left)",
+		).pack(anchor="w", padx=(16, 0))
+		tk.Radiobutton(body, variable=orientation_var, value="landscape",
+			text="Landscape (columns on X-axis, A1 at upper-left)",
+		).pack(anchor="w", padx=(16, 0))
+		tk.Label(body,
+			text=(
+				"Portrait is recommended for this XY table's sizing. "
+				"Switching orientations changes the origin corner and "
+				"the snake pattern; recalibrate the Starting Well and "
+				"Waste Bin positions afterward using the Position "
+				"Calibration tool."
+			),
+			justify="left", anchor="w", wraplength=420,
+			fg=PALETTE["fg_muted"],
+			font=(FONTS["family"], FONTS["size"], "italic"),
+		).pack(anchor="w", padx=(16, 0), pady=(2, 12))
+
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
 
@@ -3125,6 +3308,30 @@ class App(tk.Tk):
 			new_return = bool(return_var.get())
 			new_skip = bool(skip_var.get())
 			new_protocol = protocol_var.get()
+			new_orientation = orientation_var.get()
+			if new_orientation not in ("portrait", "landscape"):
+				new_orientation = self.plate_orientation
+			# Orientation switch carries a migration prompt: changing
+			# the origin corner without re-deriving Starting Well /
+			# Waste Bin coords would send the needle to the wrong
+			# absolute positions. Confirm before applying.
+			if new_orientation != self.plate_orientation:
+				go = messagebox.askyesno(
+					"Switch plate orientation?",
+					"Switching plate orientation changes the origin "
+					"corner and snake pattern. Recalibrate the "
+					"Starting Well and Waste Bin positions using the "
+					"Position Calibration tool before your next run.\n\n"
+					"Saved coordinates are kept but will reference the "
+					"old origin until you re-derive them.\n\n"
+					"Continue with the switch?",
+					parent=dlg,
+				)
+				if not go:
+					# Revert the radio so the dialog still reflects the
+					# committed value if the operator re-opens it.
+					orientation_var.set(self.plate_orientation)
+					return
 			self.return_to_origin_on_exit = new_return
 			# Push into the live BooleanVar so the state-machine read
 			# (state.skip_intersample_purge at Begin) sees the new value
@@ -3134,10 +3341,33 @@ class App(tk.Tk):
 				new_protocol if new_protocol in ("basic", "decontamination")
 				else "basic"
 			)
+			orientation_changed = (new_orientation != self.plate_orientation)
+			self.plate_orientation = new_orientation
+			if orientation_changed:
+				# Re-apply the carriage-motor direction inversion for
+				# the new orientation. The next motor move uses the
+				# updated reverse flag.
+				self._apply_plate_orientation_to_motors()
+				# Push the new orientation into the live plate canvas
+				# so the idle visualisation reflects the switch
+				# immediately (and a subsequent run picks it up via
+				# begin_run too).
+				af = getattr(self, "automated_frame", None)
+				progress = getattr(af, "progress", None)
+				if progress is not None and hasattr(progress, "set_orientation"):
+					progress.set_orientation(new_orientation)
+				# Manual jog tooltips also change wording based on
+				# orientation; refresh them so the next hover shows
+				# the new direction labels.
+				mf = getattr(self, "manual_frame", None)
+				if mf is not None and hasattr(mf, "refresh_jog_tooltips"):
+					mf.refresh_jog_tooltips()
+				logger.info("Plate orientation switched to %s", new_orientation)
 			try:
 				config_store.save_return_to_origin_on_exit(new_return)
 				config_store.save_skip_intersample_purge(new_skip)
 				config_store.save_purge_protocol(self.purge_protocol)
+				config_store.save_plate_orientation(self.plate_orientation)
 			except Exception as exc:
 				logger.warning("Could not persist preferences: %s", exc)
 			dlg.destroy()
@@ -3825,9 +4055,14 @@ class App(tk.Tk):
 			self._set_controls_enabled(True)
 			self._terminated = False
 		if s.is_paused:
+			origin_label = (
+				"bottom-left limit"
+				if self.plate_orientation == "portrait"
+				else "upper-left limit"
+			)
 			self.set_status(
 				"Returned to origin. Manually re-park the carriage "
-				"against the upper-left limit, then click Resume."
+				f"against the {origin_label}, then click Resume."
 			)
 		else:
 			self.set_status("Returned to origin.")
@@ -3985,6 +4220,14 @@ class App(tk.Tk):
 		# unambiguously the Run Controls row's job.
 		af.begin_btn["state"] = tk.NORMAL if s.phase == "idle" else tk.DISABLED
 
+		# System Clean: enabled at idle OR while operator-paused;
+		# disabled during active dispensing. Pause flips here without
+		# moving through ``_set_phase`` so we re-evaluate the gate at
+		# every run-control update.
+		cf = getattr(self, "cleaning_frame", None)
+		if cf is not None and hasattr(cf, "_refresh_sysclean_gate"):
+			cf._refresh_sysclean_gate()
+
 	def _set_controls_enabled(self, enabled):
 		"""Toggle every frame's dangerous buttons in one call."""
 		for frame in self._frames.values():
@@ -4051,6 +4294,33 @@ class App(tk.Tk):
 			self.table_motor.move_dist_absolute(table_dist)
 		if carriage_dist is not None:
 			self.carriage_motor.move_dist_absolute(carriage_dist)
+
+	def _apply_plate_orientation_to_motors(self):
+		"""Push the current ``plate_orientation`` into the carriage
+		motor's ``reverse`` flag so a positive Y move always carries
+		the carriage AWAY from the chosen origin corner.
+
+		Convention:
+		  * landscape — origin at upper-left, +Y physically goes DOWN,
+		    matches the pre-orientation-feature hardware setup; carriage
+		    motor uses ``reverse=True``.
+		  * portrait — origin at bottom-left, +Y physically goes UP;
+		    carriage motor uses ``reverse=False``.
+
+		``table_motor.reverse`` is NOT touched — the +X direction is
+		"right" in both orientations.
+
+		Saved start/waste coordinates are NOT auto-transformed when
+		orientation flips; the operator must recalibrate against the
+		new origin corner (the Preferences dialog warns about this).
+		"""
+		# Landscape preserves the pre-feature behavior (reverse=True);
+		# portrait flips the carriage so +Y goes the OTHER way.
+		self.carriage_motor.reverse = (self.plate_orientation == "landscape")
+		logger.debug(
+			"plate_orientation=%s applied: carriage_motor.reverse=%s",
+			self.plate_orientation, self.carriage_motor.reverse,
+		)
 
 	# -- Pump / pause -----------------------------------------------------
 
@@ -5054,24 +5324,40 @@ class App(tk.Tk):
 		return result["confirmed"]
 
 	def _next_well_after_resume(self):
-		"""Pure mirror of move()'s advancing logic so we can name the next
-		well without firing any motors. Used only by the resume breadcrumb."""
+		"""Pure mirror of _snake_step's advancing logic so we can name the
+		next well without firing any motors. Used only by the resume
+		breadcrumb. Must follow the orientation-aware snake direction
+		(``_snake_step`` switches on ``self.plate_orientation``)."""
 		s = self.state
 		x, y, fwd = s.x, s.y, s.carriage_forwards
+		if self.plate_orientation == "portrait":
+			# Column snake: inner sweep on y (rows), outer step on x (cols).
+			if fwd:
+				y = y + 1
+				if y >= s.ROWS:
+					y = s.ROWS - 1
+					x = x + 1
+			else:
+				y = y - 1
+				if y < 0:
+					y = 0
+					x = x + 1
+			if s.COLS:
+				x = min(x, s.COLS - 1)
+			return x, y
+		# Landscape — row snake: inner sweep on x (cols), outer step on y (rows).
 		if fwd:
-			y = y + 1
-			if y >= s.ROWS:
-				y = s.ROWS - 1
-				x = x + 1
+			x = x + 1
+			if x >= s.COLS:
+				x = s.COLS - 1
+				y = y + 1
 		else:
-			y = y - 1
-			if y < 0:
-				y = 0
-				x = x + 1
-		# Clamp x so the resume row still names a valid well even if we
-		# paused at the very last well of the run.
-		if s.COLS:
-			x = min(x, s.COLS - 1)
+			x = x - 1
+			if x < 0:
+				x = 0
+				y = y + 1
+		if s.ROWS:
+			y = min(y, s.ROWS - 1)
 		return x, y
 
 	# -- Automated fractionation flow ------------------------------------
@@ -5082,7 +5368,8 @@ class App(tk.Tk):
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, drip_wait_time,
 			purge_time, prime_time_s, skip_intersample_purge,
-			peristaltic_rate_ml_per_min, max_waste_volume_ml):
+			peristaltic_rate_ml_per_min, max_waste_volume_ml,
+			soak_time_min=5.0):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
 		Cross-field rules (N ≤ rows·cols, D < N, waste-bin coords required
@@ -5218,6 +5505,7 @@ class App(tk.Tk):
 		s.pump_time = pump_time
 		s.drip_wait_time = drip_wait_time
 		s.purge_time = purge_time
+		s.soak_time_min = float(soak_time_min)
 		s.skip_intersample_purge = skip_intersample_purge
 		s.peristaltic_rate_ml_per_min = peristaltic_rate_ml_per_min
 		s.max_waste_volume_ml = max_waste_volume_ml
@@ -5376,22 +5664,26 @@ class App(tk.Tk):
 		self._priming_workflow(on_done=self._begin_first_phase)
 
 	def _priming_workflow(self, on_done):
-		"""Pre-fractionation priming. Two-step modal sequence that walks
+		"""Pre-fractionation priming. Single modal dialog that walks
 		fractionation solution from the sample tube up the inlet line
 		to the syringe dispenser. Runs once at run start before the
 		state machine's first dispense.
 
-		Step 1 (automatic): pump runs for ``state.prime_time_s`` while
-		the needle moves to its first-dispense target. The target is
-		the waste bin when D > 0 (discards land there); otherwise the
-		plate's start well (A1).
+		The dialog has two internal states (mirroring the inter-sample
+		purge dialog):
 
-		Step 2 (manual): operator Space-toggles the pump until a
-		droplet forms at the needle, then clicks Begin Run.
+		  * ``"priming"`` — the needle moves to its first-dispense
+		    target (waste bin if D > 0, else plate A1), then the pump
+		    auto-cycles for ``state.prime_time_s`` with a live
+		    countdown. Begin Run disabled; Space ignored.
 
-		On Begin Run, ``on_done()`` fires -- the caller's hook into the
-		state machine's first dispense phase.
-		On Cancel from either step, the run aborts cleanly and the
+		  * ``"complete"`` — auto-cycle done. Operator Space-toggles
+		    extension cycles until a droplet forms at the needle,
+		    then clicks Begin Run.
+
+		On Begin Run, ``on_done()`` fires -- the caller's hook into
+		the state machine's first dispense phase.
+		On Cancel from either state, the run aborts cleanly and the
 		application returns to idle.
 		"""
 		s = self.state
@@ -5408,162 +5700,52 @@ class App(tk.Tk):
 		# time waste tracker for the duration of the prime workflow
 		# in that case.
 		self._suppress_waste_tracking = not target_is_waste
-		self._priming_step1(target_x, target_y, target_label,
-			target_is_waste, on_done)
+		self._priming_dialog(target_x, target_y, target_label, on_done)
 
-	def _priming_step1(self, target_x, target_y, target_label,
-			target_is_waste, on_done):
-		"""Step 1: parallel auto-pump + needle move."""
+	def _priming_dialog(self, target_x, target_y, target_label, on_done):
+		"""Single-dialog priming. See ``_priming_workflow`` for the
+		state-machine description.
+
+		Implementation note on the move/countdown ordering: the needle
+		move runs *first* (synchronously via ``move_to_positions``,
+		which blocks the GUI) before the auto-pump countdown starts.
+		The previous design ran them in parallel and waited on a
+		"both done" condition, which dead-locked the transition to
+		the manual-prime phase. Serial is robust; the move only adds
+		a few seconds of latency at run start.
+		"""
 		s = self.state
 		prime_s = max(0.0, float(s.prime_time_s))
 
-		ctx = {"cancelled": False, "move_done": False,
-			"pump_done": False, "tick_after": None,
-			"stop_after": None,
-			"start_iso": None, "start_mono": None}
+		ctx = {"cancelled": False, "state": "priming",
+			"tick_after": None, "stop_after": None,
+			"auto_start_iso": None, "auto_start_mono": None,
+			"is_pumping": False, "ext_count": 0, "ext_total_s": 0.0,
+			"ext_start_mono": None, "ext_start_iso": None}
 
 		dlg = tk.Toplevel(self)
-		dlg.title("Priming Fractionation Line — Step 1 of 2")
+		dlg.title("Prime Fractionation Line")
 		dlg.transient(self)
 		dlg.resizable(False, False)
 		body = tk.Frame(dlg, padx=14, pady=12)
 		body.pack(fill=tk.BOTH, expand=True)
 
-		tk.Label(body, justify="left", anchor="w", wraplength=460, text=(
-			"Walking sample solution from tube toward syringe dispenser.\n\n"
-			f"Needle moving to {target_label}."
-		)).pack(anchor="w", pady=(0, 10))
+		header_lbl = tk.Label(body, justify="left", anchor="w",
+			wraplength=460,
+			text=f"Needle parked above the {target_label}.")
+		header_lbl.pack(anchor="w", pady=(0, 8))
 
-		countdown_lbl = tk.Label(body, anchor="w",
-			text=f"Prime time: {prime_s:.0f} / {prime_s:.0f} s remaining")
+		body_lbl = tk.Label(body, justify="left", anchor="w",
+			wraplength=460,
+			text="Moving needle into position...")
+		body_lbl.pack(anchor="w", pady=(0, 6))
+
+		countdown_lbl = tk.Label(body, anchor="w", text="")
 		countdown_lbl.pack(anchor="w")
-		status_lbl = tk.Label(body, anchor="w",
-			text="Pump: OFF   Needle: parked")
-		status_lbl.pack(anchor="w", pady=(0, 12))
-
-		def _cancel():
-			ctx["cancelled"] = True
-			for key in ("tick_after", "stop_after"):
-				if ctx[key] is not None:
-					try:
-						self.after_cancel(ctx[key])
-					except Exception:
-						pass
-					ctx[key] = None
-			self.pump_controller.set_relay(False)
-			if dlg.winfo_exists():
-				dlg.destroy()
-			self._abort_run_from_priming()
-
-		btn_row = tk.Frame(body)
-		btn_row.pack(fill=tk.X)
-		ttk.Button(btn_row, text="Cancel", command=_cancel,
-			style="Danger.TButton").pack(side=tk.LEFT, padx=4)
-
-		dlg.protocol("WM_DELETE_WINDOW", _cancel)
-		dlg.update_idletasks()
-		self._center_over_main(dlg)
-
-		# Claim fractionate + start pump
-		self.pump_controller.claim_for("fractionate")
-		self.pump_controller.set_relay(True)
-		ctx["start_iso"] = datetime.now().isoformat(timespec="milliseconds")
-		ctx["start_mono"] = monotonic()
-		status_lbl.config(text="Pump: ON   Needle: moving")
-
-		def _pump_off():
-			ctx["stop_after"] = None
-			ctx["pump_done"] = True
-			if ctx["cancelled"]:
-				return
-			self.pump_controller.set_relay(False)
-			elapsed = monotonic() - ctx["start_mono"]
-			end_iso = datetime.now().isoformat(timespec="milliseconds")
-			if self.run_logger is not None:
-				try:
-					self.run_logger.prime_auto(
-						target_x_cm=target_x, target_y_cm=target_y,
-						start_iso=ctx["start_iso"], end_iso=end_iso,
-						duration_s=elapsed,
-					)
-				except Exception as exc:
-					logger.warning("Failed to log prime_auto: %s", exc)
-			countdown_lbl.config(
-				text=f"Prime time: 0 / {prime_s:.0f} s remaining")
-			status_lbl.config(text="Pump: OFF   Needle: " + (
-				"moving" if not ctx["move_done"] else "parked"))
-			_check_advance()
-		ctx["stop_after"] = self.after(int(prime_s * 1000), _pump_off)
-
-		def _tick():
-			ctx["tick_after"] = None
-			if ctx["cancelled"] or not dlg.winfo_exists():
-				return
-			remaining = max(0.0,
-				prime_s - (monotonic() - ctx["start_mono"]))
-			countdown_lbl.config(
-				text=f"Prime time: {remaining:.0f} / {prime_s:.0f} s remaining")
-			if remaining > 0:
-				ctx["tick_after"] = self.after(100, _tick)
-		_tick()
-
-		def _do_move():
-			if ctx["cancelled"]:
-				return
-			# move_to_positions is synchronous and blocks the GUI for
-			# the duration of the move. The pump's after()-scheduled
-			# off-task will fire after the move returns; the countdown
-			# label visually freezes during the move because Tk can't
-			# render updates. status_lbl is set BEFORE the call so the
-			# operator sees "Needle: moving" before the freeze.
-			self.move_to_positions(table_dist=target_x,
-				carriage_dist=target_y)
-			ctx["move_done"] = True
-			status_lbl.config(text="Pump: " + (
-				"ON" if self.pump_controller.relay_on else "OFF")
-				+ "   Needle: parked")
-			_check_advance()
-		# Defer move by one tick so the dialog renders first.
-		self.after(50, _do_move)
-
-		def _check_advance():
-			if ctx["cancelled"]:
-				return
-			if ctx["move_done"] and ctx["pump_done"]:
-				if dlg.winfo_exists():
-					dlg.destroy()
-				self._priming_step2(target_x, target_y, target_label,
-					target_is_waste, on_done)
-
-	def _priming_step2(self, target_x, target_y, target_label,
-			target_is_waste, on_done):
-		"""Step 2: operator Space-toggles pump until droplet, then
-		clicks Begin Run."""
-
-		ctx = {"cancelled": False, "is_pumping": False,
-			"cycle_count": 0, "total_s": 0.0,
-			"cycle_start_mono": None, "cycle_start_iso": None,
-			"tick_after": None}
-
-		dlg = tk.Toplevel(self)
-		dlg.title("Priming Fractionation Line — Step 2 of 2")
-		dlg.transient(self)
-		dlg.resizable(False, False)
-		body = tk.Frame(dlg, padx=14, pady=12)
-		body.pack(fill=tk.BOTH, expand=True)
-
-		tk.Label(body, justify="left", anchor="w", wraplength=460, text=(
-			f"Needle is parked above the {target_label}.\n\n"
-			"Press Space to walk the sample solution until a droplet "
-			"forms at the syringe dispenser. Press Space again to "
-			"stop. Click Begin Run when ready."
-		)).pack(anchor="w", pady=(0, 10))
-
 		pump_lbl = tk.Label(body, text="Pump: OFF",
 			font=FONTS["bold"], anchor="w")
 		pump_lbl.pack(anchor="w")
-		manual_lbl = tk.Label(body,
-			text="Manual prime: 0 cycles, 0.0 s total", anchor="w")
+		manual_lbl = tk.Label(body, text="", anchor="w")
 		manual_lbl.pack(anchor="w", pady=(0, 12))
 
 		btn_row = tk.Frame(body)
@@ -5571,37 +5753,90 @@ class App(tk.Tk):
 		btn_row.grid_columnconfigure(0, weight=1)
 		btn_row.grid_columnconfigure(1, weight=1)
 
-		def _log_cycle():
-			elapsed = monotonic() - ctx["cycle_start_mono"]
+		def _cancel_pending_timers():
+			for key in ("tick_after", "stop_after"):
+				if ctx[key] is not None:
+					try:
+						self.after_cancel(ctx[key])
+					except Exception:
+						pass
+					ctx[key] = None
+
+		def _cancel():
+			ctx["cancelled"] = True
+			_cancel_pending_timers()
+			# If we cancel mid-extension, the in-flight cycle is left
+			# unlogged; matches step2's prior behavior of only logging
+			# fully-bracketed Space-on / Space-off pairs.
+			self.pump_controller.set_relay(False)
+			ctx["is_pumping"] = False
+			if dlg.winfo_exists():
+				dlg.destroy()
+			self._abort_run_from_priming()
+
+		def _begin_run():
+			if ctx["state"] != "complete" or ctx["is_pumping"] \
+					or ctx["cancelled"]:
+				return
+			if dlg.winfo_exists():
+				dlg.destroy()
+			# Suppression flag served its purpose for the prime
+			# steps; clear it so subsequent dispense waste tracks
+			# normally.
+			self._suppress_waste_tracking = False
+			on_done()
+
+		cancel_btn = ttk.Button(btn_row, text="Cancel",
+			command=_cancel, style="Danger.TButton")
+		cancel_btn.grid(row=0, column=0, sticky="w", padx=4)
+		begin_btn = ttk.Button(btn_row, text="Begin Run",
+			command=_begin_run, style="Primary.TButton")
+		begin_btn.grid(row=0, column=1, sticky="e", padx=4)
+		begin_btn.state(["disabled"])
+
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		dlg.bind("<Escape>", lambda _e: _cancel())
+
+		# ---- Spacebar handler (gated on state == "complete") ----------
+		def _log_ext_cycle():
+			elapsed = monotonic() - ctx["ext_start_mono"]
 			end_iso = datetime.now().isoformat(timespec="milliseconds")
 			if self.run_logger is not None:
 				try:
 					self.run_logger.prime_manual_ext(
-						extension_idx=ctx["cycle_count"],
+						extension_idx=ctx["ext_count"],
 						target_x_cm=target_x, target_y_cm=target_y,
-						start_iso=ctx["cycle_start_iso"], end_iso=end_iso,
-						duration_s=elapsed,
+						start_iso=ctx["ext_start_iso"],
+						end_iso=end_iso, duration_s=elapsed,
 					)
 				except Exception as exc:
 					logger.warning(
 						"Failed to log prime_manual_ext: %s", exc)
-			ctx["total_s"] += elapsed
+			ctx["ext_total_s"] += elapsed
 
-		def _tick():
+		def _ext_tick():
 			ctx["tick_after"] = None
 			if ctx["cancelled"] or not ctx["is_pumping"]:
 				return
-			cycle_s = monotonic() - ctx["cycle_start_mono"]
+			cycle_s = monotonic() - ctx["ext_start_mono"]
 			manual_lbl.config(text=(
-				f"Manual prime: {ctx['cycle_count']} cycle"
-				f"{'s' if ctx['cycle_count'] != 1 else ''}, "
-				f"{ctx['total_s'] + cycle_s:.1f} s total"
+				f"Manual prime: {ctx['ext_count']} cycle"
+				f"{'s' if ctx['ext_count'] != 1 else ''}, "
+				f"{ctx['ext_total_s'] + cycle_s:.1f} s total"
 			))
-			ctx["tick_after"] = self.after(100, _tick)
+			ctx["tick_after"] = self.after(100, _ext_tick)
 
 		def _on_space(_e=None):
-			if ctx["cancelled"]:
+			# Gate: only act in the "complete" state. During the
+			# initial move and auto-countdown, Space is a no-op.
+			if ctx["cancelled"] or ctx["state"] != "complete":
 				return "break"
+			# Don't toggle if focus is in a text-entry widget (none
+			# in this dialog today, but keeps the binding safe if a
+			# future change adds an Entry).
+			focused = dlg.focus_get()
+			if isinstance(focused, (tk.Entry, tk.Text)):
+				return None
 			if ctx["is_pumping"]:
 				if ctx["tick_after"] is not None:
 					try:
@@ -5611,67 +5846,116 @@ class App(tk.Tk):
 					ctx["tick_after"] = None
 				self.pump_controller.set_relay(False)
 				ctx["is_pumping"] = False
-				_log_cycle()
+				_log_ext_cycle()
 				pump_lbl.config(text="Pump: OFF")
 				manual_lbl.config(text=(
-					f"Manual prime: {ctx['cycle_count']} cycle"
-					f"{'s' if ctx['cycle_count'] != 1 else ''}, "
-					f"{ctx['total_s']:.1f} s total"
+					f"Manual prime: {ctx['ext_count']} cycle"
+					f"{'s' if ctx['ext_count'] != 1 else ''}, "
+					f"{ctx['ext_total_s']:.1f} s total"
 				))
 				begin_btn.state(["!disabled"])
 			else:
-				ctx["cycle_count"] += 1
-				ctx["cycle_start_mono"] = monotonic()
-				ctx["cycle_start_iso"] = datetime.now().isoformat(
+				ctx["ext_count"] += 1
+				ctx["ext_start_mono"] = monotonic()
+				ctx["ext_start_iso"] = datetime.now().isoformat(
 					timespec="milliseconds")
 				ctx["is_pumping"] = True
 				self.pump_controller.set_relay(True)
 				pump_lbl.config(text="Pump: ON")
 				begin_btn.state(["disabled"])
-				_tick()
+				_ext_tick()
 			return "break"
-
-		def _begin_run():
-			if ctx["is_pumping"] or ctx["cancelled"]:
-				return
-			if dlg.winfo_exists():
-				dlg.destroy()
-			# Suppression flag served its purpose for the prime steps;
-			# clear it so subsequent dispense waste tracks normally.
-			self._suppress_waste_tracking = False
-			on_done()
-
-		def _cancel():
-			ctx["cancelled"] = True
-			if ctx["tick_after"] is not None:
-				try:
-					self.after_cancel(ctx["tick_after"])
-				except Exception:
-					pass
-				ctx["tick_after"] = None
-			if ctx["is_pumping"]:
-				self.pump_controller.set_relay(False)
-				ctx["is_pumping"] = False
-				_log_cycle()
-			if dlg.winfo_exists():
-				dlg.destroy()
-			self._abort_run_from_priming()
-
-		ttk.Button(btn_row, text="Cancel", command=_cancel,
-			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
-		begin_btn = ttk.Button(btn_row, text="Begin Run",
-			command=_begin_run, style="Primary.TButton")
-		begin_btn.grid(row=0, column=1, sticky="e", padx=4)
 
 		dlg.bind("<space>", _on_space)
 		dlg.bind("<Return>", lambda _e: _begin_run())
-		# Override the default class-level Space-activates-button
-		# behavior on both buttons so Space always routes to
-		# _on_space (pump toggle), never to Cancel / Begin Run.
+		# Override Tk's class-level Space-activates-button so the
+		# focused Begin Run button can't fire its own command when
+		# the operator wants to toggle an extension cycle.
 		begin_btn.bind("<space>", _on_space)
-		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		cancel_btn.bind("<space>", _on_space)
+
+		# ---- Transition to "complete" state ---------------------------
+		def _enter_complete_state():
+			ctx["state"] = "complete"
+			body_lbl.config(text=(
+				"Automatic prime complete. Press Space to walk the "
+				"solution further until a droplet forms at the needle. "
+				"Press Space again to stop. Click Begin Run when ready."
+			))
+			countdown_lbl.config(text="")
+			pump_lbl.config(text="Pump: OFF")
+			manual_lbl.config(
+				text="Manual prime: 0 cycles, 0.0 s total")
+			begin_btn.state(["!disabled"])
+			begin_btn.focus_set()
+
+		def _auto_done():
+			ctx["stop_after"] = None
+			if ctx["cancelled"]:
+				return
+			self.pump_controller.set_relay(False)
+			elapsed = monotonic() - ctx["auto_start_mono"]
+			end_iso = datetime.now().isoformat(timespec="milliseconds")
+			if self.run_logger is not None:
+				try:
+					self.run_logger.prime_auto(
+						target_x_cm=target_x, target_y_cm=target_y,
+						start_iso=ctx["auto_start_iso"],
+						end_iso=end_iso, duration_s=elapsed,
+					)
+				except Exception as exc:
+					logger.warning("Failed to log prime_auto: %s", exc)
+			_enter_complete_state()
+
+		def _auto_tick():
+			ctx["tick_after"] = None
+			if ctx["cancelled"] or ctx["state"] != "priming":
+				return
+			remaining = max(0.0,
+				prime_s - (monotonic() - ctx["auto_start_mono"]))
+			countdown_lbl.config(
+				text=f"Prime time: {remaining:.0f} / {prime_s:.0f} s remaining")
+			if remaining > 0:
+				ctx["tick_after"] = self.after(100, _auto_tick)
+
+		def _start_auto_cycle():
+			"""Begin the auto-pump countdown. Pre-condition: needle
+			move is complete and dialog is in ``"priming"`` state."""
+			if ctx["cancelled"]:
+				return
+			body_lbl.config(
+				text="Walking sample solution toward the dispenser.")
+			countdown_lbl.config(
+				text=f"Prime time: {prime_s:.0f} / {prime_s:.0f} s remaining")
+			self.pump_controller.claim_for("fractionate")
+			self.pump_controller.set_relay(True)
+			pump_lbl.config(text="Pump: ON")
+			ctx["auto_start_iso"] = datetime.now().isoformat(
+				timespec="milliseconds")
+			ctx["auto_start_mono"] = monotonic()
+			ctx["stop_after"] = self.after(
+				int(prime_s * 1000), _auto_done)
+			_auto_tick()
+
+		def _do_move_then_prime():
+			"""Move the needle to the prime target, then start the
+			auto-pump countdown. Move is synchronous (blocks the GUI);
+			countdown happens entirely after the move returns."""
+			if ctx["cancelled"]:
+				return
+			self.move_to_positions(table_dist=target_x,
+				carriage_dist=target_y)
+			# Re-check cancellation in case the user closed the dialog
+			# while the move was blocking the GUI mainloop.
+			if ctx["cancelled"] or not dlg.winfo_exists():
+				return
+			_start_auto_cycle()
+
 		dlg.update_idletasks()
 		self._center_over_main(dlg)
+		# Defer the move by one tick so the dialog renders first;
+		# move_to_positions will then block the GUI for a few seconds.
+		self.after(50, _do_move_then_prime)
 
 	def _abort_run_from_priming(self):
 		"""Operator clicked Cancel in the priming workflow before the
@@ -6516,13 +6800,21 @@ class App(tk.Tk):
 
 		def _run_auto_phase(title, body_text, phase, sub_phase, pump_kind,
 				on_advance, checklist, skip_context,
-				action_label="Continue", note_text=None):
+				action_label="Continue", note_text=None,
+				cycle_seconds=None):
 			"""Auto-cycle pump phase. The operator completes the
 			checklist (or clicks Skip), clicks the action button, and
 			the pump auto-cycles for ``state.purge_time`` seconds with
 			a live countdown. After the auto-cycle, the modal enters
 			the "purge complete" state: Space toggles operator-driven
 			extension cycles, Continue advances to the next phase.
+
+			``cycle_seconds`` (optional) overrides the per-cycle
+			duration. Defaults to ``state.purge_time`` for the wash /
+			bleach / rinse / clear phases; the priming phase passes
+			``state.prime_time_s`` so its mechanic matches the
+			pre-fractionation prime (it walks the NEXT sample's
+			fluid up to the needle, not a wash).
 
 			Each automatic cycle writes one log.csv row with
 			``extension=0`` (well_id ``purge_{phase}_{N}``); each
@@ -6569,16 +6861,24 @@ class App(tk.Tk):
 				pump_lbl.config(text="Pump: ON")
 				set_pump_gate(True)  # disables Continue while pumping
 
+			def _phase_cycle_seconds():
+				"""Resolve the auto-cycle duration for this phase. The
+				priming phase passes an explicit override so it uses
+				prime_time; all other phases fall back to purge_time."""
+				if cycle_seconds is not None:
+					return max(0.1, float(cycle_seconds))
+				return max(0.1, float(s.purge_time))
+
 			def _start_auto_cycle():
 				"""Operator clicked the action button. Hide the setup
-				prompt, kick off the auto-countdown using the current
-				purge_time."""
+				prompt, kick off the auto-countdown using the cycle
+				duration resolved by ``_phase_cycle_seconds``."""
+				cur_pt = _phase_cycle_seconds()
 				logger.debug(
-					"purge dialog: primary action (%s) fired; phase=%s purge_time=%.1f",
-					action_label, phase, float(s.purge_time))
+					"purge dialog: primary action (%s) fired; phase=%s cycle=%.1f",
+					action_label, phase, cur_pt)
 				body_lbl.config(text="Pumping...")
 				_begin_cycle(extension=0)
-				cur_pt = max(0.1, float(s.purge_time))
 				ctx["auto_done_at"] = monotonic() + cur_pt
 				_auto_tick(cur_pt)
 
@@ -6634,7 +6934,7 @@ class App(tk.Tk):
 				# conveys the waste-bin situation; the purge dialog
 				# stays in its normal post-cycle state.
 				phase_state["complete"] = True
-				cur_pt = float(s.purge_time)
+				cur_pt = _phase_cycle_seconds()
 				pump_lbl.config(text="Pump: OFF")
 				cycle_lbl.config(
 					text=f"Auto-cycle complete ({cur_pt:.0f} s).")
@@ -6750,6 +7050,9 @@ class App(tk.Tk):
 				phase="wash", sub_phase="", pump_kind="peristaltic",
 				on_advance=_phase_next_after_wash,
 				checklist=[
+					"Disengaged the syringe from the collector tube",
+					"Discarded the used syringe",
+					"Attached the collector tube to the wash line",
 					"Disconnected inlet line from previous sample tube",
 					"Placed inlet line in water container",
 				],
@@ -6818,7 +7121,7 @@ class App(tk.Tk):
 				phase="clear", sub_phase="", pump_kind="peristaltic",
 				on_advance=lambda: _prime_phase(step_no=step_no + 1),
 				checklist=[
-					"Removed inlet line from water container",
+					"Disconnected the inlet line from the water container",
 					"Line is in air, nothing dripping",
 				],
 				skip_context=f"purge_phase_{step_no}_{next_series_index}",
@@ -6826,30 +7129,53 @@ class App(tk.Tk):
 			)
 
 		def _prime_phase(step_no):
-			cur_pt = float(s.purge_time)
+			# This phase walks the NEXT sample's fractionation
+			# solution up to the needle — same mechanic as the
+			# pre-fractionation prime. Cycle duration is prime_time
+			# (not purge_time), and the framing emphasizes that
+			# sample solution is moving, not a wash.
+			prime_s = float(s.prime_time_s)
+			# Destination line: dynamic, informational only (not a
+			# checkbox). Tells the operator whether the prime fluid
+			# is heading to waste (D > 0) or to the well the needle
+			# is currently parked over (D == 0), so they can judge
+			# how aggressively to walk the solution.
+			if s.discards_planned > 0:
+				dest_note = (
+					"Priming output will be dispensed into the waste "
+					"bin (discard fractions are configured for this "
+					"sample)."
+				)
+			else:
+				current_well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+				dest_note = (
+					f"Priming output will be dispensed into well "
+					f"{current_well_id} — no discards configured, so "
+					"this is collected sample material. Walk only as "
+					"much as needed to form an even droplet."
+				)
 			_run_auto_phase(
 				title=f"Inter-sample Purge — Step {step_no} of {total}",
 				body_text=(
-					"Step "
-					+ str(step_no - 1)
-					+ " cleared the tubing with air, leaving void space "
-					"between the syringe pump and the dispensing needle. "
-					"Before resuming fractionation, the fractionation "
-					"fluid must displace this air so the dispense "
-					"pressure is consistent across wells.\n\n"
-					f"Click Refill tubing to run the syringe pump for "
-					f"{cur_pt:.0f} s, walking the fluid through the "
-					"tubing. Press Space to extend if droplets aren't "
-					"yet consistent."
+					"Priming the next sample. Walk the sample "
+					"fractionation solution up to the syringe dispenser "
+					"until droplets form evenly, readying the line for "
+					"the next fractionation series.\n\n"
+					f"Click Prime sample to run the syringe pump for "
+					f"{prime_s:.0f} s, then press Space to extend "
+					"pumping until droplets form evenly at the needle."
 				),
 				phase="prime", sub_phase="", pump_kind="syringe",
-				action_label="Refill tubing",
+				action_label="Prime sample",
 				on_advance=_finish,
 				checklist=[
-					f"Connected inlet line to sample {new_sample_id}'s tube",
-					"Connection is secure",
+					"Attached a new syringe to the collector tube",
+					f"Connected the next sample tube ({new_sample_id}) "
+					"to the fractionation line",
 				],
 				skip_context=f"purge_phase_{step_no}_{next_series_index}",
+				cycle_seconds=prime_s,
+				note_text=dest_note,
 			)
 
 		def _finish():
@@ -6861,6 +7187,616 @@ class App(tk.Tk):
 				on_done()
 
 		_wash_phase(step_no=1)
+
+	def _sysclean_get_logger(self):
+		"""Return ``(logger, owned_by_sysclean)`` for a System Clean
+		session.
+
+		If a fractionation run_logger is currently active (System Clean
+		was launched during a paused run), reuse it — sysclean rows
+		land in the run's ``log.csv`` and the caller does NOT close it.
+
+		Otherwise spin up a fresh ``RunLogger`` pointed at
+		``logs/system_clean/{timestamp}/`` so each standalone session
+		gets its own directory. ``owned_by_sysclean=True`` signals the
+		caller to ``close_without_summary()`` at the end.
+
+		Returns ``(None, False)`` on disk-error fallback; the routine
+		runs without logging in that case.
+		"""
+		if self.run_logger is not None:
+			return self.run_logger, False
+		try:
+			timestamp = datetime.now().isoformat(timespec="milliseconds")
+			# Default base_dir is repo_root/logs; with project=system_clean,
+			# RunLogger.start() builds logs/system_clean/{ts}_session/.
+			rl = run_logger.RunLogger(
+				get_current_run_id=lambda: {
+					"project": "system_clean",
+					"sample_id": "",
+					"plate_id": "",
+				},
+			)
+			rl.start({
+				"timestamp_start": timestamp,
+				"project": "system_clean",
+				"sample_id_at_start": "session",
+			})
+			return rl, True
+		except OSError as exc:
+			logger.warning("Failed to set up sysclean logger: %s", exc)
+			return None, False
+
+	def _start_system_clean(self, launched_during_pause=False):
+		"""Four-phase decontamination routine launched from Cleaning
+		Mode. More stringent than the inter-sample purge: bleach is
+		left static in the line to soak between fill and rinse.
+		System Clean intentionally does NOT prime with sample
+		solution — it's usually run before any sample is loaded.
+		Priming is the inter-sample purge's final phase or the
+		pre-fractionation prime workflow's job.
+
+		Phases:
+		  1. Bleach fill (peristaltic, auto countdown + Space extension)
+		  2. Bleach soak (timed wait, pump off, mm:ss countdown, Skip)
+		  3. Water rinse 1 (peristaltic, auto + extension)
+		  4. Water rinse 2 (peristaltic, auto + extension)
+
+		When ``launched_during_pause`` is True, an italic note shows in
+		Phase 1 reminding the operator the automated run is still
+		paused, and the routine restores the "fractionate" claim on
+		finish so the paused run can resume cleanly. From idle, the
+		routine releases any pump claim it acquired at the end.
+
+		Logging: System Clean rows go through ``sysclean_committed``
+		on whatever logger ``_sysclean_get_logger`` returns — the
+		active run_logger when launched-during-pause, or a fresh
+		``logs/system_clean/{timestamp}/`` standalone logger from idle.
+		"""
+		s = self.state
+
+		# Live read soak time (minutes → seconds).
+		try:
+			soak_seconds = max(0.0, float(self.soak_time_var.get()) * 60.0)
+		except (TypeError, ValueError):
+			soak_seconds = max(0.0, float(s.soak_time_min) * 60.0)
+
+		# Live read purge time (seconds) — used by all four pumping
+		# phases. Phases 1, 3, 4 share the inter-sample purge cadence.
+		try:
+			purge_seconds = max(0.1, float(self.purge_time_var.get()))
+		except (TypeError, ValueError):
+			purge_seconds = max(0.1, float(s.purge_time or 30.0))
+
+		waste_x = s.waste_bin_table
+		waste_y = s.waste_bin_carriage
+
+		self.set_status("Moving to waste bin for System Clean…")
+		self.update_idletasks()
+		self.move_to_positions(table_dist=waste_x, carriage_dist=waste_y)
+
+		sysclean_logger, owned_by_sysclean = self._sysclean_get_logger()
+
+		def _claim(name):
+			"""Force the relay claim to ``name`` (idempotent)."""
+			pc = self.pump_controller
+			if pc.claimant == name:
+				return
+			if pc.claimant is not None:
+				pc.release()
+			pc.claim_for(name)
+
+		def _restore_pre_run_claim():
+			"""End-of-routine claim restore. If launched during a paused
+			run, re-claim ``"fractionate"`` so the run resumes cleanly.
+			From idle, release any claim we still hold."""
+			if launched_during_pause:
+				_claim("fractionate")
+			elif self.pump_controller.claimant is not None:
+				self.pump_controller.release()
+
+		def _close_sysclean_logger():
+			if owned_by_sysclean and sysclean_logger is not None:
+				try:
+					sysclean_logger.close_without_summary()
+				except Exception as exc:
+					logger.warning("Failed to close sysclean logger: %s", exc)
+
+		ctx = {"cancelled": False, "modal": None,
+			"is_pumping": False, "tick_after": None,
+			"cycle_phase": None, "cycle_extension": 0,
+			"cycle_start_mono": None, "cycle_start_iso": None,
+			"auto_done_at": None}
+
+		def _log_current_cycle():
+			"""Write the in-flight cycle row. Idempotent: clears
+			ctx['cycle_phase'] so a repeat call is a no-op."""
+			phase = ctx["cycle_phase"]
+			if phase is None:
+				return
+			if sysclean_logger is None:
+				ctx["cycle_phase"] = None
+				return
+			elapsed = monotonic() - ctx["cycle_start_mono"]
+			end_iso = datetime.now().isoformat(timespec="milliseconds")
+			try:
+				sysclean_logger.sysclean_committed(
+					phase=phase,
+					start_iso=ctx["cycle_start_iso"],
+					end_iso=end_iso, duration_s=elapsed,
+					extension=ctx["cycle_extension"],
+					waste_x_cm=waste_x, waste_y_cm=waste_y,
+				)
+			except Exception as exc:
+				logger.warning("Failed to log sysclean cycle: %s", exc)
+			ctx["cycle_phase"] = None
+
+		def _cancel_and_close():
+			"""Abort: stop pump, log partial cycle, close modal,
+			restore claim, close standalone logger."""
+			logger.debug("sysclean dialog: cancel fired")
+			if ctx["tick_after"] is not None:
+				try:
+					self.after_cancel(ctx["tick_after"])
+				except Exception:
+					pass
+				ctx["tick_after"] = None
+			if ctx["is_pumping"]:
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_current_cycle()
+			ctx["cancelled"] = True
+			if ctx["modal"] is not None:
+				try:
+					ctx["modal"].destroy()
+				except Exception:
+					pass
+				ctx["modal"] = None
+			_restore_pre_run_claim()
+			_close_sysclean_logger()
+			self.set_status(
+				"System Clean cancelled. Run remains paused; resume "
+				"from Automated tab."
+				if launched_during_pause
+				else "System Clean cancelled. System idle."
+			)
+
+		def _build_modal(title, body_text, action_label, action_cmd, *,
+				checklist=None, note_text=None):
+			"""Build a sysclean phase modal. Layout: optional checklist
+			→ optional italic note → body text → pump status block →
+			[Cancel] [action_btn] row. Action button disabled while any
+			checklist item is unchecked or pump is ON."""
+			dlg = tk.Toplevel(self)
+			dlg.title(title)
+			dlg.transient(self)
+			dlg.resizable(False, False)
+			dlg.protocol("WM_DELETE_WINDOW", _cancel_and_close)
+			dlg.bind("<Escape>", lambda _e: _cancel_and_close())
+			body = tk.Frame(dlg, padx=14, pady=12)
+			body.pack(fill=tk.BOTH, expand=True)
+
+			check_vars = []
+			if checklist:
+				cl = tk.Frame(body)
+				cl.pack(anchor="w", fill=tk.X, pady=(0, 8))
+				for i, item in enumerate(checklist):
+					v = tk.IntVar(value=0)
+					check_vars.append(v)
+					ttk.Checkbutton(cl, text=item, variable=v).grid(
+						row=i, column=0, sticky="w", pady=1)
+
+			if note_text:
+				tk.Label(body, text=note_text, justify="left", anchor="w",
+					wraplength=460, fg=PALETTE["fg_muted"],
+					font=(FONTS["family"], FONTS["size"], "italic"),
+				).pack(anchor="w", pady=(0, 8))
+
+			body_lbl = tk.Label(body, text=body_text, justify="left",
+				wraplength=460, anchor="w")
+			body_lbl.pack(anchor="w", pady=(0, 10))
+
+			pump_block = tk.Frame(body)
+			pump_block.pack(anchor="w", fill=tk.X, pady=(0, 10))
+			pump_lbl = tk.Label(pump_block, text="Pump: OFF",
+				font=FONTS["bold"], anchor="w")
+			pump_lbl.pack(anchor="w")
+			cycle_lbl = tk.Label(pump_block, text="This cycle: 0.0 s",
+				anchor="w")
+			cycle_lbl.pack(anchor="w")
+			total_lbl = tk.Label(pump_block, text="", anchor="w")
+			total_lbl.pack(anchor="w")
+
+			btn_row = tk.Frame(body)
+			btn_row.pack(fill=tk.X)
+			btn_row.grid_columnconfigure(0, weight=1)
+			btn_row.grid_columnconfigure(1, weight=1)
+			cancel_btn = ttk.Button(btn_row, text="Cancel",
+				command=_cancel_and_close, style="Danger.TButton")
+			cancel_btn.grid(row=0, column=0, sticky="w", padx=4)
+			action_btn = ttk.Button(btn_row, text=action_label,
+				command=action_cmd, style="Primary.TButton")
+			action_btn.grid(row=0, column=1, sticky="e", padx=4)
+
+			gate = {"pump_on": False}
+
+			def _recompute():
+				if gate["pump_on"]:
+					action_btn.state(["disabled"])
+					return
+				if checklist:
+					if all(v.get() == 1 for v in check_vars):
+						action_btn.state(["!disabled"])
+					else:
+						action_btn.state(["disabled"])
+				else:
+					action_btn.state(["!disabled"])
+
+			def set_pump_gate(on):
+				gate["pump_on"] = bool(on)
+				_recompute()
+
+			if checklist:
+				for v in check_vars:
+					v.trace_add("write", lambda *_: _recompute())
+			_recompute()
+
+			ctx["modal"] = dlg
+			dlg.update_idletasks()
+			self._center_over_main(dlg)
+			return (dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
+				action_btn, set_pump_gate)
+
+		def _run_auto_phase(*, title, body_text, phase, pump_kind,
+				on_advance, checklist=None, action_label="Continue",
+				note_text=None):
+			"""Auto-cycle pump phase with operator-Space extension. Same
+			shape as the inter-sample purge's _run_auto_phase but
+			parameterized for sysclean's logging path."""
+			if ctx["cancelled"]:
+				return
+			_claim("purge" if pump_kind == "peristaltic" else "fractionate")
+
+			phase_state = {"ext": 0, "total_ext_s": 0.0, "complete": False}
+
+			(dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
+				action_btn, set_pump_gate) = _build_modal(
+					title, body_text, action_label,
+					lambda: _start_auto_cycle(),
+					checklist=checklist, note_text=note_text,
+				)
+
+			def _begin_cycle(extension):
+				ctx["cycle_phase"] = phase
+				ctx["cycle_extension"] = extension
+				ctx["cycle_start_mono"] = monotonic()
+				ctx["cycle_start_iso"] = datetime.now().isoformat(
+					timespec="milliseconds")
+				ctx["is_pumping"] = True
+				self.pump_controller.set_relay(True)
+				pump_lbl.config(text="Pump: ON")
+				set_pump_gate(True)
+
+			def _start_auto_cycle():
+				logger.debug(
+					"sysclean dialog: primary action (%s) fired; phase=%s purge_time=%.1f",
+					action_label, phase, purge_seconds)
+				body_lbl.config(text="Pumping…")
+				_begin_cycle(extension=0)
+				ctx["auto_done_at"] = monotonic() + purge_seconds
+				_auto_tick()
+
+			def _stop_pump_now():
+				if ctx["tick_after"] is not None:
+					try:
+						self.after_cancel(ctx["tick_after"])
+					except Exception:
+						pass
+					ctx["tick_after"] = None
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_current_cycle()
+
+			def _enter_complete_state():
+				phase_state["complete"] = True
+				pump_lbl.config(text="Pump: OFF")
+				cycle_lbl.config(
+					text=f"Auto-cycle complete ({purge_seconds:.0f} s).")
+				if phase_state["ext"]:
+					total_lbl.config(text=(
+						f"Extensions: {phase_state['ext']} cycle"
+						f"{'s' if phase_state['ext'] != 1 else ''}, "
+						f"{phase_state['total_ext_s']:.1f} s total."
+					))
+				else:
+					total_lbl.config(text="")
+				body_lbl.config(text=(
+					"Inspect the tubing. Press Space to extend pumping "
+					"if you need more time; click Continue to advance "
+					"to the next phase."
+				))
+				action_btn.config(text="Continue", command=_on_continue)
+				set_pump_gate(False)
+				action_btn.focus_set()
+
+			def _finish_auto_cycle():
+				_stop_pump_now()
+				_enter_complete_state()
+
+			def _auto_tick():
+				if ctx["cancelled"] or not ctx["is_pumping"]:
+					ctx["tick_after"] = None
+					return
+				remaining = ctx["auto_done_at"] - monotonic()
+				if remaining <= 0:
+					cycle_lbl.config(
+						text=f"Pumping… 0.0 / {purge_seconds:.0f} s remaining")
+					ctx["tick_after"] = None
+					_finish_auto_cycle()
+					return
+				cycle_lbl.config(
+					text=f"Pumping… {remaining:.1f} / {purge_seconds:.0f} s remaining")
+				ctx["tick_after"] = self.after(100, _auto_tick)
+
+			def _start_extension():
+				phase_state["ext"] += 1
+				_begin_cycle(extension=phase_state["ext"])
+				_extension_tick()
+
+			def _extension_tick():
+				if ctx["cancelled"] or not ctx["is_pumping"]:
+					ctx["tick_after"] = None
+					return
+				cycle_s = monotonic() - ctx["cycle_start_mono"]
+				cycle_lbl.config(
+					text=f"Extending — this cycle: {cycle_s:.1f} s")
+				total_lbl.config(text=(
+					f"Total extended: "
+					f"{phase_state['total_ext_s'] + cycle_s:.1f} s "
+					f"({phase_state['ext']} extension"
+					f"{'s' if phase_state['ext'] != 1 else ''})"
+				))
+				ctx["tick_after"] = self.after(100, _extension_tick)
+
+			def _stop_extension():
+				cycle_s = monotonic() - ctx["cycle_start_mono"]
+				_stop_pump_now()
+				phase_state["total_ext_s"] += cycle_s
+				_enter_complete_state()
+
+			def _on_space(_e=None):
+				if ctx["cancelled"] or not phase_state["complete"]:
+					return "break"
+				if ctx["is_pumping"]:
+					_stop_extension()
+				else:
+					_start_extension()
+				return "break"
+
+			def _on_continue(_e=None):
+				if ctx["is_pumping"] or ctx["cancelled"]:
+					return
+				try:
+					dlg.unbind("<space>")
+					dlg.unbind("<Return>")
+				except Exception:
+					pass
+				if dlg.winfo_exists():
+					dlg.destroy()
+				ctx["modal"] = None
+				if not ctx["cancelled"]:
+					on_advance()
+
+			dlg.bind("<space>", _on_space)
+			dlg.bind("<Return>", _on_continue)
+			# Override the focused-button Space activation so the
+			# action button can't fire its own command when the
+			# operator wants to toggle an extension cycle.
+			action_btn.bind("<space>", _on_space)
+
+		def _run_soak_phase(*, title, on_advance):
+			"""Phase 2: timed wait with the pump OFF. mm:ss countdown
+			with a Skip soak button to advance early. Writes a single
+			``sysclean_soak`` log row with ``duration_s`` set to the
+			actual elapsed soak seconds (whether natural countdown end
+			or operator Skip)."""
+			if ctx["cancelled"]:
+				return
+			# Defensive: pump should already be off after Phase 1's
+			# Continue, but make absolutely sure during the soak.
+			if self.pump_controller.relay_on:
+				self.pump_controller.set_relay(False)
+			ctx["is_pumping"] = False
+
+			dlg = tk.Toplevel(self)
+			dlg.title(title)
+			dlg.transient(self)
+			dlg.resizable(False, False)
+			dlg.protocol("WM_DELETE_WINDOW", _cancel_and_close)
+			dlg.bind("<Escape>", lambda _e: _cancel_and_close())
+			body = tk.Frame(dlg, padx=14, pady=12)
+			body.pack(fill=tk.BOTH, expand=True)
+
+			tk.Label(body, justify="left", anchor="w", wraplength=460,
+				text=(
+					"Bleach is soaking in the line. Pump is off.\n\n"
+					"Click Skip soak to advance immediately."
+				),
+			).pack(anchor="w", pady=(0, 8))
+
+			pump_lbl = tk.Label(body, text="Pump: OFF",
+				font=FONTS["bold"], anchor="w")
+			pump_lbl.pack(anchor="w")
+
+			# Initial countdown render: mm:ss / mm:ss remaining.
+			total_mins = int(soak_seconds // 60)
+			total_secs = int(soak_seconds - total_mins * 60)
+			total_str = f"{total_mins:d}:{total_secs:02d}"
+			countdown_lbl = tk.Label(body, anchor="w",
+				text=f"Soak time: {total_str} / {total_str} remaining")
+			countdown_lbl.pack(anchor="w", pady=(0, 12))
+
+			btn_row = tk.Frame(body)
+			btn_row.pack(fill=tk.X)
+			btn_row.grid_columnconfigure(0, weight=1)
+			btn_row.grid_columnconfigure(1, weight=1)
+
+			ctx["modal"] = dlg
+			soak_state = {
+				"start_mono": monotonic(),
+				"start_iso": datetime.now().isoformat(timespec="milliseconds"),
+				"done_at": monotonic() + soak_seconds,
+				"tick_after": None,
+				"advanced": False,
+			}
+
+			def _finalize(advance):
+				if soak_state["advanced"]:
+					return
+				soak_state["advanced"] = True
+				if soak_state["tick_after"] is not None:
+					try:
+						self.after_cancel(soak_state["tick_after"])
+					except Exception:
+						pass
+					soak_state["tick_after"] = None
+				elapsed = monotonic() - soak_state["start_mono"]
+				end_iso = datetime.now().isoformat(timespec="milliseconds")
+				if sysclean_logger is not None:
+					try:
+						sysclean_logger.sysclean_committed(
+							phase="soak",
+							start_iso=soak_state["start_iso"],
+							end_iso=end_iso, duration_s=elapsed,
+							waste_x_cm=waste_x, waste_y_cm=waste_y,
+						)
+					except Exception as exc:
+						logger.warning(
+							"Failed to log sysclean soak: %s", exc)
+				if dlg.winfo_exists():
+					dlg.destroy()
+				ctx["modal"] = None
+				if not ctx["cancelled"] and advance:
+					on_advance()
+
+			def _skip():
+				logger.debug("sysclean dialog: skip soak fired")
+				_finalize(advance=True)
+
+			def _tick():
+				soak_state["tick_after"] = None
+				if ctx["cancelled"] or soak_state["advanced"]:
+					return
+				remaining = max(0.0,
+					soak_state["done_at"] - monotonic())
+				mins = int(remaining // 60)
+				secs = int(remaining - mins * 60)
+				countdown_lbl.config(
+					text=f"Soak time: {mins:d}:{secs:02d} / {total_str} remaining")
+				if remaining <= 0:
+					_finalize(advance=True)
+					return
+				# 250 ms tick: snappy enough for sub-second responsiveness
+				# without burning cycles for a multi-minute wait.
+				soak_state["tick_after"] = self.after(250, _tick)
+
+			ttk.Button(btn_row, text="Cancel",
+				command=_cancel_and_close, style="Danger.TButton"
+				).grid(row=0, column=0, sticky="w", padx=4)
+			skip_btn = ttk.Button(btn_row, text="Skip soak",
+				command=_skip, style="Primary.TButton")
+			skip_btn.grid(row=0, column=1, sticky="e", padx=4)
+
+			dlg.update_idletasks()
+			self._center_over_main(dlg)
+			# Edge case: zero-duration soak skips straight to advance
+			# (validation allows 0; some operators may want a no-op
+			# soak phase for a bleach-rinse-only protocol).
+			if soak_seconds <= 0:
+				_finalize(advance=True)
+			else:
+				_tick()
+
+		# ---- Phase definitions ----------------------------------------
+		paused_note = (
+			"Running System Clean during a paused run. The fractionation "
+			"run remains paused — resume it from the Automated tab when "
+			"finished."
+		) if launched_during_pause else None
+
+		def _bleach_fill():
+			_run_auto_phase(
+				title="System Clean — Step 1 of 4",
+				body_text=(
+					f"Click Start Bleach Fill to run the peristaltic pump "
+					f"for {purge_seconds:.0f} s, drawing 0.5% bleach "
+					"through the line."
+				),
+				phase="bleach", pump_kind="peristaltic",
+				on_advance=_soak,
+				checklist=[
+					"Connected inlet line to 0.5% bleach solution",
+					"Outlet routed to waste bin",
+				],
+				action_label="Start Bleach Fill",
+				note_text=paused_note,
+			)
+
+		def _soak():
+			_run_soak_phase(
+				title="System Clean — Step 2 of 4",
+				on_advance=_rinse1,
+			)
+
+		def _rinse1():
+			_run_auto_phase(
+				title="System Clean — Step 3 of 4",
+				body_text=(
+					f"Click Start Rinse to run the peristaltic pump for "
+					f"{purge_seconds:.0f} s, flushing bleach with sterile "
+					"water."
+				),
+				phase="rinse1", pump_kind="peristaltic",
+				on_advance=_rinse2,
+				checklist=[
+					"Replaced bleach source with sterile water",
+				],
+				action_label="Start Rinse",
+			)
+
+		def _rinse2():
+			# Final phase. On Continue, _finish_sysclean closes the
+			# routine and restores the pre-routine pump claim. System
+			# Clean intentionally does NOT prime with sample solution —
+			# it's typically run before any sample is loaded; priming
+			# is the inter-sample purge's or pre-fractionation prime's
+			# responsibility.
+			_run_auto_phase(
+				title="System Clean — Step 4 of 4",
+				body_text=(
+					f"Click Rinse Again to run the peristaltic pump for "
+					f"another {purge_seconds:.0f} s of sterile water "
+					"rinse."
+				),
+				phase="rinse2", pump_kind="peristaltic",
+				on_advance=_finish_sysclean,
+				checklist=[
+					"Water source is still connected",
+				],
+				action_label="Rinse Again",
+			)
+
+		def _finish_sysclean():
+			_restore_pre_run_claim()
+			_close_sysclean_logger()
+			self.set_status(
+				"System Clean complete. Run remains paused; resume "
+				"from Automated tab."
+				if launched_during_pause
+				else "System Clean complete. System idle."
+			)
+
+		_bleach_fill()
 
 	def continue_to_next_plate(self):
 		"""Two-stage plate-swap workflow:
@@ -7444,28 +8380,75 @@ class App(tk.Tk):
 
 	def _snake_step(self):
 		"""Advance s.x/s.y one snake-step AND fire the corresponding motor
-		moves. Returns True if we stayed on the plate, False if we walked off
-		(s.x reached COLS) -- the caller decides what to do then."""
+		moves. Returns True if we stayed on the plate, False if we walked
+		off — the caller decides what to do then.
+
+		Iteration order depends on ``self.plate_orientation``:
+
+		  ``"portrait"`` — column snake. Rows (s.y, A-H) are on the
+		    X-axis (table_motor); columns (s.x, 1-12) are on the Y-axis
+		    (carriage_motor). Within a column the inner sweep advances
+		    s.y across rows A→H (table moves); when the column finishes,
+		    s.x increments to the next column (carriage moves). Off-plate
+		    when ``s.x >= s.COLS``.
+
+		  ``"landscape"`` — row snake. Columns (s.x, 1-12) are on the
+		    X-axis (table_motor); rows (s.y, A-H) are on the Y-axis
+		    (carriage_motor). Within a row the inner sweep advances s.x
+		    across columns 1→12 (table moves); when the row finishes,
+		    s.y increments to the next row (carriage moves). Off-plate
+		    when ``s.y >= s.ROWS``.
+
+		In both orientations: inner-sweep motion is on TABLE; outer
+		step (next sweep) is on CARRIAGE. ``carriage_forwards`` is the
+		inner-sweep direction flag (alternating). Direction inversion
+		of the carriage motor between orientations (+Y = down landscape,
+		+Y = up portrait) is handled once at App init / pref change via
+		``_apply_plate_orientation_to_motors``; the sign of the relative
+		moves here stays uniform.
+		"""
 		s = self.state
+		if self.plate_orientation == "portrait":
+			# Column snake: inner=rows (s.y) on TABLE; outer=cols (s.x) on CARRIAGE.
+			if s.carriage_forwards:
+				s.y = s.y + 1
+				if s.y < s.ROWS:
+					self.table_motor.move_dist_relative(s.well_size)
+				else:
+					s.y = s.ROWS - 1
+					self.carriage_motor.move_dist_relative(s.well_size)
+					s.x = s.x + 1
+					s.carriage_forwards = False
+			else:
+				s.y = s.y - 1
+				if s.y >= 0:
+					self.table_motor.move_dist_relative(-s.well_size)
+				else:
+					s.y = 0
+					self.carriage_motor.move_dist_relative(s.well_size)
+					s.x = s.x + 1
+					s.carriage_forwards = True
+			return s.x < s.COLS
+		# Landscape — row snake: inner=cols (s.x) on TABLE; outer=rows (s.y) on CARRIAGE.
 		if s.carriage_forwards:
-			s.y = s.y + 1
-			if s.y < s.ROWS:
+			s.x = s.x + 1
+			if s.x < s.COLS:
+				self.table_motor.move_dist_relative(s.well_size)
+			else:
+				s.x = s.COLS - 1
 				self.carriage_motor.move_dist_relative(s.well_size)
-			else:
-				s.y = s.ROWS - 1
-				self.table_motor.move_dist_relative(-s.well_size)
-				s.x = s.x + 1
-				s.carriage_forwards = not s.carriage_forwards
+				s.y = s.y + 1
+				s.carriage_forwards = False
 		else:
-			s.y = s.y - 1
-			if s.y >= 0:
-				self.carriage_motor.move_dist_relative(-s.well_size)
-			else:
-				s.y = 0
+			s.x = s.x - 1
+			if s.x >= 0:
 				self.table_motor.move_dist_relative(-s.well_size)
-				s.x = s.x + 1
-				s.carriage_forwards = not s.carriage_forwards
-		return s.x < s.COLS
+			else:
+				s.x = 0
+				self.carriage_motor.move_dist_relative(s.well_size)
+				s.y = s.y + 1
+				s.carriage_forwards = True
+		return s.y < s.ROWS
 
 	def carriage_return(self):
 		"""Return the needle to the starting position."""

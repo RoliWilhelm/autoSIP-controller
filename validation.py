@@ -47,6 +47,12 @@ DRIP_WAIT_MIN, DRIP_WAIT_MAX = 0.0, 60.0
 PURGE_TIME_MIN, PURGE_TIME_MAX = 1.0, 600.0
 PRIME_TIME_MIN, PRIME_TIME_MAX = 0.0, 600.0
 
+# Bleach soak time (minutes) for the on-demand System Clean routine in
+# Cleaning Mode. 0 lets the operator skip the soak entirely (e.g. for a
+# water-only flush); 30 min is a generous ceiling for nucleic-acid
+# decontamination protocols.
+SOAK_TIME_MIN, SOAK_TIME_MAX = 0.0, 30.0
+
 # Peristaltic pump rate, mL/min. Adafruit 3910 nominal ~100 mL/min; bound
 # leaves room for slower flow restrictors below it and faster pumps above.
 PERISTALTIC_RATE_MIN, PERISTALTIC_RATE_MAX = 1.0, 200.0
@@ -156,6 +162,15 @@ def prime_time(text):
 	needle moves to its first-dispense position."""
 	return _parse_float(text, "Prime time", PRIME_TIME_MIN, PRIME_TIME_MAX,
 		unit="s")
+
+
+def soak_time(text):
+	"""Validate the System Clean bleach soak time (minutes): float in
+	``[SOAK_TIME_MIN, SOAK_TIME_MAX]``. Phase 2 of the System Clean
+	routine holds bleach static in the line for this many minutes
+	before rinsing."""
+	return _parse_float(text, "Bleach soak time", SOAK_TIME_MIN, SOAK_TIME_MAX,
+		unit="min")
 
 
 def peristaltic_rate(text):

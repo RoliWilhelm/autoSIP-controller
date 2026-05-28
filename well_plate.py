@@ -84,6 +84,63 @@ def _well_id(x, y):
 	return f"{chr(ord('A') + y)}{x + 1}"
 
 
+def parse_well_id(well_id):
+	"""Parse a SBS well ID like ``"E3"`` into ``(col_idx, row_idx)`` —
+	both 0-based. ``"A1"`` → ``(0, 0)``; ``"H12"`` → ``(11, 7)``.
+	Raises ``ValueError`` on malformed input."""
+	if not isinstance(well_id, str) or len(well_id) < 2:
+		raise ValueError(f"Malformed well_id {well_id!r}")
+	letter = well_id[0].upper()
+	if not letter.isalpha():
+		raise ValueError(f"Well_id {well_id!r} must start with a row letter")
+	try:
+		col_idx = int(well_id[1:]) - 1
+	except ValueError as exc:
+		raise ValueError(f"Well_id {well_id!r} column part is not an integer") from exc
+	row_idx = ord(letter) - ord("A")
+	if col_idx < 0 or row_idx < 0:
+		raise ValueError(f"Well_id {well_id!r} out of range")
+	return col_idx, row_idx
+
+
+def well_id_to_cm(well_id, start_x_cm, start_y_cm, well_width_cm,
+		orientation="portrait"):
+	"""Return the absolute ``(x_cm, y_cm)`` table+carriage positions
+	for a SBS well_id given the calibrated A1 origin and well width.
+
+	Orientation determines how the plate's logical (row, col) indices
+	map to the X/Y motion axes:
+
+	  * ``"landscape"`` — columns on X, rows on Y. A1 at upper-left.
+	    ``x = start_x + col_idx × well_width``
+	    ``y = start_y + row_idx × well_width``
+
+	  * ``"portrait"`` — rows on X, columns on Y. A1 at bottom-left.
+	    ``x = start_x + row_idx × well_width``
+	    ``y = start_y + col_idx × well_width``
+
+	The Y direction inversion (+Y down in landscape vs +Y up in
+	portrait) is handled by the carriage motor's reverse flag, not by
+	the sign here — both expressions are written with positive
+	well_width contributions, and the operator-calibrated ``start_y_cm``
+	carries whatever sign is appropriate for the current orientation's
+	cm convention.
+
+	The mechanical state machine does NOT yet call this function — it
+	uses relative moves in ``_snake_step`` instead — but it's exported
+	here for future absolute-targeting callers (jump-to-well, post-
+	pause re-positioning, future labware tools).
+	"""
+	col_idx, row_idx = parse_well_id(well_id)
+	if orientation == "portrait":
+		x_cm = start_x_cm + row_idx * well_width_cm
+		y_cm = start_y_cm + col_idx * well_width_cm
+	else:
+		x_cm = start_x_cm + col_idx * well_width_cm
+		y_cm = start_y_cm + row_idx * well_width_cm
+	return x_cm, y_cm
+
+
 # Okabe-Ito color-blind-safe qualitative palette. Each entry is
 # ``(hex_color, human_name)``. Index 0 is sample 1, index 1 is sample 2,
 # and so on; cycles after 8 samples. Text-on-fill contrast is encoded
@@ -229,6 +286,16 @@ class WellPlateProgress(tk.Frame):
 		# Plate state
 		self.rows = 0
 		self.cols = 0
+		# Plate orientation drives the canvas layout. ``"landscape"``
+		# (legacy default): plate cols across the canvas X-axis, rows
+		# down the Y-axis, A1 at the upper-left. ``"portrait"`` (new
+		# default in App init): plate ROWS across the canvas X-axis,
+		# COLS down the Y-axis with col 1 at the bottom, A1 at the
+		# bottom-left. Both modes store status_grid keyed by the
+		# orientation-independent (col_idx, row_idx) tuple — the
+		# remapping happens at paint time so well_dispensing(x, y)
+		# callers don't need to know about orientation.
+		self.orientation = "landscape"
 		self.volume_per_well = 0.0
 		self.pump_time = 0.0
 		self.status_grid = {}        # (x, y) -> status string
@@ -278,10 +345,21 @@ class WellPlateProgress(tk.Frame):
 
 	# -- Public API (called by the state machine) ------------------------
 
-	def begin_run(self, cols, rows, volume_per_well, pump_time):
-		"""Reset the plate to a fresh run and start the elapsed-time clock."""
+	def begin_run(self, cols, rows, volume_per_well, pump_time,
+			orientation=None):
+		"""Reset the plate to a fresh run and start the elapsed-time clock.
+
+		``orientation`` (optional) selects the canvas layout:
+		``"portrait"`` (tall, 8 cols × 12 rows, A1 at bottom-left) or
+		``"landscape"`` (wide, 12 cols × 8 rows, A1 at upper-left).
+		``None`` keeps whatever orientation the widget already holds.
+		Callers without orientation context get the legacy landscape
+		layout (the widget's default).
+		"""
 		self.rows = rows
 		self.cols = cols
+		if orientation in ("portrait", "landscape"):
+			self.orientation = orientation
 		self.volume_per_well = volume_per_well
 		self.pump_time = pump_time
 		self.status_grid = {(x, y): UNVISITED for x in range(cols) for y in range(rows)}
@@ -487,6 +565,47 @@ class WellPlateProgress(tk.Frame):
 		logger.debug("canvas resize: %d x %d", event.width, event.height)
 		self._redraw()
 
+	def set_orientation(self, orientation):
+		"""Switch the canvas's plate orientation and trigger a redraw.
+		Called outside ``begin_run`` (e.g. when the operator changes the
+		orientation in Tools → Preferences with no run active) so the
+		idle canvas reflects the new layout immediately. No-op if the
+		orientation is unchanged or unrecognised."""
+		if orientation not in ("portrait", "landscape"):
+			return
+		if orientation == self.orientation:
+			return
+		self.orientation = orientation
+		self._redraw()
+
+	def _grid_dims(self):
+		"""Return the (canvas_cols, canvas_rows) tuple — i.e. how many
+		well columns and rows the canvas paints. In landscape this is
+		(plate_cols, plate_rows); in portrait the plate is rotated 90°
+		so the canvas shows (plate_rows, plate_cols)."""
+		if self.orientation == "portrait":
+			return self.rows, self.cols
+		return self.cols, self.rows
+
+	def _logical_to_canvas(self, x, y):
+		"""Map a logical well (x=plate-col-index, y=plate-row-index) to
+		canvas grid (col, row). Identity in landscape; in portrait the
+		plate is rotated so plate rows run across the canvas (rows on
+		X-axis) and plate columns run UP the canvas (col 1 at the
+		bottom, so canvas row index = (plate_cols - 1) - x)."""
+		if self.orientation == "portrait":
+			return y, (self.cols - 1) - x
+		return x, y
+
+	def _canvas_to_logical(self, cx, cy):
+		"""Inverse of ``_logical_to_canvas``. Used by hover hit-testing
+		to translate canvas (col, row) back to plate (col_idx, row_idx)."""
+		if self.orientation == "portrait":
+			# canvas (col, row) → plate (x, y): plate_y = canvas_col,
+			# plate_x = (cols - 1) - canvas_row.
+			return (self.cols - 1) - cy, cx
+		return cx, cy
+
 	def _redraw(self):
 		"""Recompute layout (cell sizes, margins, label positions) + redraw.
 
@@ -496,6 +615,11 @@ class WellPlateProgress(tk.Frame):
 		_WELL_PX_MAX]`` so they stay legible at extreme aspect ratios.
 		The plate is centered within the usable area when one axis runs
 		out of room before the other.
+
+		Orientation drives the canvas layout via ``_grid_dims`` (which
+		decides the (cols_on_canvas, rows_on_canvas) pair) and
+		``_logical_to_canvas`` (which places each well at its rotated
+		position). Logical well_id semantics are orientation-independent.
 		"""
 		self.canvas.delete("all")
 		self._well_items.clear()
@@ -515,12 +639,14 @@ class WellPlateProgress(tk.Frame):
 		usable_w = w - self._LEFT_MARGIN - self._RIGHT_MARGIN
 		usable_h = h - self._TOP_MARGIN - self._BOTTOM_MARGIN
 
+		canvas_cols, canvas_rows = self._grid_dims()
+
 		# Largest cell that fits in the usable area, accounting for the
 		# inter-well gap. Width-limited and height-limited candidates --
 		# the constrained axis wins.
 		spacing = 1.0 + self._CELL_SPACING_FRAC
-		cell_from_w = usable_w / (self.cols * spacing)
-		cell_from_h = usable_h / (self.rows * spacing)
+		cell_from_w = usable_w / (canvas_cols * spacing)
+		cell_from_h = usable_h / (canvas_rows * spacing)
 		cell_size = min(cell_from_w, cell_from_h)
 		cell_size = max(self._WELL_PX_MIN, min(self._WELL_PX_MAX, cell_size))
 
@@ -536,8 +662,8 @@ class WellPlateProgress(tk.Frame):
 		# centering accounts for the rightmost/bottommost well actually
 		# not needing extra spacing after it.
 		gap_correction = cell_size * self._CELL_SPACING_FRAC
-		plate_w = cell_size * self.cols - gap_correction
-		plate_h = cell_size * self.rows - gap_correction
+		plate_w = cell_size * canvas_cols - gap_correction
+		plate_h = cell_size * canvas_rows - gap_correction
 		x_offset = self._LEFT_MARGIN + max(0, (usable_w - plate_w) / 2)
 		y_offset = self._TOP_MARGIN + max(0, (usable_h - plate_h) / 2)
 
@@ -546,27 +672,43 @@ class WellPlateProgress(tk.Frame):
 		# (cap a few pts below the in-well sequence font).
 		label_font_size = max(8, min(int(cell_size // 4), icon_font_size - 1))
 
-		# Column numbers across the top
-		for c in range(self.cols):
+		# Top labels (canvas-column captions): row letters in portrait,
+		# column numbers in landscape.
+		for c in range(canvas_cols):
 			cx = x_offset + cell_size * (c + 0.5)
+			if self.orientation == "portrait":
+				# canvas col c maps to plate row index c (rows on X-axis).
+				caption = chr(ord("A") + c)
+			else:
+				caption = str(c + 1)
 			self.canvas.create_text(
 				cx, y_offset - self._TOP_MARGIN / 2,
-				text=str(c + 1), font=("TkDefaultFont", label_font_size),
+				text=caption, font=("TkDefaultFont", label_font_size),
 			)
 
-		# Row letters down the left
-		for r in range(self.rows):
+		# Left labels (canvas-row captions): column numbers in portrait
+		# (12 at the top, 1 at the bottom, since col 1 lives at A1 = the
+		# bottom-left corner); row letters in landscape (A at the top).
+		for r in range(canvas_rows):
 			cy = y_offset + cell_size * (r + 0.5)
+			if self.orientation == "portrait":
+				# canvas row r maps to plate col idx (cols-1) - r → number
+				# (cols-1) - r + 1 = cols - r.
+				caption = str(self.cols - r)
+			else:
+				caption = chr(ord("A") + r)
 			self.canvas.create_text(
 				x_offset - self._LEFT_MARGIN / 2, cy,
-				text=chr(ord("A") + r), font=("TkDefaultFont", label_font_size),
+				text=caption, font=("TkDefaultFont", label_font_size),
 			)
 
-		# Wells
+		# Wells. Iterate logical coords; place each at its rotated
+		# canvas position.
 		for x in range(self.cols):
 			for y in range(self.rows):
-				cx = x_offset + cell_size * (x + 0.5)
-				cy = y_offset + cell_size * (y + 0.5)
+				cc, cr = self._logical_to_canvas(x, y)
+				cx = x_offset + cell_size * (cc + 0.5)
+				cy = y_offset + cell_size * (cr + 0.5)
 				status = self.status_grid.get((x, y), UNVISITED)
 				border = self._border_for(x, y, status)
 				fill, glyph, glyph_color = self._fill_glyph_for(x, y, status)
@@ -720,21 +862,25 @@ class WellPlateProgress(tk.Frame):
 	# -- Tooltips --------------------------------------------------------
 
 	def _well_at_pixel(self, px, py):
-		"""Return (x, y) of the well under the pixel, or None."""
+		"""Return logical (x=col_idx, y=row_idx) of the well under the
+		pixel, or None. Hit-tests in canvas grid coords first, then
+		maps back to plate-logical coords via ``_canvas_to_logical``
+		so portrait orientation tooltips identify the right plate well."""
 		g = self._geom
 		if g is None:
 			return None
 		cs = g["cell_size"]
-		col = int((px - g["x_offset"]) // cs)
-		row = int((py - g["y_offset"]) // cs)
-		if not (0 <= col < self.cols and 0 <= row < self.rows):
+		canvas_col = int((px - g["x_offset"]) // cs)
+		canvas_row = int((py - g["y_offset"]) // cs)
+		canvas_cols, canvas_rows = self._grid_dims()
+		if not (0 <= canvas_col < canvas_cols and 0 <= canvas_row < canvas_rows):
 			return None
 		# Hit only inside the circular well, not the cell's corners.
-		cx = g["x_offset"] + cs * (col + 0.5)
-		cy = g["y_offset"] + cs * (row + 0.5)
+		cx = g["x_offset"] + cs * (canvas_col + 0.5)
+		cy = g["y_offset"] + cs * (canvas_row + 0.5)
 		if (px - cx) ** 2 + (py - cy) ** 2 > g["well_radius"] ** 2:
 			return None
-		return (col, row)
+		return self._canvas_to_logical(canvas_col, canvas_row)
 
 	def _on_motion(self, event):
 		xy = self._well_at_pixel(event.x, event.y)

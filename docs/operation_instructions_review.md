@@ -456,7 +456,7 @@ by accident.
   placeholders. These need real figure / table numbers when laid out
   in the manuscript.
 
-- Software version `0.2.0` is consistent with `main.py:__version__`.
+- Software version `1.0.0` is consistent with `main.py:__version__`.
   Confirm before final typesetting since the value is hard-coded
   there.
 

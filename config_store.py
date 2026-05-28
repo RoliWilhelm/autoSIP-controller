@@ -30,7 +30,7 @@ FIELDS = (
 	"number_of_fractions", "discard_fractions",
 	"prime_time",
 	"rows", "cols", "well_size", "pump_rate", "drip_wait_time",
-	"purge_time",
+	"purge_time", "soak_time",
 	"peristaltic_rate", "max_waste_volume",
 	"volume_per_well",
 	"table_start", "carriage_start",
@@ -342,6 +342,60 @@ def save_purge_protocol(protocol):
 	if not isinstance(existing, dict):
 		existing = {}
 	existing["purge_protocol"] = protocol
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
+# -- plate_orientation -------------------------------------------------
+
+# Top-level string preference selecting how the plate sits on the XY
+# table. ``"portrait"`` (default for fresh installs): plate rows along
+# the X-axis (table), columns along the Y-axis (carriage); A1 at the
+# bottom-left mechanical corner; +Y physically goes UP. ``"landscape"``:
+# columns on X, rows on Y; A1 at upper-left; +Y goes DOWN. Switching
+# orientations also inverts the carriage motor's reverse flag.
+
+def load_plate_orientation():
+	"""Return the persisted plate orientation. ``"portrait"`` for fresh
+	installs (no config.json on disk). For pre-existing configs that
+	predate the orientation feature, defaults to ``"landscape"`` to
+	preserve the previously-working setup — those operators must
+	deliberately switch to portrait via Tools → Preferences."""
+	path = get_config_path()
+	if not path.exists():
+		return "portrait"
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return "portrait"
+	if not isinstance(data, dict):
+		return "portrait"
+	val = data.get("plate_orientation")
+	if val in ("portrait", "landscape"):
+		return val
+	# Config exists but no key — existing user from pre-orientation
+	# build. Keep their working setup (landscape).
+	return "landscape"
+
+
+def save_plate_orientation(orientation):
+	"""Persist the plate orientation to config.json. Preserves other
+	top-level keys. Silently ignores unknown values."""
+	if orientation not in ("portrait", "landscape"):
+		return
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["plate_orientation"] = orientation
 	with open(path, "w") as f:
 		json.dump(existing, f, indent=2)
 

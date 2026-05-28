@@ -71,11 +71,22 @@ are wherever they were left in their last session. The software treats
 that physical position as `(0, 0)` cm — the **origin**. The origin is a
 software reference, not a guaranteed physical location.
 
-The convention is to park the carriage at the **upper-left mechanical
-limit** of the lead screws (gently against the stop) before launching
-the software. Doing this consistently makes origin = the upper-left
-limit, and gives every coordinate you later enter a stable physical
-meaning.
+The convention is to park the carriage at the **mechanical-limit
+corner** of the lead screws (gently against the stop) before launching
+the software. Which corner counts as the "origin" depends on the plate
+orientation selected under Tools → Preferences:
+
+- **Portrait** (default): origin = **bottom-left** mechanical limit;
+  A1 sits at the origin corner; `+Y` physically goes UP toward
+  higher column numbers.
+- **Landscape**: origin = **upper-left** mechanical limit; A1 sits at
+  the origin corner; `+Y` physically goes DOWN toward higher row
+  letters.
+
+Doing this consistently makes `(0, 0)` cm equal to the chosen origin
+corner, and gives every coordinate you later enter a stable physical
+meaning. Switching orientation invalidates previously calibrated
+Starting Well / Waste Bin coordinates — recalibrate after a switch.
 
 Two consequences follow from that convention:
 
@@ -107,7 +118,8 @@ Two button names cover the same action in different places:
 The re-zeroing matters: stepper motors can miss steps over a long
 session, and the software counters drift away from the true physical
 position. Periodically re-park the carriage manually against the
-upper-left limit and click **Return to Origin** to recalibrate.
+origin corner (upper-left in landscape; bottom-left in portrait) and
+click **Return to Origin** to recalibrate.
 
 ### The three operating modes
 
@@ -332,8 +344,8 @@ persists across application restarts.
 
 ![Figure: Cleaning mode panel](docs/figures/cleaning_mode.png)
 
-Cleaning mode strips Automated mode down to two inputs and two
-actions:
+Cleaning mode focuses on between-sample / between-session line
+maintenance:
 
 - **Waste bin position (x-axis)** and **Waste bin position
   (y-axis)** — the same two values that appear in Automated
@@ -343,10 +355,20 @@ actions:
   coordinates.
 - **Purge** — toggles the relay (same semantics as Manual mode's
   Purge button; same confirmation dialog).
+- **System Clean** — a four-phase decontamination routine
+  (bleach fill → soak → water rinse 1 → water rinse 2). More
+  stringent than the inter-sample purge: the bleach is held
+  static in the line for a configurable soak period before
+  rinsing. Use at session start, end of session, or during a
+  paused automated run. System Clean does not prime with sample
+  solution — that step belongs to the pre-fractionation prime
+  workflow or the inter-sample purge's final phase.
 
 A typical cleaning cycle is: switch to Cleaning mode, click
 **Move to Waste Bin**, click **Purge**, run the pump until the
-fluid path is clear, click **Purge** again to stop.
+fluid path is clear, click **Purge** again to stop. For a
+stringent end-of-session decontamination, click **System
+Clean** instead.
 
 ### Fractionate and Purge: how the two pump labels work
 

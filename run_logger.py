@@ -589,6 +589,44 @@ class RunLogger:
 	# code in case a future caller wants a status="emergency_stopped"
 	# purge row.)
 
+	_VALID_SYSCLEAN_PHASES = ("bleach", "soak", "rinse1", "rinse2")
+
+	def sysclean_committed(self, phase, start_iso, end_iso, duration_s,
+			extension=0, waste_x_cm=0.0, waste_y_cm=0.0):
+		"""Append a ``status="sysclean_{phase}"`` row for one cycle of
+		the on-demand System Clean routine.
+
+		``phase`` is one of ``"bleach"``, ``"soak"``, ``"rinse1"``,
+		``"rinse2"``. ``extension`` is 0 for the automatic cycle and
+		1+ for each operator-Space extension within the same phase.
+		(``"prime"`` is not a System Clean phase — sample priming is
+		handled by the inter-sample purge or pre-fractionation prime
+		workflows, both of which use their own status names.)
+
+		Resulting ``well_id``:
+		  - ``sysclean_{phase}``                  (auto)
+		  - ``sysclean_{phase}_ext{N}``           (extension N ≥ 1)
+
+		For the soak phase, ``duration_s`` records the actual seconds
+		the bleach sat in the line (pump off, no waste contribution).
+		"""
+		if self.run_dir is None:
+			return
+		if phase not in self._VALID_SYSCLEAN_PHASES:
+			logger.warning("Unknown sysclean phase %r; skipping log row", phase)
+			return
+		status = f"sysclean_{phase}"
+		well_id = status
+		if extension > 0:
+			well_id += f"_ext{extension}"
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			well_id, _fmt_coord(waste_x_cm), _fmt_coord(waste_y_cm),
+			start_iso, end_iso, f"{duration_s:.3f}", status,
+		])
+		self._status_counts[status] = self._status_counts.get(status, 0) + 1
+
 	def prime_auto(self, target_x_cm, target_y_cm,
 			start_iso, end_iso, duration_s):
 		"""Append a ``status="prime_auto"`` row marking the automatic
