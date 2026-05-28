@@ -686,6 +686,7 @@ class FractionatorState:
 	phase: str = "idle"                  # idle | discard | collect | total_reached
 	number_of_fractions: int = 0          # N -- frozen at run start
 	discards_planned: int = 0             # D -- frozen at run start (metadata)
+	prime_time_s: float = 60.0            # auto-prime duration at run start
 	# Per-series snapshot of D. Updated at series start (movement() or
 	# continue_to_next_sample()). Used for label computation + auto-pause
 	# threshold so an edit to the Discard fractions entry affects only the
@@ -1092,16 +1093,13 @@ class AutomatedFrame(tk.Frame):
 			"Cancel stays in the run.",
 		)
 
-		# ----- Bulk Sample Submission (top of column 0) --------------
-		# Lets the operator preload a multi-sample session via a CSV.
-		# Sits above Run Parameters because it acts as a configuration
-		# upstream of the per-sample fields below.
+		# ----- Bulk Sample Submission --------------------------------
+		# Tops the left column above Run Parameters; Fractionation Pump
+		# Parameters sits below Run Params at row 3. Plate Parameters
+		# (right column) spans rows 1-2 so the right column matches the
+		# left column's combined height.
 		bulk = tk.LabelFrame(self, text="Bulk Sample Submission", padx=8, pady=2)
-		# Spans both columns so the two-column layout below (Run Params +
-		# Syringe Pump | Plate Params + Cleaning Parameters) sits flush
-		# beneath it.
-		bulk.grid(row=1, column=0, columnspan=2, sticky="new",
-			padx=(2, 2), pady=(0, 4))
+		bulk.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		bulk.grid_columnconfigure(0, weight=1)
 		self.bulk_status_var = tk.StringVar(
 			value="Status: No bulk submission active."
@@ -1160,8 +1158,10 @@ class AutomatedFrame(tk.Frame):
 		runp = tk.LabelFrame(self, text="Run Parameters", padx=8, pady=2)
 		self.runp_frame = runp  # exposed so bulk activation can mutate the title
 		# Row 2 col 0: Run Parameters (shifted down to make room for the
-		# Bulk panel at row 1). Pump LabelFrame stacks directly beneath
-		# in row 3 col 0; Plate Parameters at col 1 spans rows 1-3.
+		# Left column stack: Bulk Sample Submission (row 1) → Run
+		# Parameters (row 2) → Fractionation Pump Parameters (row 3).
+		# Plate Parameters spans rows 1-2 on the right so the right
+		# column matches the left column's combined height.
 		runp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		runp.grid_columnconfigure(0, weight=1)
 		self.project_te = TextEntry(runp, "Project name:")
@@ -1213,16 +1213,26 @@ class AutomatedFrame(tk.Frame):
 			"Per-fraction dispense volume. The pump runs for "
 			"volume / pump_rate seconds at each well.",
 		)
+		self.prime_time_te = TextEntry(runp, "Prime time (s):",
+			textvariable=app.prime_time_var)
+		self.prime_time_te.grid(row=6, column=0, sticky="we")
+		Tooltip(
+			self.prime_time_te.entry,
+			"Time to automatically walk the sample fractionation "
+			"solution from the tube to approximately 5 cm below the "
+			"syringe dispenser. Set based on your tubing length.",
+		)
 
 		# ----- Plate Parameters (middle) ---------------------------------
 		# Plate geometry + the two coordinate pairs (plate-start and
 		# waste-bin). The plate-start fields used to live in the table/carriage
 		# move row; they're now part of plate definition.
 		platep = tk.LabelFrame(self, text="Plate Parameters", padx=8, pady=2)
-		# Row 2 col 1: Plate Parameters sits opposite Run Parameters in
-		# the two-column layout. Cleaning Parameters fills row 3 col 1
-		# below it, mirroring Run Params + Syringe Pump on the left.
-		platep.grid(row=2, column=1, sticky="new", padx=(4, 2), pady=(0, 2))
+		# Spans rows 1-2 on the right so the bulk panel can sit
+		# between Run Parameters and Fractionation Pump Parameters on
+		# the left without leaving a gap on this column.
+		platep.grid(row=1, column=1, rowspan=2, sticky="new",
+			padx=(4, 2), pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
 		# JSON loader -- first row of Plate Parameters because loading a
 		# file populates the rows/cols/well-width/starting-point entries
@@ -1465,6 +1475,7 @@ class AutomatedFrame(tk.Frame):
 			"plate_id": self.plate_id_te,
 			"number_of_fractions": self.n_fractions_te,
 			"discard_fractions": self.discard_te,
+			"prime_time": self.prime_time_te,
 			"rows": self.rows_text_entry,
 			"cols": self.cols_text_entry,
 			"well_size": self.ws_text_entry,
@@ -1760,6 +1771,7 @@ class AutomatedFrame(tk.Frame):
 			(self.purge_time_te, validation.purge_time),
 			(self.peristaltic_rate_te, validation.peristaltic_rate),
 			(self.max_waste_te, validation.max_waste_volume),
+			(self.prime_time_te, validation.prime_time),
 		]
 		parsed = []
 		errors = []
@@ -1777,7 +1789,7 @@ class AutomatedFrame(tk.Frame):
 		if not errors:
 			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
 				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v,
-				drip_v, purge_v, peri_v, max_waste_v) = parsed
+				drip_v, purge_v, peri_v, max_waste_v, prime_v) = parsed
 			capacity = rows_v * cols_v
 
 			# N must fit on the plate
@@ -1869,6 +1881,7 @@ class AutomatedFrame(tk.Frame):
 			table_start=table_v, carriage_start=carriage_v,
 			drip_wait_time=drip_v,
 			purge_time=purge_v,
+			prime_time_s=prime_v,
 			skip_intersample_purge=self.app.skip_intersample_purge_var.get(),
 			peristaltic_rate_ml_per_min=peri_v,
 			max_waste_volume_ml=max_waste_v,
@@ -2112,6 +2125,173 @@ class ManualFrame(tk.Frame):
 			"(x-axis / y-axis) fields shared with Cleaning mode.",
 		)
 
+		# ---- Prime Time Calibration ------------------------------------
+		# Measures how long it takes the sample fractionation solution to
+		# walk from the sample tube up the inlet line to ~5 cm below the
+		# syringe dispenser. Saves the result to app.prime_time_var so
+		# Automated mode's Prime time field picks it up immediately.
+		prime_cal = tk.LabelFrame(self, text="Prime Time Calibration",
+			padx=8, pady=8)
+		prime_cal.grid(row=4, column=0, sticky="new", padx=4, pady=(0, 4))
+		prime_cal.grid_columnconfigure(0, weight=1)
+
+		tk.Label(prime_cal, anchor="w", justify="left", wraplength=540, text=(
+			"Connect a sample tube, click Start, and watch the line as "
+			"solution walks toward the dispenser. Click Stop when the "
+			"solution reaches ~5 cm below the needle. Save to apply as "
+			"Prime time in Run Parameters."
+		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+
+		self._prime_cal_elapsed_var = tk.StringVar(value="Elapsed: 0.0 s")
+		tk.Label(prime_cal, textvariable=self._prime_cal_elapsed_var,
+			anchor="w").grid(row=1, column=0, sticky="we")
+
+		prime_cal_btn_row = tk.Frame(prime_cal)
+		prime_cal_btn_row.grid(row=2, column=0, sticky="w", pady=(4, 0))
+		self.prime_cal_start_btn = ttk.Button(prime_cal_btn_row, text="Start",
+			command=self._prime_cal_start, style="Primary.TButton")
+		self.prime_cal_start_btn.pack(side=tk.LEFT, padx=(0, 4))
+		Tooltip(self.prime_cal_start_btn,
+			"Start the fractionation pump and the elapsed-time timer. "
+			"Click Stop when the solution reaches ~5 cm below the needle.")
+		self.prime_cal_stop_btn = ttk.Button(prime_cal_btn_row, text="Stop",
+			command=self._prime_cal_stop)
+		self.prime_cal_stop_btn.pack(side=tk.LEFT, padx=4)
+		Tooltip(self.prime_cal_stop_btn,
+			"Stop the pump and freeze the elapsed time as the measured "
+			"prime duration.")
+		self.prime_cal_reset_btn = ttk.Button(prime_cal_btn_row, text="Reset",
+			command=self._prime_cal_reset)
+		self.prime_cal_reset_btn.pack(side=tk.LEFT, padx=4)
+		Tooltip(self.prime_cal_reset_btn,
+			"Clear the measured value back to 0.0 s.")
+		self.prime_cal_save_btn = ttk.Button(prime_cal_btn_row,
+			text="Save", command=self._prime_cal_save,
+			style="Primary.TButton")
+		self.prime_cal_save_btn.pack(side=tk.LEFT, padx=4)
+		Tooltip(self.prime_cal_save_btn,
+			"Write the measured time (rounded to the nearest second) "
+			"into Automated mode's Prime time field.")
+
+		# Calibration state
+		self._prime_cal_t_start = None
+		self._prime_cal_measured_s = 0.0
+		self._prime_cal_tick_after = None
+		self._prime_cal_set_buttons_idle()
+
+	# -- Prime Time Calibration helpers ----------------------------------
+
+	def _prime_cal_set_buttons_idle(self):
+		"""All buttons in their non-running state. Start enabled iff the
+		Automated run is idle; Stop disabled (nothing to stop); Reset
+		enabled; Save enabled iff a non-zero measurement is present."""
+		if self.app._automated_run_active():
+			self.prime_cal_start_btn.state(["disabled"])
+		else:
+			self.prime_cal_start_btn.state(["!disabled"])
+		self.prime_cal_stop_btn.state(["disabled"])
+		self.prime_cal_reset_btn.state(["!disabled"])
+		self._prime_cal_save_button_sync()
+
+	def _prime_cal_save_button_sync(self):
+		"""Save enabled only when a measurement > 0 is on display."""
+		if self._prime_cal_measured_s and self._prime_cal_measured_s > 0:
+			self.prime_cal_save_btn.state(["!disabled"])
+		else:
+			self.prime_cal_save_btn.state(["disabled"])
+
+	def _prime_cal_start(self):
+		"""Begin the calibration: fire the same pump-confirmation flow
+		Fractionate uses, then start the elapsed-time tick. Reuses
+		_handle_pump_click so the once-per-session relay-activation
+		prompt fires exactly as it does for the Fractionate button.
+		"""
+		pc = self.app.pump_controller
+		# Bail if anything else is driving the pump.
+		if not pc.is_available_for("fractionate"):
+			messagebox.showinfo(
+				"Pump in use",
+				"The Purge claim is currently active. Stop it before "
+				"running the prime calibration timer.",
+				parent=self,
+			)
+			return
+		# Bail if an Automated run is in progress -- the button should
+		# already be disabled in that case, but defend.
+		if self.app._automated_run_active():
+			return
+		# Route through the standard pump click so the confirmation
+		# dialog fires the first time per session. _handle_pump_click
+		# claims fractionate and turns on the relay; we then start
+		# the timer once the relay is actually on.
+		self.app._handle_pump_click("fractionate", parent=self)
+		if not pc.relay_on:
+			# Confirmation declined; nothing to time.
+			return
+		self._prime_cal_t_start = monotonic()
+		self.prime_cal_start_btn.state(["disabled"])
+		self.prime_cal_reset_btn.state(["disabled"])
+		self.prime_cal_save_btn.state(["disabled"])
+		self.prime_cal_stop_btn.state(["!disabled"])
+		self._prime_cal_tick()
+
+	def _prime_cal_tick(self):
+		if self._prime_cal_t_start is None:
+			return
+		elapsed = monotonic() - self._prime_cal_t_start
+		self._prime_cal_elapsed_var.set(f"Elapsed: {elapsed:.1f} s")
+		self._prime_cal_tick_after = self.after(
+			100, self._prime_cal_tick)
+
+	def _prime_cal_stop(self):
+		"""Stop the pump + freeze the elapsed value as the measurement."""
+		if self._prime_cal_t_start is None:
+			return
+		elapsed = monotonic() - self._prime_cal_t_start
+		self._prime_cal_t_start = None
+		if self._prime_cal_tick_after is not None:
+			try:
+				self.after_cancel(self._prime_cal_tick_after)
+			except Exception:
+				pass
+			self._prime_cal_tick_after = None
+		pc = self.app.pump_controller
+		if pc.claimant == "fractionate" and pc.relay_on:
+			pc.set_relay(False)
+			pc.release()
+		self._prime_cal_measured_s = elapsed
+		self._prime_cal_elapsed_var.set(f"Elapsed: {elapsed:.1f} s")
+		self._prime_cal_set_buttons_idle()
+
+	def _prime_cal_reset(self):
+		"""Clear the measurement back to 0.0 s. If the timer is running,
+		_cal_stop should have been clicked first -- defensively stop
+		the pump here too so we never leave the relay on by accident."""
+		if self._prime_cal_t_start is not None:
+			self._prime_cal_stop()
+		self._prime_cal_measured_s = 0.0
+		self._prime_cal_elapsed_var.set("Elapsed: 0.0 s")
+		self._prime_cal_set_buttons_idle()
+
+	def _prime_cal_save(self):
+		"""Write the measured value to App.prime_time_var so Automated
+		mode's Prime time entry picks it up. Rounded to the nearest
+		integer second per the spec."""
+		if not self._prime_cal_measured_s:
+			return
+		rounded = int(round(self._prime_cal_measured_s))
+		self.app.prime_time_var.set(str(rounded))
+		try:
+			config_store.save_last_used(
+				self.app.automated_frame.get_values())
+		except OSError as exc:
+			logger.warning("Failed to persist prime_time: %s", exc)
+		messagebox.showinfo(
+			"Prime time saved",
+			f"Saved {rounded} s as Prime time.",
+			parent=self,
+		)
+
 	def refresh(self):
 		"""Re-sync the position readout and the space-bar hint when this
 		mode becomes active. (The pump-confirmation dialog is now
@@ -2289,6 +2469,11 @@ class ManualFrame(tk.Frame):
 			btn["state"] = state
 		for rb in self.step_radios:
 			rb["state"] = state
+		# Prime Time Calibration: refresh its button states via the
+		# same idle/active discriminator. Don't touch Stop/Save here;
+		# the cal helper recomputes everything based on whether a
+		# measurement is loaded.
+		self._prime_cal_set_buttons_idle()
 
 
 class CleaningFrame(tk.Frame):
@@ -2715,6 +2900,11 @@ class App(tk.Tk):
 		# Purge Time Calibration panel can write a measured value here and
 		# Automated mode's Purge time entry picks it up immediately.
 		self.purge_time_var = tk.StringVar(value="30.0")
+		# Pre-fractionation prime time. Same shared-StringVar pattern as
+		# purge_time_var: Manual mode's Prime Time Calibration tool
+		# writes here and the Run Parameters Prime time entry mirrors
+		# it live.
+		self.prime_time_var = tk.StringVar(value="60")
 		# Skip flag for the inter-sample purge workflow. Toggled via the
 		# Tools → Preferences dialog and persisted as a top-level field
 		# in config.json (not under last_used).
@@ -2757,10 +2947,20 @@ class App(tk.Tk):
 		# the operator clears the counter below 80%.
 		self._waste_threshold_dlg = None
 		self._waste_threshold_resume_btn = None
+		# Whatever modal was grabbing input when the threshold dialog
+		# opened, captured so the warning's close path can restore it.
+		self._waste_threshold_prior_grab = None
 		# When True, the active inter-sample purge phase has been halted by
 		# a waste-bin threshold trip; the tick callback uses this to stop
 		# pumping mid-phase. Reset by waste-reset.
 		self._purge_halted_for_waste = False
+		# When True, the real-time waste tracker still ticks (relay-on
+		# / -off transitions are still detected) but its incremental
+		# adds to ``waste_volume_ml`` are suppressed. Used during the
+		# pre-fractionation prime when the target is the plate's start
+		# well -- pump output lands in the first well as fraction
+		# dilution, not in the waste bin.
+		self._suppress_waste_tracking = False
 
 		# Root layout: 4 rows (header / separator / mode body / status) in
 		# a single column that expands with the window. The separator
@@ -4050,7 +4250,13 @@ class App(tk.Tk):
 		delta_s = now - self._waste_tracker_last_mono
 		self._waste_tracker_last_mono = now
 		rate_ml_per_s = self._waste_tracker_rate_ml_per_s()
-		self._add_waste(delta_s * rate_ml_per_s)
+		# _suppress_waste_tracking is set during the priming workflow
+		# when the target is the plate's start well (pump output lands
+		# in the first plate well, not the waste bin). The tick still
+		# fires so we don't lose the relay-on/off transitions, but the
+		# increment is skipped.
+		if not self._suppress_waste_tracking:
+			self._add_waste(delta_s * rate_ml_per_s)
 		# Reschedule unless a threshold trip cancelled us (which sets
 		# _waste_tracker_last_mono = None via _waste_tracker_stop()).
 		if self._waste_tracker_last_mono is not None:
@@ -4074,7 +4280,8 @@ class App(tk.Tk):
 		delta_s = now - self._waste_tracker_last_mono
 		rate_ml_per_s = self._waste_tracker_rate_ml_per_s()
 		self._waste_tracker_last_mono = None
-		if delta_s > 0 and rate_ml_per_s > 0:
+		if (delta_s > 0 and rate_ml_per_s > 0
+				and not self._suppress_waste_tracking):
 			self._add_waste(delta_s * rate_ml_per_s)
 
 	def _waste_tracker_rate_ml_per_s(self):
@@ -4156,11 +4363,15 @@ class App(tk.Tk):
 		"""
 		# Set the threshold flag BEFORE _waste_tracker_stop so its final
 		# delta-tick doesn't re-enter _add_waste and re-fire the same
-		# threshold trigger.
+		# threshold trigger. 100% trigger also sets the 80% warned flag
+		# (100% subsumes 80%) so a single tick that crosses both
+		# thresholds fires only the 100% dialog -- not the 80% via the
+		# nested _add_waste path from _waste_tracker_stop's final delta.
 		if severity == "80%":
 			self.waste_warned_80 = True
 		else:
 			self._waste_full = True
+			self.waste_warned_80 = True
 		self._waste_tracker_stop()
 		self.pump_controller.set_relay(False)
 		# Cancel any pending state-machine after() callback so the
@@ -4201,89 +4412,182 @@ class App(tk.Tk):
 		self._show_waste_threshold_dialog(severity, max_v)
 
 	def _show_waste_threshold_dialog(self, severity, max_v):
-		"""Non-modal threshold dialog. Reset / Resume / End Operation.
+		"""Modal threshold dialog. Severity drives behavior:
 
-		Resume is disabled while ``waste_volume_ml >= 0.80 × max``;
-		``reset_waste_counter`` re-enables it via the cached button
-		reference. The dialog uses no ``grab_set`` so the status-bar
-		Reset button stays clickable while the dialog is open.
+		  ``"80%"`` — advisory pause. Reset + Resume. Resume always
+		    enabled. X dismissal = Resume (carry on with current
+		    counter).
+
+		  ``"100%"`` — blocking hard-stop. Reset + Resume. Resume
+		    disabled until counter drops below 80% (via Reset). X
+		    dismissal blocked -- the operator MUST Reset + Resume so
+		    the bin is verified empty before further pumping.
+
+		Both variants refresh the dialog's body label after Reset so
+		the operator sees the updated waste readout. The dialog calls
+		``grab_set`` so the warning takes priority over any modal
+		that's already open (e.g. the inter-sample purge phase modal);
+		the prior grab is captured and restored on close so the
+		previously-modal widget regains focus afterward.
 		"""
-		# A previous threshold dialog may still be open if the operator
-		# never acted on it -- swap it out so we don't pile up Toplevels.
 		if self._waste_threshold_dlg is not None:
 			try:
 				self._waste_threshold_dlg.destroy()
 			except Exception:
 				pass
+		is_hardstop = (severity == "100%")
+		# Capture whatever modal is currently grabbing input (e.g. the
+		# inter-sample purge phase modal). The Tcl ``grab current``
+		# command needs an explicit window argument to return a plain
+		# path string -- the no-arg form returns a tuple of all
+		# active grabs which doesn't round-trip through nametowidget.
+		# The warning will grab on top of the prior modal; the close
+		# handlers restore the prior grab so the stacked modal
+		# regains focus when the warning closes.
+		prior_grab = None
+		try:
+			path = str(self.tk.call("grab", "current", str(self)))
+			if path:
+				prior_grab = self.nametowidget(path)
+		except (tk.TclError, KeyError):
+			prior_grab = None
 		dlg = tk.Toplevel(self)
 		dlg.transient(self)
 		dlg.resizable(False, False)
-		if severity == "80%":
+		if not is_hardstop:
 			dlg.title("⚠ Waste Bin at 80%")
 			intro_extra = "Pump has been paused automatically."
+			instructions = (
+				"Empty the waste container and click Reset if you want a "
+				"fresh counter, or click Resume to continue with the "
+				"current estimate."
+			)
 		else:
 			dlg.title("⚠ Waste Bin at 100% — Hard Stop")
 			intro_extra = (
-				"Pump halted by the 100% failsafe. The 80% auto-pause "
-				"either did not fire or was overridden."
+				"Pump halted by the 100% failsafe. The bin must be "
+				"emptied and the counter reset before pumping resumes."
+			)
+			instructions = (
+				"Empty the waste container and click Reset. After "
+				"reset, click Resume to continue the paused operation."
 			)
 
 		body = tk.Frame(dlg, padx=18, pady=14)
 		body.pack(fill=tk.BOTH, expand=True)
-		pct = self.waste_volume_ml / max_v if max_v else 0.0
-		tk.Label(body, anchor="w", justify="left", wraplength=440, text=(
-			f"Waste estimate: {self.waste_volume_ml:.0f} / "
-			f"{max_v:.0f} mL ({pct:.0%})\n"
-			f"{intro_extra}\n\n"
-			"Empty the waste container, then click Reset. After reset, "
-			"click Resume to continue the paused operation."
-		)).pack(anchor="w", pady=(0, 12))
+		status_lbl = tk.Label(body, anchor="w", justify="left",
+			wraplength=440)
+		status_lbl.pack(anchor="w", pady=(0, 12))
+
+		def _refresh_body():
+			pct = self.waste_volume_ml / max_v if max_v else 0.0
+			status_lbl.config(text=(
+				f"Waste estimate: {self.waste_volume_ml:.0f} / "
+				f"{max_v:.0f} mL ({pct:.0%})\n"
+				f"{intro_extra}\n\n"
+				f"{instructions}"
+			))
+		_refresh_body()
 
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
+		btn_row.grid_columnconfigure(0, weight=1)
+		btn_row.grid_columnconfigure(1, weight=1)
 
 		def _on_reset():
-			# Dialog Reset doesn't re-prompt -- the operator is already
-			# in a Reset-confirmation context.
+			# Dialog Reset doesn't re-prompt -- already in Reset
+			# context. Refresh the visible counter so the operator
+			# can see the action took effect.
 			self._perform_waste_reset(confirm=False)
+			_refresh_body()
 		def _on_resume():
 			self._waste_threshold_resume(dlg)
-		def _on_end():
-			self._waste_threshold_end_operation(dlg)
-		def _on_close():
-			# Closing via X behaves like End Operation -- the
-			# operation cannot be silently resumed.
-			self._waste_threshold_end_operation(dlg)
 
-		reset_btn = ttk.Button(btn_row, text="Reset",
-			command=_on_reset, style="Primary.TButton")
-		reset_btn.pack(side=tk.LEFT, padx=4)
-		resume_btn = ttk.Button(btn_row, text="Resume", command=_on_resume)
-		resume_btn.pack(side=tk.LEFT, padx=4)
-		ttk.Button(btn_row, text="End Operation",
-			command=_on_end, style="Danger.TButton").pack(side=tk.LEFT, padx=4)
+		# Primary style highlights the operator's expected next action.
+		# 80% advisory: Resume is the recommended path (carry on with
+		# the current estimate); Reset is the secondary "if you want
+		# to empty mid-task" option.
+		# 100% hard-stop: Reset is mandatory before Resume can fire,
+		# so Reset gets the highlight and Resume reads as subdued
+		# AND is functionally disabled until Reset.
+		reset_btn = ttk.Button(btn_row, text="Reset", command=_on_reset,
+			style=("Primary.TButton" if is_hardstop else "TButton"))
+		reset_btn.grid(row=0, column=0, sticky="w", padx=4)
+		resume_btn = ttk.Button(btn_row, text="Resume", command=_on_resume,
+			style=("TButton" if is_hardstop else "Primary.TButton"))
+		resume_btn.grid(row=0, column=1, sticky="e", padx=4)
 
-		# Resume is gated until the operator brings the counter below 80%.
-		max_now = self._live_max_waste_volume()
-		if self.waste_volume_ml >= 0.80 * max_now:
-			resume_btn.state(["disabled"])
+		if is_hardstop:
+			# Hard stop: Resume disabled until Reset brings the
+			# counter below 80%. _perform_waste_reset enables it via
+			# self._waste_threshold_resume_btn.
+			max_now = self._live_max_waste_volume()
+			if self.waste_volume_ml >= 0.80 * max_now:
+				resume_btn.state(["disabled"])
+			# X dismissal is a no-op so the dialog cannot be closed
+			# without resolving the hard stop.
+			dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+		else:
+			# Advisory: X = Resume (acknowledge and carry on).
+			dlg.protocol("WM_DELETE_WINDOW", _on_resume)
 
-		dlg.protocol("WM_DELETE_WINDOW", _on_close)
 		dlg.update_idletasks()
 		self._center_over_main(dlg)
-		# No grab_set -- status-bar Reset must stay clickable.
+		# Take the modal grab so this warning sits on top of any
+		# already-open modal (e.g. inter-sample purge phase modal).
+		# The prior grab is restored on close.
 		self._waste_threshold_dlg = dlg
-		self._waste_threshold_resume_btn = resume_btn
+		self._waste_threshold_resume_btn = resume_btn if is_hardstop else None
+		self._waste_threshold_prior_grab = prior_grab
+		try:
+			dlg.grab_set()
+		except tk.TclError:
+			pass
+
+	def _restore_prior_grab(self):
+		"""Restore the modal grab that was active before the threshold
+		dialog took it. Called from Reset (when it closes the dialog),
+		Resume, and End-Operation paths. No-op when nothing was
+		previously grabbing input."""
+		prior = getattr(self, "_waste_threshold_prior_grab", None)
+		self._waste_threshold_prior_grab = None
+		if prior is None:
+			return
+		try:
+			prior.grab_set()
+		except tk.TclError:
+			# Prior widget may have been destroyed in the meantime
+			# (e.g. operator cancelled the underlying modal during
+			# the threshold dialog's lifetime).
+			pass
 
 	def _waste_threshold_resume(self, dlg):
-		"""Resume the operation that was halted by the threshold pause.
-		The exact restart action depends on what was running:
-		  - Automated run mid-cycle: route through toggle_pause (which
-		    re-arms the state machine's after() chain).
-		  - Otherwise (Manual/Cleaning Purge, inter-sample purge modal):
-		    turn the relay back on; operator-visible state catches up
-		    via the PumpController state callback.
+		"""Close the warning and continue. Behavior depends on context:
+		  - Automated run mid-cycle (state.state in pump/wait/move/
+		    discard + is_paused): route through toggle_pause so the
+		    state-machine after() chain re-arms and the timed cycle
+		    resumes.
+		  - All other contexts (inter-sample purge modal, Manual /
+		    Cleaning Purge button, anything not state-machine-driven):
+		    just close the warning. Operator manually restarts pumping
+		    via Space in the purge modal or the Manual/Cleaning Purge
+		    button. The previous auto-restart created inconsistent
+		    state — pump on but the dialog still in "complete" mode
+		    awaiting a new extension — which made the next Space press
+		    appear to do nothing.
+
+		Clears ``_purge_halted_for_waste`` so any subsequent extension
+		tick can proceed (the flag was the previous bug — left True
+		after Resume, it caused new pump cycles to halt themselves
+		on their first tick).
 		"""
+		# Clear the halt flag BEFORE destroying the dialog so any
+		# tick that fires immediately after sees the cleared state.
+		self._purge_halted_for_waste = False
+		# Restore the prior grab BEFORE destroying so the previously
+		# modal widget (inter-sample purge phase modal, etc.) regains
+		# input focus the moment this dialog disappears.
+		self._restore_prior_grab()
 		dlg.destroy()
 		self._waste_threshold_dlg = None
 		self._waste_threshold_resume_btn = None
@@ -4291,17 +4595,20 @@ class App(tk.Tk):
 		if s.state in ("pump", "wait", "move", "discard") and s.is_paused:
 			self.toggle_pause()
 			return
-		# Toggle-context restart: just turn the relay back on. The
-		# operator-visible labels (Manual Purge button, inter-sample
-		# purge modal) sync via the PumpController callback.
-		if self.pump_controller.claimant is not None:
-			self.pump_controller.set_relay(True)
+		# Toggle contexts (inter-sample purge modal, Manual / Cleaning
+		# Purge button): pump stays OFF. The operator triggers their
+		# own next pump-on via the modal's Space or the Purge button.
 
 	def _waste_threshold_end_operation(self, dlg):
 		"""Close the dialog and abort the operation. Pump stays off.
 		Automated runs land in the auto-paused state (End Run is the
 		operator's exit); Cleaning/Manual purges just dismiss.
+
+		(Dead code -- the End Operation button was removed in a later
+		pass. Kept as a compatibility shim in case any code path still
+		references it.)
 		"""
+		self._restore_prior_grab()
 		dlg.destroy()
 		self._waste_threshold_dlg = None
 		self._waste_threshold_resume_btn = None
@@ -4573,12 +4880,18 @@ class App(tk.Tk):
 
 	def _show_begin_fractionation_dialog(self, *,
 			sample_id, plate_id,
-			waste_now, waste_added, waste_projected, waste_max):
+			waste_rows, over_capacity):
 		"""Compact Begin Fractionation confirmation. Prompts for the
 		Sample ID (the parameter most worth a final glance), shows a
-		2-column waste-bin projection table, and offers Cancel /
-		Begin Fractionation. All other run parameters are visible in
-		the main window behind the dialog and are not duplicated.
+		caller-supplied 2-column waste-bin projection table, and
+		offers Cancel / Begin Fractionation. All other run parameters
+		are visible in the main window behind the dialog and are not
+		duplicated.
+
+		``waste_rows`` is a list of ``(label, value, [fg])`` tuples
+		ready for ``_build_kv_table``. ``over_capacity`` is True when
+		the projection exceeds the configured bin max; an amber
+		warning row is appended in that case.
 
 		Returns True if Begin Fractionation is clicked, False on
 		Cancel / Escape / window-close.
@@ -4607,18 +4920,13 @@ class App(tk.Tk):
 
 		tk.Label(body, text="Waste bin projection:", anchor="w",
 			font=FONTS["bold"]).pack(anchor="w", pady=(0, 4))
-		waste_rows = [
-			("At run start", f"{waste_now:.0f} mL"),
-			("Estimated added this run", f"{waste_added:.0f} mL"),
-			("Projected end-of-run", f"{waste_projected:.0f} mL"),
-			("Capacity", f"{waste_max:.0f} mL"),
-		]
-		if waste_projected > waste_max and waste_max > 0:
-			waste_rows.append(
-				("⚠ Projected to exceed capacity", "Empty bin first?",
-				 "#b25e09"),
+		rows = list(waste_rows)
+		if over_capacity:
+			rows.append(
+				("⚠ Projected to exceed bin capacity during this run.",
+				 "", "#b25e09"),
 			)
-		self._build_kv_table(body, waste_rows).pack(fill=tk.X, pady=(0, 12))
+		self._build_kv_table(body, rows).pack(fill=tk.X, pady=(0, 12))
 
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
@@ -4773,7 +5081,7 @@ class App(tk.Tk):
 			number_of_fractions, discard_fractions,
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, drip_wait_time,
-			purge_time, skip_intersample_purge,
+			purge_time, prime_time_s, skip_intersample_purge,
 			peristaltic_rate_ml_per_min, max_waste_volume_ml):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
@@ -4816,23 +5124,79 @@ class App(tk.Tk):
 		)
 		estimated_total_s = discard_seconds + plate_seconds
 
-		# Waste-bin projection table values. Operators get a compact
-		# 2-column summary of bin state and projected per-sample
-		# additions; the bin is the one parameter without a visible
-		# main-window readout for its FORWARD projection.
+		# Waste-bin projection: protocol-aware estimate of how much the
+		# bin gains over the whole run, accounting for D × V × N
+		# discards plus inter-sample purges. The bin is the one
+		# parameter without a visible main-window readout for its
+		# FORWARD projection, so this table is the operator's chance
+		# to spot an overflow before clicking Begin.
 		waste_now = self.waste_volume_ml
 		waste_max = max_waste_volume_ml
-		discard_per_sample_ml = discard_fractions * volume
-		per_transition_ml = (
-			0.0 if skip_intersample_purge
-			else 2.0 * purge_time * (peristaltic_rate_ml_per_min / 60.0)
+		# Sample count: bulk mode walks every loaded sample; otherwise
+		# the run handles one sample at a time (operator drives
+		# Continue to Next Sample for additional tubes, each of which
+		# re-runs Begin, so the per-Begin projection is for one tube).
+		n_samples = (
+			len(self.bulk_samples) if self.bulk_mode_active else 1
 		)
-		projected_end_ml = waste_now + discard_per_sample_ml
+		discard_volume = discard_fractions * volume * n_samples
+		# Per-transition purge volume — protocol-dependent. Each
+		# peristaltic phase pumps for purge_time at peristaltic_rate;
+		# the priming phase pumps for purge_time at the syringe pump
+		# rate. Basic: 2 peri (wash + clear) + 1 syringe (prime);
+		# decon: 4 peri (wash + bleach + rinse + clear) + 1 syringe.
+		if skip_intersample_purge or n_samples <= 1:
+			purge_per_transition = 0.0
+		elif self.purge_protocol == "decontamination":
+			purge_per_transition = (
+				4 * purge_time * peristaltic_rate_ml_per_min / 60.0
+				+ purge_time * pump_rate / 3600.0
+			)
+		else:  # "basic" / default
+			purge_per_transition = (
+				2 * purge_time * peristaltic_rate_ml_per_min / 60.0
+				+ purge_time * pump_rate / 3600.0
+			)
+		total_purge = max(0, n_samples - 1) * purge_per_transition
+		estimated_added = discard_volume + total_purge
+		projected_end = waste_now + estimated_added
+
+		# Per-row contextual labels so the table is self-documenting
+		# even when D=0 or skip is on.
+		if n_samples == 1:
+			purges_label = "Purges (none — single sample)"
+		elif skip_intersample_purge:
+			purges_label = "Purges (skipped)"
+		else:
+			purges_label = (
+				f"Purges ({n_samples - 1} × {self.purge_protocol})"
+			)
+		waste_rows = [
+			("At run start", f"{waste_now:.1f} mL"),
+			(
+				f"Discards ({discard_fractions} × {volume:.2f} mL × "
+				f"{n_samples} sample{'s' if n_samples != 1 else ''})",
+				f"{discard_volume:.1f} mL",
+			),
+			(purges_label, f"{total_purge:.1f} mL"),
+			("Total estimated added", f"{estimated_added:.1f} mL"),
+			("Projected end-of-run", f"{projected_end:.1f} mL"),
+			("Capacity", f"{waste_max:.0f} mL"),
+		]
+		over_capacity = projected_end > waste_max and waste_max > 0
+		logger.debug(
+			"Begin waste projection: D=%d V=%.3f N=%d purge_time=%.1f "
+			"peri=%.1f syringe=%.1f skip=%s protocol=%s → "
+			"discards=%.1f purges=%.1f total=%.1f projected=%.1f",
+			discard_fractions, volume, n_samples, purge_time,
+			peristaltic_rate_ml_per_min, pump_rate,
+			skip_intersample_purge, self.purge_protocol,
+			discard_volume, total_purge, estimated_added, projected_end,
+		)
 
 		if not self._show_begin_fractionation_dialog(
 				sample_id=sample_id_at_start, plate_id=plate_id_at_start,
-				waste_now=waste_now, waste_added=discard_per_sample_ml,
-				waste_projected=projected_end_ml, waste_max=waste_max):
+				waste_rows=waste_rows, over_capacity=over_capacity):
 			return
 
 		# Persist the entry values to ~/.autosip/config.json before the run
@@ -4858,6 +5222,7 @@ class App(tk.Tk):
 		s.peristaltic_rate_ml_per_min = peristaltic_rate_ml_per_min
 		s.max_waste_volume_ml = max_waste_volume_ml
 		s.volume_per_well = volume
+		s.prime_time_s = float(prime_time_s)
 
 		# Snapshot the waste counter at run start so end.json can report
 		# how much waste this specific run added (independent of
@@ -5000,25 +5365,360 @@ class App(tk.Tk):
 		# Discard fractions field affects only the next series.
 		s.discards_at_series_start = s.discards_planned
 
+		# Priming workflow: walk fractionation solution from the
+		# sample tube to the syringe dispenser. Step 1 runs the pump
+		# in parallel with a needle move to the first-dispense
+		# position (waste bin if D > 0, else plate A1). Step 2 lets
+		# the operator manually walk until a droplet forms. After the
+		# operator clicks Begin Run, _begin_first_phase fires the
+		# normal discard / collect logic -- without the move, since
+		# priming already parked the needle.
+		self._priming_workflow(on_done=self._begin_first_phase)
+
+	def _priming_workflow(self, on_done):
+		"""Pre-fractionation priming. Two-step modal sequence that walks
+		fractionation solution from the sample tube up the inlet line
+		to the syringe dispenser. Runs once at run start before the
+		state machine's first dispense.
+
+		Step 1 (automatic): pump runs for ``state.prime_time_s`` while
+		the needle moves to its first-dispense target. The target is
+		the waste bin when D > 0 (discards land there); otherwise the
+		plate's start well (A1).
+
+		Step 2 (manual): operator Space-toggles the pump until a
+		droplet forms at the needle, then clicks Begin Run.
+
+		On Begin Run, ``on_done()`` fires -- the caller's hook into the
+		state machine's first dispense phase.
+		On Cancel from either step, the run aborts cleanly and the
+		application returns to idle.
+		"""
+		s = self.state
+		if s.discards_at_series_start > 0:
+			target_x, target_y = s.waste_bin_table, s.waste_bin_carriage
+			target_label = "waste bin"
+			target_is_waste = True
+		else:
+			target_x, target_y = s.table_start_cm, s.carriage_start_cm
+			target_label = "start well (A1)"
+			target_is_waste = False
+		# Prime-to-start-well output lands in the first plate well as
+		# fraction dilution, not in the waste bin. Suppress the real-
+		# time waste tracker for the duration of the prime workflow
+		# in that case.
+		self._suppress_waste_tracking = not target_is_waste
+		self._priming_step1(target_x, target_y, target_label,
+			target_is_waste, on_done)
+
+	def _priming_step1(self, target_x, target_y, target_label,
+			target_is_waste, on_done):
+		"""Step 1: parallel auto-pump + needle move."""
+		s = self.state
+		prime_s = max(0.0, float(s.prime_time_s))
+
+		ctx = {"cancelled": False, "move_done": False,
+			"pump_done": False, "tick_after": None,
+			"stop_after": None,
+			"start_iso": None, "start_mono": None}
+
+		dlg = tk.Toplevel(self)
+		dlg.title("Priming Fractionation Line — Step 1 of 2")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body, justify="left", anchor="w", wraplength=460, text=(
+			"Walking sample solution from tube toward syringe dispenser.\n\n"
+			f"Needle moving to {target_label}."
+		)).pack(anchor="w", pady=(0, 10))
+
+		countdown_lbl = tk.Label(body, anchor="w",
+			text=f"Prime time: {prime_s:.0f} / {prime_s:.0f} s remaining")
+		countdown_lbl.pack(anchor="w")
+		status_lbl = tk.Label(body, anchor="w",
+			text="Pump: OFF   Needle: parked")
+		status_lbl.pack(anchor="w", pady=(0, 12))
+
+		def _cancel():
+			ctx["cancelled"] = True
+			for key in ("tick_after", "stop_after"):
+				if ctx[key] is not None:
+					try:
+						self.after_cancel(ctx[key])
+					except Exception:
+						pass
+					ctx[key] = None
+			self.pump_controller.set_relay(False)
+			if dlg.winfo_exists():
+				dlg.destroy()
+			self._abort_run_from_priming()
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+		ttk.Button(btn_row, text="Cancel", command=_cancel,
+			style="Danger.TButton").pack(side=tk.LEFT, padx=4)
+
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+
+		# Claim fractionate + start pump
+		self.pump_controller.claim_for("fractionate")
+		self.pump_controller.set_relay(True)
+		ctx["start_iso"] = datetime.now().isoformat(timespec="milliseconds")
+		ctx["start_mono"] = monotonic()
+		status_lbl.config(text="Pump: ON   Needle: moving")
+
+		def _pump_off():
+			ctx["stop_after"] = None
+			ctx["pump_done"] = True
+			if ctx["cancelled"]:
+				return
+			self.pump_controller.set_relay(False)
+			elapsed = monotonic() - ctx["start_mono"]
+			end_iso = datetime.now().isoformat(timespec="milliseconds")
+			if self.run_logger is not None:
+				try:
+					self.run_logger.prime_auto(
+						target_x_cm=target_x, target_y_cm=target_y,
+						start_iso=ctx["start_iso"], end_iso=end_iso,
+						duration_s=elapsed,
+					)
+				except Exception as exc:
+					logger.warning("Failed to log prime_auto: %s", exc)
+			countdown_lbl.config(
+				text=f"Prime time: 0 / {prime_s:.0f} s remaining")
+			status_lbl.config(text="Pump: OFF   Needle: " + (
+				"moving" if not ctx["move_done"] else "parked"))
+			_check_advance()
+		ctx["stop_after"] = self.after(int(prime_s * 1000), _pump_off)
+
+		def _tick():
+			ctx["tick_after"] = None
+			if ctx["cancelled"] or not dlg.winfo_exists():
+				return
+			remaining = max(0.0,
+				prime_s - (monotonic() - ctx["start_mono"]))
+			countdown_lbl.config(
+				text=f"Prime time: {remaining:.0f} / {prime_s:.0f} s remaining")
+			if remaining > 0:
+				ctx["tick_after"] = self.after(100, _tick)
+		_tick()
+
+		def _do_move():
+			if ctx["cancelled"]:
+				return
+			# move_to_positions is synchronous and blocks the GUI for
+			# the duration of the move. The pump's after()-scheduled
+			# off-task will fire after the move returns; the countdown
+			# label visually freezes during the move because Tk can't
+			# render updates. status_lbl is set BEFORE the call so the
+			# operator sees "Needle: moving" before the freeze.
+			self.move_to_positions(table_dist=target_x,
+				carriage_dist=target_y)
+			ctx["move_done"] = True
+			status_lbl.config(text="Pump: " + (
+				"ON" if self.pump_controller.relay_on else "OFF")
+				+ "   Needle: parked")
+			_check_advance()
+		# Defer move by one tick so the dialog renders first.
+		self.after(50, _do_move)
+
+		def _check_advance():
+			if ctx["cancelled"]:
+				return
+			if ctx["move_done"] and ctx["pump_done"]:
+				if dlg.winfo_exists():
+					dlg.destroy()
+				self._priming_step2(target_x, target_y, target_label,
+					target_is_waste, on_done)
+
+	def _priming_step2(self, target_x, target_y, target_label,
+			target_is_waste, on_done):
+		"""Step 2: operator Space-toggles pump until droplet, then
+		clicks Begin Run."""
+
+		ctx = {"cancelled": False, "is_pumping": False,
+			"cycle_count": 0, "total_s": 0.0,
+			"cycle_start_mono": None, "cycle_start_iso": None,
+			"tick_after": None}
+
+		dlg = tk.Toplevel(self)
+		dlg.title("Priming Fractionation Line — Step 2 of 2")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body, justify="left", anchor="w", wraplength=460, text=(
+			f"Needle is parked above the {target_label}.\n\n"
+			"Press Space to walk the sample solution until a droplet "
+			"forms at the syringe dispenser. Press Space again to "
+			"stop. Click Begin Run when ready."
+		)).pack(anchor="w", pady=(0, 10))
+
+		pump_lbl = tk.Label(body, text="Pump: OFF",
+			font=FONTS["bold"], anchor="w")
+		pump_lbl.pack(anchor="w")
+		manual_lbl = tk.Label(body,
+			text="Manual prime: 0 cycles, 0.0 s total", anchor="w")
+		manual_lbl.pack(anchor="w", pady=(0, 12))
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+		btn_row.grid_columnconfigure(0, weight=1)
+		btn_row.grid_columnconfigure(1, weight=1)
+
+		def _log_cycle():
+			elapsed = monotonic() - ctx["cycle_start_mono"]
+			end_iso = datetime.now().isoformat(timespec="milliseconds")
+			if self.run_logger is not None:
+				try:
+					self.run_logger.prime_manual_ext(
+						extension_idx=ctx["cycle_count"],
+						target_x_cm=target_x, target_y_cm=target_y,
+						start_iso=ctx["cycle_start_iso"], end_iso=end_iso,
+						duration_s=elapsed,
+					)
+				except Exception as exc:
+					logger.warning(
+						"Failed to log prime_manual_ext: %s", exc)
+			ctx["total_s"] += elapsed
+
+		def _tick():
+			ctx["tick_after"] = None
+			if ctx["cancelled"] or not ctx["is_pumping"]:
+				return
+			cycle_s = monotonic() - ctx["cycle_start_mono"]
+			manual_lbl.config(text=(
+				f"Manual prime: {ctx['cycle_count']} cycle"
+				f"{'s' if ctx['cycle_count'] != 1 else ''}, "
+				f"{ctx['total_s'] + cycle_s:.1f} s total"
+			))
+			ctx["tick_after"] = self.after(100, _tick)
+
+		def _on_space(_e=None):
+			if ctx["cancelled"]:
+				return "break"
+			if ctx["is_pumping"]:
+				if ctx["tick_after"] is not None:
+					try:
+						self.after_cancel(ctx["tick_after"])
+					except Exception:
+						pass
+					ctx["tick_after"] = None
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_cycle()
+				pump_lbl.config(text="Pump: OFF")
+				manual_lbl.config(text=(
+					f"Manual prime: {ctx['cycle_count']} cycle"
+					f"{'s' if ctx['cycle_count'] != 1 else ''}, "
+					f"{ctx['total_s']:.1f} s total"
+				))
+				begin_btn.state(["!disabled"])
+			else:
+				ctx["cycle_count"] += 1
+				ctx["cycle_start_mono"] = monotonic()
+				ctx["cycle_start_iso"] = datetime.now().isoformat(
+					timespec="milliseconds")
+				ctx["is_pumping"] = True
+				self.pump_controller.set_relay(True)
+				pump_lbl.config(text="Pump: ON")
+				begin_btn.state(["disabled"])
+				_tick()
+			return "break"
+
+		def _begin_run():
+			if ctx["is_pumping"] or ctx["cancelled"]:
+				return
+			if dlg.winfo_exists():
+				dlg.destroy()
+			# Suppression flag served its purpose for the prime steps;
+			# clear it so subsequent dispense waste tracks normally.
+			self._suppress_waste_tracking = False
+			on_done()
+
+		def _cancel():
+			ctx["cancelled"] = True
+			if ctx["tick_after"] is not None:
+				try:
+					self.after_cancel(ctx["tick_after"])
+				except Exception:
+					pass
+				ctx["tick_after"] = None
+			if ctx["is_pumping"]:
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_cycle()
+			if dlg.winfo_exists():
+				dlg.destroy()
+			self._abort_run_from_priming()
+
+		ttk.Button(btn_row, text="Cancel", command=_cancel,
+			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
+		begin_btn = ttk.Button(btn_row, text="Begin Run",
+			command=_begin_run, style="Primary.TButton")
+		begin_btn.grid(row=0, column=1, sticky="e", padx=4)
+
+		dlg.bind("<space>", _on_space)
+		dlg.bind("<Return>", lambda _e: _begin_run())
+		# Override the default class-level Space-activates-button
+		# behavior on both buttons so Space always routes to
+		# _on_space (pump toggle), never to Cancel / Begin Run.
+		begin_btn.bind("<space>", _on_space)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+
+	def _abort_run_from_priming(self):
+		"""Operator clicked Cancel in the priming workflow before the
+		state machine started dispensing. Tear down the run-in-progress
+		state set up by ``start_run`` and return to idle. Pump claim is
+		released; run_logger is closed without finalization (the prime
+		rows already written stay on disk).
+		"""
+		self._suppress_waste_tracking = False
+		self.pump_controller.set_relay(False)
+		if self.pump_controller.claimant is not None:
+			self.pump_controller.release()
+		if self.run_logger is not None:
+			try:
+				self.run_logger.close_without_summary()
+			except Exception as exc:
+				logger.warning("Failed to close run_logger on abort: %s", exc)
+			self.run_logger = None
+		s = self.state
+		s.state = "idle"
+		self._set_phase("idle")
+		s.is_paused = False
+		s.x = 0
+		s.y = 0
+		s.discards_done = 0
+		s.wells_collected = 0
+		s.series_index = 0
+		self.automated_frame.progress.reset()
+		self._update_run_control_buttons()
+		self.set_status("Run aborted from priming. System idle.")
+
+	def _begin_first_phase(self):
+		"""Fire the run's first dispense phase. Called by the priming
+		workflow's Begin Run, by which time the needle is parked at
+		the first-dispense target."""
+		s = self.state
 		if s.discards_at_series_start > 0:
 			self._set_phase("discard")
 			self.set_status(
-				f"Discard phase: moving to waste bin "
+				f"Discard phase at waste bin "
 				f"({s.waste_bin_table:.2f} cm, {s.waste_bin_carriage:.2f} cm)..."
 			)
-			self.move_to_positions(
-				table_dist=s.waste_bin_table,
-				carriage_dist=s.waste_bin_carriage,
-			)
-			self.automated_frame.progress.set_discard_status(0, s.discards_at_series_start)
+			self.automated_frame.progress.set_discard_status(
+				0, s.discards_at_series_start)
 			self.pump_liquid()
 		else:
 			self._set_phase("collect")
-			self.set_status("Moving to plate A1...")
-			self.move_to_positions(
-				table_dist=s.table_start_cm,
-				carriage_dist=s.carriage_start_cm,
-			)
 			self.set_status("Fractionation in progress...")
 			self.pump_liquid()
 
@@ -5612,45 +6312,42 @@ class App(tk.Tk):
 		ctx = {"cancelled": False, "modal": None,
 			"is_pumping": False, "tick_after": None,
 			"cycle_phase": None, "cycle_sub": "",
-			"cycle_count": 0, "cycle_start_mono": None,
-			"cycle_start_iso": None}
+			"cycle_extension": 0, "cycle_start_mono": None,
+			"cycle_start_iso": None, "auto_done_at": None}
 
-		def _stop_pump_and_log():
-			"""Turn the relay off and (if a cycle is in flight) commit
-			the per-cycle row to log.csv + charge the waste estimate.
-			Idempotent: a no-op when the pump is already off."""
-			if not ctx["is_pumping"]:
+		def _log_current_cycle():
+			"""Write the in-flight cycle row to log.csv if one is open.
+			Idempotent: clears ctx['cycle_phase'] so a repeat call is
+			a no-op. Caller is responsible for stopping the relay and
+			cancelling any pending tick BEFORE invoking this helper;
+			it only handles the bookkeeping.
+			"""
+			phase = ctx["cycle_phase"]
+			if phase is None:
 				return
-			if ctx["tick_after"] is not None:
-				try:
-					self.after_cancel(ctx["tick_after"])
-				except Exception:
-					pass
-				ctx["tick_after"] = None
-			self.pump_controller.set_relay(False)
-			ctx["is_pumping"] = False
+			if self.run_logger is None:
+				ctx["cycle_phase"] = None
+				return
 			elapsed = monotonic() - ctx["cycle_start_mono"]
 			end_iso = datetime.now().isoformat(timespec="milliseconds")
-			phase = ctx["cycle_phase"]
-			cycle = ctx["cycle_count"]
-			sub = ctx["cycle_sub"]
-			if self.run_logger is not None and phase:
-				try:
-					self.run_logger.purge_committed(
-						phase=phase, series_index=next_series_index,
-						waste_x_cm=s.waste_bin_table,
-						waste_y_cm=s.waste_bin_carriage,
-						start_iso=ctx["cycle_start_iso"],
-						end_iso=end_iso, duration_s=elapsed,
-						cycle=cycle, sub_phase=sub,
-					)
-				except Exception as exc:
-					logger.warning(
-						"Failed to log purge cycle row: %s", exc)
+			try:
+				self.run_logger.purge_committed(
+					phase=phase, series_index=next_series_index,
+					waste_x_cm=s.waste_bin_table,
+					waste_y_cm=s.waste_bin_carriage,
+					start_iso=ctx["cycle_start_iso"],
+					end_iso=end_iso, duration_s=elapsed,
+					extension=ctx["cycle_extension"],
+					sub_phase=ctx["cycle_sub"],
+				)
+			except Exception as exc:
+				logger.warning(
+					"Failed to log purge cycle row: %s", exc)
+			ctx["cycle_phase"] = None
 			# Per-cycle waste volume is charged by the real-time tracker
 			# (started by the PumpController state callback on relay ON,
-			# stopped on relay OFF). The end-of-cycle _add_waste call
-			# that used to live here would double-count.
+			# stopped on relay OFF). No end-of-cycle _add_waste call
+			# here -- that would double-count.
 
 		def _cancel_and_close():
 			"""Abort the purge workflow. Turns the pump off (commits the
@@ -5658,8 +6355,17 @@ class App(tk.Tk):
 			"fractionate" so the run's auto-pause state is consistent
 			with how it was before the purge started.
 			"""
+			logger.debug("purge dialog: cancel fired")
+			if ctx["tick_after"] is not None:
+				try:
+					self.after_cancel(ctx["tick_after"])
+				except Exception:
+					pass
+				ctx["tick_after"] = None
 			if ctx["is_pumping"]:
-				_stop_pump_and_log()
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_current_cycle()
 			ctx["cancelled"] = True
 			if ctx["modal"] is not None:
 				try:
@@ -5777,6 +6483,7 @@ class App(tk.Tk):
 
 			if checklist:
 				def _skip():
+					logger.debug("purge dialog: skip checklist fired")
 					bypass["skipped"] = True
 					if self.run_logger is not None and skip_context:
 						try:
@@ -5797,95 +6504,217 @@ class App(tk.Tk):
 			x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
 			y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
 			dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
-			dlg.grab_set()
+			# Intentionally NOT grabbing: the status-bar Reset (and the
+			# waste-warning dialog when one is open) must remain
+			# clickable so the operator can always recover from a
+			# waste-bin trip mid-purge. Most Manual / Cleaning controls
+			# are already disabled while a run is active (see
+			# _apply_run_active_lock), so the lack of modal grab is
+			# safe.
 			return (dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
 				action_btn, set_pump_gate)
 
-		def _run_toggle_phase(title, body_text, phase, sub_phase, pump_kind,
-				on_advance, checklist, skip_context, note_text=None):
-			"""Operator-toggled pump phase: each Space press starts a
-			cycle; the next Space press stops it (and writes a
-			per-cycle log row). Continue advances when the pump is OFF
-			and the checklist is satisfied.
+		def _run_auto_phase(title, body_text, phase, sub_phase, pump_kind,
+				on_advance, checklist, skip_context,
+				action_label="Continue", note_text=None):
+			"""Auto-cycle pump phase. The operator completes the
+			checklist (or clicks Skip), clicks the action button, and
+			the pump auto-cycles for ``state.purge_time`` seconds with
+			a live countdown. After the auto-cycle, the modal enters
+			the "purge complete" state: Space toggles operator-driven
+			extension cycles, Continue advances to the next phase.
 
-			``pump_kind`` selects which physical pump is expected to be
-			plugged into the relay -- either ``"peristaltic"`` (water /
-			bleach / clear) or ``"syringe"`` (priming). Used only for
-			the relay-claim swap so the status bar's pump indicator
-			tracks the operator-visible pump.
+			Each automatic cycle writes one log.csv row with
+			``extension=0`` (well_id ``purge_{phase}_{N}``); each
+			extension press-on → press-off pair writes its own row
+			with ``extension=M`` (well_id ``..._extM``).
+
+			``pump_kind`` selects which physical pump should be wired
+			into the relay -- ``"peristaltic"`` for water / bleach /
+			clear, ``"syringe"`` for priming. State-machine driven
+			relay-claim swap (no confirmation prompt) so the status-
+			bar pump indicator tracks the operator-visible pump.
 			"""
 			if ctx["cancelled"]:
 				return
 			_claim("purge" if pump_kind == "peristaltic" else "fractionate")
 
-			phase_state = {"total_s": 0.0, "cycle": 0}
+			# ``complete`` flips True the moment _enter_complete_state
+			# runs so the Space-bar handler can gate extensions on it
+			# without inspecting Tk button state.
+			phase_state = {"ext": 0, "total_ext_s": 0.0, "complete": False}
 
-			(dlg, _, pump_lbl, cycle_lbl, total_lbl,
+			(dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
 				action_btn, set_pump_gate) = _build_modal(
-					title, body_text, "Continue", lambda: _on_continue(),
+					title, body_text, action_label,
+					lambda: _start_auto_cycle(),
 					checklist=checklist, skip_context=skip_context,
 					note_text=note_text,
 				)
 
-			def _tick():
-				if ctx["cancelled"] or not ctx["is_pumping"]:
-					ctx["tick_after"] = None
-					return
-				now_s = monotonic() - ctx["cycle_start_mono"]
-				cycle_lbl.config(text=f"This cycle: {now_s:.1f} s")
-				total_lbl.config(
-					text=f"Total pumping: {phase_state['total_s'] + now_s:.1f} s")
-				# Waste-bin auto-shutoff aborted this cycle mid-pump.
-				if self._purge_halted_for_waste:
-					_stop_pump_and_log()
-					pump_lbl.config(text="Pump: OFF (waste bin full)")
-					set_pump_gate(False)
-					return
-				ctx["tick_after"] = self.after(100, _tick)
-
-			def _start_cycle():
-				phase_state["cycle"] += 1
+			def _begin_cycle(extension):
+				"""Common setup for both auto-cycle (extension=0) and
+				operator-driven extension cycles (extension >= 1).
+				Stamps ctx with cycle metadata so _log_current_cycle()
+				and Cancel-mid-pump can recover the right phase + suffix.
+				"""
 				ctx["cycle_phase"] = phase
 				ctx["cycle_sub"] = sub_phase or ""
-				ctx["cycle_count"] = phase_state["cycle"]
+				ctx["cycle_extension"] = extension
 				ctx["cycle_start_mono"] = monotonic()
 				ctx["cycle_start_iso"] = datetime.now().isoformat(
 					timespec="milliseconds")
 				ctx["is_pumping"] = True
 				self.pump_controller.set_relay(True)
 				pump_lbl.config(text="Pump: ON")
-				cycle_lbl.config(text="This cycle: 0.0 s")
-				set_pump_gate(True)
-				_tick()
+				set_pump_gate(True)  # disables Continue while pumping
 
-			def _stop_cycle():
-				# Capture the cycle duration BEFORE _stop_pump_and_log
-				# clears the cycle metadata, so we can update the
-				# Total pumping label correctly.
-				dur = monotonic() - ctx["cycle_start_mono"]
-				_stop_pump_and_log()
-				phase_state["total_s"] += dur
+			def _start_auto_cycle():
+				"""Operator clicked the action button. Hide the setup
+				prompt, kick off the auto-countdown using the current
+				purge_time."""
+				logger.debug(
+					"purge dialog: primary action (%s) fired; phase=%s purge_time=%.1f",
+					action_label, phase, float(s.purge_time))
+				body_lbl.config(text="Pumping...")
+				_begin_cycle(extension=0)
+				cur_pt = max(0.1, float(s.purge_time))
+				ctx["auto_done_at"] = monotonic() + cur_pt
+				_auto_tick(cur_pt)
+
+			def _auto_tick(total_s):
+				if ctx["cancelled"] or not ctx["is_pumping"]:
+					ctx["tick_after"] = None
+					return
+				if self._purge_halted_for_waste:
+					# Waste-bin threshold halted the cycle mid-pump.
+					# Stop the pump, log the partial, and transition
+					# the modal to the SAME complete state the natural
+					# countdown-end would produce -- the waste warning
+					# dialog conveys the waste situation, and the
+					# operator's next moves (Space to extend, Continue
+					# to advance) are the same either way.
+					_stop_pump_now()
+					_enter_complete_state()
+					return
+				remaining = ctx["auto_done_at"] - monotonic()
+				if remaining <= 0:
+					cycle_lbl.config(
+						text=f"Pumping... 0.0 / {total_s:.0f} s remaining")
+					ctx["tick_after"] = None
+					_finish_auto_cycle()
+					return
+				cycle_lbl.config(
+					text=f"Pumping... {remaining:.1f} / {total_s:.0f} s remaining")
+				ctx["tick_after"] = self.after(100, lambda: _auto_tick(total_s))
+
+			def _finish_auto_cycle():
+				"""Clean auto-cycle end. Stop the pump, log the row,
+				transition to the complete-state UI."""
+				_stop_pump_now()
+				_enter_complete_state()
+
+			def _stop_pump_now():
+				"""Common pump-off path. Cancels any pending tick,
+				flips the relay, logs the in-flight cycle."""
+				if ctx["tick_after"] is not None:
+					try:
+						self.after_cancel(ctx["tick_after"])
+					except Exception:
+						pass
+					ctx["tick_after"] = None
+				self.pump_controller.set_relay(False)
+				ctx["is_pumping"] = False
+				_log_current_cycle()
+
+			def _enter_complete_state():
+				# Always the SAME complete-state UI regardless of whether
+				# the cycle ended via natural countdown or a waste-bin
+				# threshold halt. The waste warning dialog (when present)
+				# conveys the waste-bin situation; the purge dialog
+				# stays in its normal post-cycle state.
+				phase_state["complete"] = True
+				cur_pt = float(s.purge_time)
 				pump_lbl.config(text="Pump: OFF")
-				cycle_lbl.config(text="This cycle: 0.0 s")
-				total_lbl.config(
-					text=f"Total pumping: {phase_state['total_s']:.1f} s")
+				cycle_lbl.config(
+					text=f"Auto-cycle complete ({cur_pt:.0f} s).")
+				if phase_state["ext"]:
+					total_lbl.config(text=(
+						f"Extensions: {phase_state['ext']} cycle"
+						f"{'s' if phase_state['ext'] != 1 else ''}, "
+						f"{phase_state['total_ext_s']:.1f} s total."
+					))
+				else:
+					total_lbl.config(text="")
+				body_lbl.config(text=(
+					"Inspect the tubing. Press Space to extend pumping if "
+					"you need more time; click Continue to advance to the "
+					"next phase."
+				))
+				action_btn.config(text="Continue", command=_on_continue)
 				set_pump_gate(False)
+				action_btn.focus_set()
+
+			def _start_extension():
+				phase_state["ext"] += 1
+				_begin_cycle(extension=phase_state["ext"])
+				_extension_tick()
+
+			def _extension_tick():
+				if ctx["cancelled"] or not ctx["is_pumping"]:
+					ctx["tick_after"] = None
+					return
+				if self._purge_halted_for_waste:
+					# Charge the partial extension duration before
+					# _stop_pump_now clears the cycle metadata so the
+					# Total extended counter stays accurate. Same
+					# complete-state transition as a clean Space-toggle
+					# stop -- no special halted-by-waste UI.
+					if ctx["cycle_start_mono"] is not None:
+						phase_state["total_ext_s"] += (
+							monotonic() - ctx["cycle_start_mono"])
+					_stop_pump_now()
+					_enter_complete_state()
+					return
+				cycle_s = monotonic() - ctx["cycle_start_mono"]
+				cycle_lbl.config(
+					text=f"Extending — this cycle: {cycle_s:.1f} s")
+				total_lbl.config(text=(
+					f"Total extended: "
+					f"{phase_state['total_ext_s'] + cycle_s:.1f} s "
+					f"({phase_state['ext']} extension"
+					f"{'s' if phase_state['ext'] != 1 else ''})"
+				))
+				ctx["tick_after"] = self.after(100, _extension_tick)
+
+			def _stop_extension():
+				cycle_s = monotonic() - ctx["cycle_start_mono"]
+				_stop_pump_now()
+				phase_state["total_ext_s"] += cycle_s
+				_enter_complete_state()
 
 			def _on_space(_e=None):
+				logger.debug(
+					"purge dialog: space fired; complete=%s is_pumping=%s",
+					phase_state["complete"], ctx["is_pumping"])
 				if ctx["cancelled"]:
 					return "break"
+				# Space is a no-op until the auto-cycle has completed.
+				# After completion, Space toggles extension cycles.
+				if not phase_state["complete"]:
+					return "break"
 				if ctx["is_pumping"]:
-					_stop_cycle()
+					_stop_extension()
 				else:
-					_start_cycle()
+					_start_extension()
 				return "break"
 
 			def _on_continue(_e=None):
+				logger.debug(
+					"purge dialog: continue fired; is_pumping=%s",
+					ctx["is_pumping"])
 				if ctx["is_pumping"] or ctx["cancelled"]:
 					return
-				# Gate also catches checklist-not-complete; the button
-				# is disabled in that case so this code path only
-				# fires from a legitimate click.
 				try:
 					dlg.unbind("<space>")
 					dlg.unbind("<Return>")
@@ -5899,10 +6728,10 @@ class App(tk.Tk):
 
 			dlg.bind("<space>", _on_space)
 			dlg.bind("<Return>", _on_continue)
-			# action_btn is the Continue button; the space override
-			# prevents the focused button from stealing the toggle.
+			# Override the focused-button Space activation so the
+			# Continue button can't fire its own command when the
+			# operator wants to toggle an extension cycle.
 			action_btn.bind("<space>", _on_space)
-			action_btn.config(command=_on_continue)
 
 		# -- Phase definitions -------------------------------------------
 		protocol = self.purge_protocol
@@ -5910,12 +6739,13 @@ class App(tk.Tk):
 		total = 5 if decon else 3
 
 		def _wash_phase(step_no):
-			_run_toggle_phase(
+			cur_pt = float(s.purge_time)
+			_run_auto_phase(
 				title=f"Inter-sample Purge — Step {step_no} of {total}",
 				body_text=(
-					"Press Space to toggle the peristaltic pump. Pump "
-					"sterile water through the tubing until the line "
-					"reads clean."
+					f"Click Start Purge to run the peristaltic pump for "
+					f"{cur_pt:.0f} s, drawing sterile water through the "
+					"tubing."
 				),
 				phase="wash", sub_phase="", pump_kind="peristaltic",
 				on_advance=_phase_next_after_wash,
@@ -5924,6 +6754,7 @@ class App(tk.Tk):
 					"Placed inlet line in water container",
 				],
 				skip_context=f"purge_phase_{step_no}_{next_series_index}",
+				action_label="Start Purge",
 			)
 
 		def _phase_next_after_wash():
@@ -5933,12 +6764,13 @@ class App(tk.Tk):
 				_clear_phase(step_no=2)
 
 		def _bleach_phase():
-			_run_toggle_phase(
+			cur_pt = float(s.purge_time)
+			_run_auto_phase(
 				title=f"Inter-sample Purge — Step 2 of {total}",
 				body_text=(
-					"Press Space to toggle the peristaltic pump. Pump "
-					"0.5% sodium hypochlorite (bleach) solution through "
-					"the tubing to decontaminate."
+					f"Click Purge to run the peristaltic pump for "
+					f"{cur_pt:.0f} s, pumping 0.5% sodium hypochlorite "
+					"(bleach) solution through the tubing to decontaminate."
 				),
 				phase="bleach", sub_phase="", pump_kind="peristaltic",
 				on_advance=_rinse_phase,
@@ -5952,15 +6784,17 @@ class App(tk.Tk):
 					"Prepare the 0.5% bleach solution fresh on the day "
 					"of use — dilute hypochlorite degrades within 24 hours."
 				),
+				action_label="Purge",
 			)
 
 		def _rinse_phase():
-			_run_toggle_phase(
+			cur_pt = float(s.purge_time)
+			_run_auto_phase(
 				title=f"Inter-sample Purge — Step 3 of {total}",
 				body_text=(
-					"Press Space to toggle the peristaltic pump. Pump "
-					"sterile water through the tubing thoroughly to "
-					"rinse out any residual bleach."
+					f"Click Purge to run the peristaltic pump for "
+					f"{cur_pt:.0f} s, rinsing the tubing with sterile "
+					"water to remove residual bleach."
 				),
 				phase="wash", sub_phase="rinse", pump_kind="peristaltic",
 				on_advance=lambda: _clear_phase(step_no=4),
@@ -5969,14 +6803,17 @@ class App(tk.Tk):
 					"Placed inlet line in sterile water",
 				],
 				skip_context=f"purge_phase_3_{next_series_index}",
+				action_label="Purge",
 			)
 
 		def _clear_phase(step_no):
-			_run_toggle_phase(
+			cur_pt = float(s.purge_time)
+			_run_auto_phase(
 				title=f"Inter-sample Purge — Step {step_no} of {total}",
 				body_text=(
-					"Press Space to toggle the peristaltic pump. Push "
-					"air through the tubing to clear residual liquid."
+					f"Click Purge to run the peristaltic pump for "
+					f"{cur_pt:.0f} s, pushing air through the tubing to "
+					"clear residual liquid."
 				),
 				phase="clear", sub_phase="", pump_kind="peristaltic",
 				on_advance=lambda: _prime_phase(step_no=step_no + 1),
@@ -5985,10 +6822,12 @@ class App(tk.Tk):
 					"Line is in air, nothing dripping",
 				],
 				skip_context=f"purge_phase_{step_no}_{next_series_index}",
+				action_label="Purge",
 			)
 
 		def _prime_phase(step_no):
-			_run_toggle_phase(
+			cur_pt = float(s.purge_time)
+			_run_auto_phase(
 				title=f"Inter-sample Purge — Step {step_no} of {total}",
 				body_text=(
 					"Step "
@@ -5998,12 +6837,13 @@ class App(tk.Tk):
 					"Before resuming fractionation, the fractionation "
 					"fluid must displace this air so the dispense "
 					"pressure is consistent across wells.\n\n"
-					"Press Space to toggle the syringe pump on/off. "
-					"Walk the fluid through the tubing until even "
-					"droplets exit the needle. Click Continue when "
-					"droplet behavior looks consistent."
+					f"Click Refill tubing to run the syringe pump for "
+					f"{cur_pt:.0f} s, walking the fluid through the "
+					"tubing. Press Space to extend if droplets aren't "
+					"yet consistent."
 				),
 				phase="prime", sub_phase="", pump_kind="syringe",
+				action_label="Refill tubing",
 				on_advance=_finish,
 				checklist=[
 					f"Connected inlet line to sample {new_sample_id}'s tube",
@@ -6023,20 +6863,42 @@ class App(tk.Tk):
 		_wash_phase(step_no=1)
 
 	def continue_to_next_plate(self):
-		"""Open the plate-swap dialog. The dialog walks the operator through
-		removing the full plate, optionally homing the needle, placing a new
-		plate, and entering its Plate ID. On Continue, we update state, emit
-		a plate_swap breadcrumb, safety-home if needed, move to A1 of the
-		new plate, and resume whichever phase was active when the plate
-		filled."""
+		"""Two-stage plate-swap workflow:
+
+		  Dialog 1 — cleanup: operator removes / seals / stores the
+		    previous plate and wipes the syringe needle. Needle stays
+		    parked wherever it landed at plate-full (typically the
+		    last well).
+		  Auto-move: needle drives to plate-start coordinates via
+		    ``move_to_positions``. Idempotent if Cancel-then-retry
+		    runs the move a second time (already-at-target → no-op).
+		  Dialog 2 — placement: operator places the new plate so it
+		    aligns with the needle over well A1; enters / accepts the
+		    new Plate ID.
+
+		The ``plate_swap`` log row is written when Dialog 2's Continue
+		is clicked, so the breadcrumb timestamp marks the moment the
+		new plate becomes the active one rather than the cleanup step.
+		"""
 		s = self.state
 		if s.state != "plate_full":
 			return
+		# Dialog 1: cleanup checklist. Returns True on Next; False on Cancel.
+		if not self._show_plate_swap_cleanup_dialog(s.current_plate_id):
+			return
+		# Auto-move to plate-start coords. Synchronous via
+		# move_to_positions; idempotent when the needle is already there.
+		self.set_status("Moving needle to start coords for next plate...")
+		self.update_idletasks()
+		self.move_to_positions(
+			table_dist=s.table_start_cm,
+			carriage_dist=s.carriage_start_cm,
+		)
+		# Dialog 2: placement + Plate ID entry. Returns the validated
+		# new Plate ID on Continue; None on Cancel.
 		suggested = validation.auto_increment_plate_id(s.current_plate_id)
-		new_plate_id = self._show_plate_swap_dialog(s.current_plate_id, suggested)
-		if not new_plate_id:
-			# User cancelled the dialog (clicked "Cancel Run" routes through
-			# end_run() inside the dialog and returns None here).
+		new_plate_id = self._show_plate_swap_placement_dialog(suggested)
+		if new_plate_id is None:
 			return
 		self._commit_plate_swap(new_plate_id)
 
@@ -6323,111 +7185,156 @@ class App(tk.Tk):
 			pass
 		return result["confirmed"]
 
-	def _show_plate_swap_dialog(self, old_plate_id, suggested_new_id):
-		"""Modal Toplevel for the plate-swap flow, presented as a
-		clickable checklist. Continue stays disabled until every box
-		is ticked (and the new Plate ID validates) OR the operator
-		clicks Skip Checklist (Expert), which logs a
-		``checklist_skipped_plate_swap_N`` row and enables Continue.
+	def _show_plate_swap_cleanup_dialog(self, old_plate_id):
+		"""Stage 1 of the plate-swap workflow. Operator-only checklist:
+		remove, seal, store the previous plate + wipe the syringe
+		needle. Returns True on Next, False on Cancel.
 
-		Returns the validated new Plate ID on Continue, or None on
-		Cancel Run. The "Move Needle to Home" checkbox doubles as the
-		button that drives the physical move -- ticking it triggers
-		``carriage_return``. The dialog records whether the home step
-		was taken so the post-swap safety-home can be skipped when
-		redundant.
+		Skip Checklist (Expert) writes a
+		``checklist_skipped_plate_swap_dialog1_{N}`` audit row.
 		"""
-		result = {"plate_id": None, "needle_at_home": False}
-
+		swap_number = self.state.plate_swaps_done + 1
 		dlg = tk.Toplevel(self)
-		dlg.title(f"Plate Swap — {old_plate_id}")
+		dlg.title("Continue to Next Plate — Step 1 of 2")
 		dlg.transient(self)
 		dlg.grab_set()
-		dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # X disabled; force a choice
-
+		dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # X disabled
 		body = tk.Frame(dlg, padx=14, pady=12)
 		body.pack(fill=tk.BOTH, expand=True)
 
-		# Checklist rows. Indices 0..3 correspond to:
-		#   0 removed old plate, 1 moved needle home, 2 placed new plate,
-		#   3 new plate ID entered (auto-checked when validation passes).
-		removed_var = tk.IntVar(value=0)
-		home_var = tk.IntVar(value=0)
+		items = [
+			f"Removed plate {old_plate_id} from stage",
+			f"Sealed plate {old_plate_id} for storage",
+			f"Stored plate {old_plate_id}",
+			"Cleaned syringe needle (wiped with KimWipe or equivalent)",
+		]
+		check_vars = []
+		for i, text in enumerate(items):
+			v = tk.IntVar(value=0)
+			check_vars.append(v)
+			ttk.Checkbutton(body, text=text, variable=v).grid(
+				row=i, column=0, columnspan=3, sticky="w", pady=2)
+
+		bypass = {"skipped": False}
+		result = {"go": False}
+
+		btn_row = tk.Frame(body)
+		btn_row.grid(row=len(items), column=0, columnspan=3, sticky="we",
+			pady=(10, 0))
+		btn_row.grid_columnconfigure(0, weight=1)
+		btn_row.grid_columnconfigure(1, weight=1)
+		btn_row.grid_columnconfigure(2, weight=1)
+
+		def _cancel():
+			dlg.destroy()
+		def _skip():
+			bypass["skipped"] = True
+			next_btn.state(["!disabled"])
+			if self.run_logger is not None:
+				try:
+					self.run_logger.checklist_skipped(
+						f"plate_swap_dialog1_{swap_number}")
+				except Exception as exc:
+					logger.warning(
+						"Failed to log skipped Dialog 1 checklist: %s", exc)
+		def _next():
+			result["go"] = True
+			dlg.destroy()
+
+		ttk.Button(btn_row, text="Cancel", command=_cancel,
+			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
+		ttk.Button(btn_row, text="Skip Checklist (Expert)",
+			command=_skip).grid(row=0, column=1, padx=4)
+		next_btn = ttk.Button(btn_row, text="Next", command=_next,
+			style="Primary.TButton")
+		next_btn.grid(row=0, column=2, sticky="e", padx=4)
+		next_btn.state(["disabled"])
+
+		def _evaluate(*_):
+			if bypass["skipped"]:
+				return
+			if all(v.get() == 1 for v in check_vars):
+				next_btn.state(["!disabled"])
+			else:
+				next_btn.state(["disabled"])
+		for v in check_vars:
+			v.trace_add("write", _evaluate)
+		_evaluate()
+
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+		self.wait_window(dlg)
+		return result["go"]
+
+	def _show_plate_swap_placement_dialog(self, suggested_new_id):
+		"""Stage 2 of the plate-swap workflow. Operator places the new
+		plate (needle is already parked at plate-start coords from the
+		auto-move) and enters / accepts the new Plate ID. Returns the
+		validated Plate ID on Continue, None on Cancel.
+
+		Skip Checklist (Expert) writes a
+		``checklist_skipped_plate_swap_dialog2_{N}`` audit row. Skip
+		bypasses the placement checkboxes but the Plate ID still has
+		to validate before Continue enables.
+		"""
+		swap_number = self.state.plate_swaps_done + 1
+		dlg = tk.Toplevel(self)
+		dlg.title("Continue to Next Plate — Step 2 of 2")
+		dlg.transient(self)
+		dlg.grab_set()
+		dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body, justify="left", anchor="w", wraplength=460, text=(
+			"Needle has returned to start coords. Place the new plate "
+			"on the stage, aligned with the needle over what will be "
+			"its well A1."
+		)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
 		placed_var = tk.IntVar(value=0)
-		plateid_var = tk.IntVar(value=0)
-
-		ttk.Checkbutton(body, variable=removed_var,
-			text=f"Removed previous plate ({old_plate_id}) and stored it",
-		).grid(row=0, column=0, columnspan=2, sticky="w", pady=2)
-
-		def _drive_home():
-			"""Run carriage_return + tick the home checkbox. Idempotent
-			(second click while already home is a no-op move)."""
-			self.carriage_return()
-			result["needle_at_home"] = True
-			home_var.set(1)
-		home_cb = ttk.Checkbutton(body, variable=home_var,
-			text="Moved needle to home")
-		home_cb.grid(row=1, column=0, sticky="w", pady=2)
-		# Ticking the box drives the physical move (instead of leaving the
-		# operator unsure whether they need to also click a button).
-		home_var.trace_add("write", lambda *_: (
-			self.carriage_return() if home_var.get() == 1
-				and not result["needle_at_home"] else None,
-			result.__setitem__("needle_at_home",
-				bool(result["needle_at_home"] or home_var.get() == 1)),
-		))
-
+		secure_var = tk.IntVar(value=0)
 		ttk.Checkbutton(body, variable=placed_var,
 			text="Placed new plate on stage",
+		).grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+		ttk.Checkbutton(body, variable=secure_var,
+			text="Plate is securely positioned",
 		).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
 
-		# Plate-ID entry row. Counted as "checked" the moment the field
-		# holds a value that passes validation.plate_id (the auto-incremented
-		# default already passes, so the box ticks on dialog open).
+		# Plate-ID entry: validates independently of the checklist
+		# (skipping the checklist doesn't bypass Plate ID validation).
 		id_row = tk.Frame(body)
-		id_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=2)
-		id_cb = ttk.Checkbutton(id_row, variable=plateid_var,
-			text="New plate ID:")
-		id_cb.pack(side=tk.LEFT)
-		id_cb.state(["disabled"])  # driven by validation, not user-clickable
-		plate_te = TextEntry(id_row, "")  # label-less, just the entry
+		id_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+		tk.Label(id_row, text="New Plate ID:").pack(side=tk.LEFT)
+		plate_te = TextEntry(id_row, "")
 		plate_te.label.grid_remove()
 		plate_te.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 		plate_te.set(suggested_new_id)
 		tk.Label(body, anchor="w",
 			text=f"   (suggested: {suggested_new_id})", fg="#666",
-		).grid(row=4, column=0, columnspan=2, sticky="we", padx=(20, 0))
+		).grid(row=4, column=0, columnspan=2, sticky="w", padx=(20, 0))
 
-		# Select All / Skip Checklist (Expert) row.
-		bulk_row = tk.Frame(body)
-		bulk_row.grid(row=5, column=0, columnspan=2, sticky="we", pady=(10, 4))
-		def _select_all():
-			removed_var.set(1)
-			if home_var.get() == 0:
-				home_var.set(1)  # also fires the home move via trace
-			placed_var.set(1)
 		bypass = {"skipped": False}
+		result = {"plate_id": None}
+
+		btn_row = tk.Frame(body)
+		btn_row.grid(row=5, column=0, columnspan=2, sticky="we", pady=(10, 0))
+		btn_row.grid_columnconfigure(0, weight=1)
+		btn_row.grid_columnconfigure(1, weight=1)
+		btn_row.grid_columnconfigure(2, weight=1)
+
+		def _cancel():
+			dlg.destroy()
 		def _skip():
 			bypass["skipped"] = True
-			cont_btn.state(["!disabled"])
 			if self.run_logger is not None:
 				try:
 					self.run_logger.checklist_skipped(
-						f"plate_swap_{self.state.plate_swaps_done + 1}")
+						f"plate_swap_dialog2_{swap_number}")
 				except Exception as exc:
 					logger.warning(
-						"Failed to log skipped plate-swap checklist: %s", exc)
-		ttk.Button(bulk_row, text="Select All",
-			command=_select_all).pack(side=tk.LEFT, padx=4)
-		ttk.Button(bulk_row, text="Skip Checklist (Expert)",
-			command=_skip).pack(side=tk.LEFT, padx=4)
-
-		btn_row = tk.Frame(body)
-		btn_row.grid(row=6, column=0, columnspan=2, sticky="we", pady=(8, 0))
-		btn_row.grid_columnconfigure(0, weight=1)
-		btn_row.grid_columnconfigure(1, weight=1)
-
+						"Failed to log skipped Dialog 2 checklist: %s", exc)
+			_evaluate()
 		def _continue():
 			ok, val = validation.plate_id(plate_te.get())
 			if not ok:
@@ -6437,35 +7344,31 @@ class App(tk.Tk):
 			result["plate_id"] = val
 			dlg.destroy()
 
-		def _cancel_run():
-			dlg.destroy()
-			self.end_run()
-
-		ttk.Button(btn_row, text="Cancel Run", command=_cancel_run,
+		ttk.Button(btn_row, text="Cancel", command=_cancel,
 			style="Danger.TButton").grid(row=0, column=0, sticky="w", padx=4)
+		ttk.Button(btn_row, text="Skip Checklist (Expert)",
+			command=_skip).grid(row=0, column=1, padx=4)
 		cont_btn = ttk.Button(btn_row, text="Continue", command=_continue,
 			style="Primary.TButton")
-		cont_btn.grid(row=0, column=1, sticky="e", padx=4)
+		cont_btn.grid(row=0, column=2, sticky="e", padx=4)
 		cont_btn.state(["disabled"])
 
 		def _evaluate(*_):
-			if bypass["skipped"]:
-				return
-			ok, _ = validation.plate_id(plate_te.get())
-			plateid_var.set(1 if ok else 0)
-			all_checked = (removed_var.get() and home_var.get()
-				and placed_var.get() and plateid_var.get())
-			if all_checked:
+			id_ok, _ = validation.plate_id(plate_te.get())
+			boxes_ok = bypass["skipped"] or (
+				placed_var.get() == 1 and secure_var.get() == 1)
+			if id_ok and boxes_ok:
 				cont_btn.state(["!disabled"])
 			else:
 				cont_btn.state(["disabled"])
-		for v in (removed_var, home_var, placed_var):
+		for v in (placed_var, secure_var):
 			v.trace_add("write", _evaluate)
 		plate_te.var.trace_add("write", _evaluate)
 		_evaluate()
 
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
 		self.wait_window(dlg)
-		self._plate_swap_pre_homed = result["needle_at_home"]
 		return result["plate_id"]
 
 	def _commit_plate_swap(self, new_plate_id):
@@ -6486,11 +7389,11 @@ class App(tk.Tk):
 			s.plates_used.append(new_plate_id)
 		s.plate_swaps_done += 1
 
-		# Safety-home if the operator skipped step 2.
-		if not getattr(self, "_plate_swap_pre_homed", False):
-			self.carriage_return()
-
-		# Move to plate A1 (absolute) and reset snake position.
+		# Reset snake position. The auto-move in Dialog 1's Next
+		# already drove the needle to plate-start coords, so the
+		# move_to_positions call here is idempotent (no-op when
+		# already at the target) but kept defensively to guarantee
+		# the physical needle is where the state machine expects.
 		self.move_to_positions(
 			table_dist=s.table_start_cm,
 			carriage_dist=s.carriage_start_cm,

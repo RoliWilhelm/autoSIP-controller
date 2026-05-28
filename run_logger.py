@@ -542,25 +542,25 @@ class RunLogger:
 
 	def purge_committed(self, phase, series_index,
 			waste_x_cm, waste_y_cm, start_iso, end_iso, duration_s,
-			cycle=1, sub_phase=""):
-		"""Append a ``status="purge_{phase}"`` row marking one operator-
-		toggled pump cycle within an inter-sample purge phase.
+			extension=0, sub_phase=""):
+		"""Append a ``status="purge_{phase}"`` row marking one pump cycle
+		within an inter-sample purge phase.
 
 		``phase`` is one of ``"wash"``, ``"clear"``, ``"bleach"``,
 		``"prime"``. ``series_index`` is the 1-based index of the NEW
-		sample series. ``cycle`` is the 1-based cycle number within
-		this phase (each Space-toggle press-on → press-off pair writes
-		its own row, so a phase the operator toggled three times
-		produces ``cycle=1, 2, 3``). ``sub_phase`` (default empty) is
-		an optional suffix like ``"rinse"`` for the post-bleach water
-		flush in the decontamination protocol, inserted between the
-		series index and the cycle suffix.
+		sample series. ``extension`` is 0 for the automatic cycle
+		driven by ``state.purge_time`` and 1+ for each operator-
+		triggered Space-bar extension cycle within the same phase.
+		``sub_phase`` (default empty) is an optional suffix like
+		``"rinse"`` for the post-bleach water flush in the
+		decontamination protocol, inserted between the series index
+		and the extension suffix.
 
 		Resulting ``well_id``:
-		  - ``purge_{phase}_{series}``                  (cycle 1, no sub)
-		  - ``purge_{phase}_{series}_cycle{N}``         (cycle ≥ 2)
-		  - ``purge_{phase}_{series}_{sub}``            (cycle 1, sub)
-		  - ``purge_{phase}_{series}_{sub}_cycle{N}``   (cycle ≥ 2, sub)
+		  - ``purge_{phase}_{series}``                  (auto, no sub)
+		  - ``purge_{phase}_{series}_ext{N}``           (extension N ≥ 1)
+		  - ``purge_{phase}_{series}_{sub}``            (auto, sub)
+		  - ``purge_{phase}_{series}_{sub}_ext{N}``     (ext N, sub)
 		"""
 		if self.run_dir is None:
 			return
@@ -571,8 +571,8 @@ class RunLogger:
 		well_id = f"{status}_{series_index}"
 		if sub_phase:
 			well_id += f"_{sub_phase}"
-		if cycle > 1:
-			well_id += f"_cycle{cycle}"
+		if extension > 0:
+			well_id += f"_ext{extension}"
 		rid = self._get_current_run_id()
 		self._write_row([
 			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
@@ -588,6 +588,46 @@ class RunLogger:
 	# Run UI was removed in a later pass; this method is kept as dead
 	# code in case a future caller wants a status="emergency_stopped"
 	# purge row.)
+
+	def prime_auto(self, target_x_cm, target_y_cm,
+			start_iso, end_iso, duration_s):
+		"""Append a ``status="prime_auto"`` row marking the automatic
+		pre-fractionation prime cycle. Fires once at the start of a
+		run before the first dispense. ``target_x_cm`` / ``target_y_cm``
+		are written into the plate_x / plate_y columns so a CSV reader
+		can see where the primed solution was directed (waste bin or
+		plate A1).
+		"""
+		if self.run_dir is None:
+			return
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			"prime_auto",
+			_fmt_coord(target_x_cm), _fmt_coord(target_y_cm),
+			start_iso, end_iso, f"{duration_s:.3f}", "prime_auto",
+		])
+		self._status_counts["prime_auto"] = (
+			self._status_counts.get("prime_auto", 0) + 1)
+
+	def prime_manual_ext(self, extension_idx,
+			target_x_cm, target_y_cm,
+			start_iso, end_iso, duration_s):
+		"""Append a ``status="prime_manual_ext"`` row for one operator-
+		Space-toggle cycle of the manual prime step. ``extension_idx``
+		is 1-based; well_id is ``prime_manual_ext{N}``."""
+		if self.run_dir is None:
+			return
+		rid = self._get_current_run_id()
+		well_id = f"prime_manual_ext{extension_idx}"
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			well_id,
+			_fmt_coord(target_x_cm), _fmt_coord(target_y_cm),
+			start_iso, end_iso, f"{duration_s:.3f}", "prime_manual_ext",
+		])
+		self._status_counts["prime_manual_ext"] = (
+			self._status_counts.get("prime_manual_ext", 0) + 1)
 
 	def checklist_skipped(self, context_id):
 		"""Append a status="checklist_skipped" row marking a pre-flight
@@ -779,11 +819,14 @@ class RunLogger:
 					seconds, cycles = p[phase]
 					if cycles == 0:
 						continue
-					cycle_note = (
-						f" ({cycles} cycle{'s' if cycles != 1 else ''})"
-						if cycles > 1 else ""
+					# cycles counts auto (1) + extensions; report
+					# extensions separately for clarity.
+					extensions = max(0, cycles - 1)
+					ext_note = (
+						f" ({extensions} extension{'s' if extensions != 1 else ''})"
+						if extensions else ""
 					)
-					parts.append(f"{seconds:.1f} s {phase}{cycle_note}")
+					parts.append(f"{seconds:.1f} s {phase}{ext_note}")
 				if not parts:
 					continue
 				out.append(
@@ -1026,19 +1069,19 @@ class RunLogger:
 		sample_id.
 
 		``well_id`` parsing:
-		  purge_{phase}_{N}                  → phase, series N, cycle 1
-		  purge_{phase}_{N}_cycle{M}         → phase, series N, cycle M
-		  purge_wash_{N}_rinse(_cycle{M})    → rinse (decontamination),
-		                                       cycle M (default 1)
+		  purge_{phase}_{N}                  → phase, series N, auto cycle
+		  purge_{phase}_{N}_ext{M}           → phase, series N, extension M
+		  purge_wash_{N}_rinse(_ext{M})      → rinse (decontamination),
+		                                       auto + optional extension M
 		"""
 		csv_path = self.run_dir / "log.csv"
 		if not csv_path.exists():
 			return []
 		# Two patterns: the rinse sub-phase (post-bleach water flush) and
 		# the regular per-phase row.
-		rinse_re = re.compile(r"^purge_wash_(\d+)_rinse(?:_cycle(\d+))?$")
+		rinse_re = re.compile(r"^purge_wash_(\d+)_rinse(?:_ext(\d+))?$")
 		phase_re = re.compile(
-			r"^purge_(wash|clear|bleach|prime)_(\d+)(?:_cycle(\d+))?$"
+			r"^purge_(wash|clear|bleach|prime)_(\d+)(?:_ext(\d+))?$"
 		)
 		last_completed_sid = ""
 		pending = {}

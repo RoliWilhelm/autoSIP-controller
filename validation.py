@@ -45,6 +45,7 @@ DRIP_WAIT_MIN, DRIP_WAIT_MAX = 0.0, 60.0
 # disabled purge; upper bound 10 min is a generous ceiling that catches
 # unit-confusion typos.
 PURGE_TIME_MIN, PURGE_TIME_MAX = 1.0, 600.0
+PRIME_TIME_MIN, PRIME_TIME_MAX = 0.0, 600.0
 
 # Peristaltic pump rate, mL/min. Adafruit 3910 nominal ~100 mL/min; bound
 # leaves room for slower flow restrictors below it and faster pumps above.
@@ -144,6 +145,16 @@ def purge_time(text):
 	``[PURGE_TIME_MIN, PURGE_TIME_MAX]``. The same duration is used for
 	the wash and air-clear phases."""
 	return _parse_float(text, "Purge time", PURGE_TIME_MIN, PURGE_TIME_MAX,
+		unit="s")
+
+
+def prime_time(text):
+	"""Validate the pre-fractionation prime time (s): float in
+	``[PRIME_TIME_MIN, PRIME_TIME_MAX]``. The auto-prime step at the
+	start of a run walks fractionation solution from the sample tube
+	toward the syringe dispenser for this many seconds while the
+	needle moves to its first-dispense position."""
+	return _parse_float(text, "Prime time", PRIME_TIME_MIN, PRIME_TIME_MAX,
 		unit="s")
 
 
