@@ -1,0 +1,104 @@
+Mid-pause recalibration workflow — findings against current code
+================================================================
+Reviewed on 2026-05-29.
+
+Files inspected:
+  - main.py
+      App.return_to_origin                 (lines 4365-4399)
+      App.toggle_pause Resume branch       (lines 5443-5471)
+      App._show_calibration_confirm_dialog (lines 5678-5733)
+      AutomatedFrame.return_origin_btn     (line 1089)
+      ManualFrame.home_btn / _home_clicked (lines 2046, 2426)
+      FractionatorState.origin_returned_during_pause docstring (lines 714-720)
+  - docs/operation_instructions.md (existing description for cross-check)
+
+
+(a) Does the workflow exist as described?
+-----------------------------------------
+YES, with one precision: the position-capture only happens on the FIRST
+Return-to-Origin click within a given pause. Subsequent clicks during the
+same pause re-drive to (0, 0) and re-tare but do NOT overwrite the captured
+reference (gate at main.py:4381 — `if s.is_paused and not
+s.origin_returned_during_pause`). This means an operator who re-parks
+imperfectly and clicks Return-to-Origin again will still land on the
+ORIGINAL paused-position reference on Resume.
+
+Workflow as observed in code (chronological):
+  1. State machine reaches a phase that can be paused (pump / wait / move
+     / discard).
+  2. Operator clicks Pause. `state.is_paused = True`.
+  3. Operator clicks Return to Origin.
+     - First click in this pause: captures
+         state.paused_table_cm    = current table motor angle × cm/deg
+         state.paused_carriage_cm = current carriage motor angle × cm/deg
+       and sets state.origin_returned_during_pause = True.
+     - Then drives both motors to (0, 0) cm and tares the angle counters,
+       so (0, 0) cm now corresponds to wherever the carriage was when the
+       move command was issued.
+  4. (Optional) Operator physically re-parks the carriage against the
+     orientation-appropriate mechanical-limit corner to true-up against
+     stepper drift.
+  5. Operator clicks Resume.
+
+
+(b) Precise trigger point for the calibration dialog
+----------------------------------------------------
+The dialog opens AFTER Resume, AFTER the motors have driven back to the
+captured paused position — NOT immediately when Return to Origin is
+clicked.
+
+Exact sequence inside App.toggle_pause's Resume branch (main.py:5448):
+  1. Resume-branch entry: detects state.origin_returned_during_pause.
+  2. Status update: "Returning to paused position…".
+  3. move_to_positions(table_dist=state.paused_table_cm,
+                       carriage_dist=state.paused_carriage_cm,
+                       is_transit=True)
+     — synchronous, blocks the GUI until the carriage physically lands.
+  4. THEN calls _show_calibration_confirm_dialog(paused_x_cm,
+     paused_y_cm). The dialog is grab_set() modal and waits.
+  5. On Confirm: clears state.origin_returned_during_pause, sets status
+     "Fractionation in progress...", resumes the elapsed clock, drops a
+     resume-breadcrumb row in log.csv (collect phase), and re-arms the
+     state machine from the previous (state.state) of pump / wait / move.
+  6. On Cancel: state.is_paused is re-set to True, status reads
+     "Calibration not confirmed. Run remains paused.", and the run
+     remains paused. The capture flag stays True so the operator can
+     re-park and click Resume again to retry.
+
+Implication for the manuscript: the dialog DOES NOT appear at the moment
+of the Return-to-Origin click. The operator has time between click and
+Resume to manually re-park; the dialog is the "I'm back at the paused
+position — confirm calibration before I dispense the next well" check.
+
+
+(c) Dialog's CURRENT title
+--------------------------
+Hard-coded at main.py:5685 as the string "Confirm Calibration".
+The manuscript's reference is accurate for the version inspected.
+
+This is being renamed to "Origin Calibration" per task (2) of this
+review; the rename touches main.py:5685, the docstring at main.py:5678,
+the comment at main.py:4372, the comment at main.py:5445, and the doc
+references in docs/operation_instructions.md and README.md.
+
+After the rename the manuscript should read "Origin Calibration".
+
+
+(d) Button name
+---------------
+The button is "Return to Origin" in BOTH frames. No "Return to Home"
+string exists anywhere in main.py (grep -E 'Return to Home' returns no
+matches).
+
+  - AutomatedFrame (main.py:1089):
+        self.return_origin_btn = ttk.Button(ctrl, text="Return to Origin", ...)
+  - ManualFrame    (main.py:2046):
+        self.home_btn = primary_button(jog, text="Return to Origin",
+            command=self._home_clicked)
+
+Note for code-reading clarity: the Manual-mode instance attribute is
+named `home_btn` (and its handler `_home_clicked`) for historical
+reasons, but the user-facing button label is "Return to Origin". The
+two frames' buttons are functionally equivalent — both go through
+App.return_to_origin / App.carriage_return, which performs the same
+move-to-(0,0) + tare operation.

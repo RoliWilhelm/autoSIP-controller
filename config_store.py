@@ -30,7 +30,7 @@ FIELDS = (
 	"number_of_fractions", "discard_fractions",
 	"prime_time",
 	"rows", "cols", "well_size", "pump_rate", "drip_wait_time",
-	"purge_time", "soak_time",
+	"purge_time",
 	"peristaltic_rate", "max_waste_volume",
 	"volume_per_well",
 	"table_start", "carriage_start",
@@ -342,6 +342,169 @@ def save_purge_protocol(protocol):
 	if not isinstance(existing, dict):
 		existing = {}
 	existing["purge_protocol"] = protocol
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
+# -- notification_config (separate file) -------------------------------
+
+# Notifications live in their own file (NOT config.json) because the
+# ntfy topic is sensitive: anyone who knows it can read the operator's
+# push stream. Kept out of git via .gitignore, and intentionally not
+# included in saved profiles so a shared profile doesn't leak the
+# topic.
+
+_NOTIFICATION_DEFAULTS = {
+	"audible_enabled": False,
+	"ntfy_enabled": False,
+	"ntfy_server": "ntfy.sh",
+	"ntfy_topic": "",
+}
+
+
+def get_notification_config_path():
+	return _CONFIG_DIR / "notification_config.json"
+
+
+def load_notification_config():
+	"""Return the notification config dict, filling unset keys from
+	defaults. Returns a fresh dict on every call so callers can mutate
+	freely without poisoning the defaults."""
+	out = dict(_NOTIFICATION_DEFAULTS)
+	path = get_notification_config_path()
+	if not path.exists():
+		return out
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return out
+	if not isinstance(data, dict):
+		return out
+	# Audible / ntfy enable flags coerced to bool so a malformed value
+	# can't disable the on-screen dialog or anything else upstream.
+	out["audible_enabled"] = bool(data.get("audible_enabled", False))
+	out["ntfy_enabled"] = bool(data.get("ntfy_enabled", False))
+	server = data.get("ntfy_server")
+	if isinstance(server, str) and server.strip():
+		out["ntfy_server"] = server.strip()
+	topic = data.get("ntfy_topic")
+	if isinstance(topic, str):
+		# Empty string is a valid "no topic" state — preserve it.
+		out["ntfy_topic"] = topic.strip()
+	return out
+
+
+def save_notification_config(values):
+	"""Persist the notification config to its dedicated file. Only
+	known keys are written so an upstream caller can't smuggle
+	arbitrary state into the file."""
+	if not isinstance(values, dict):
+		return
+	payload = {
+		"audible_enabled": bool(values.get("audible_enabled", False)),
+		"ntfy_enabled": bool(values.get("ntfy_enabled", False)),
+		"ntfy_server": str(values.get("ntfy_server") or "ntfy.sh"),
+		"ntfy_topic": str(values.get("ntfy_topic") or ""),
+	}
+	path = get_notification_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	with open(path, "w") as f:
+		json.dump(payload, f, indent=2)
+
+
+# -- motor_speed_mode / transit_speed_factor ---------------------------
+
+# Top-level preferences governing stepper motor speed. ``"slow"`` (the
+# default) drives every move at the fractionation step delay so
+# droplets don't fling from the syringe during transit. ``"variable"``
+# keeps fractionation (well-to-well) moves slow but speeds up transit
+# moves (to/from waste bin, return to origin, plate swaps) by the
+# configured factor.
+
+def load_motor_speed_mode():
+	"""Return ``"slow"`` or ``"variable"``. Defaults to ``"slow"`` so
+	a fresh launch — and any existing config from before this feature —
+	preserves the original behavior with no surprises."""
+	path = get_config_path()
+	if not path.exists():
+		return "slow"
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return "slow"
+	if not isinstance(data, dict):
+		return "slow"
+	val = data.get("motor_speed_mode")
+	return val if val in ("slow", "variable") else "slow"
+
+
+def save_motor_speed_mode(mode):
+	"""Persist the motor speed mode to config.json. Preserves other
+	top-level keys. Silently ignores unknown values."""
+	if mode not in ("slow", "variable"):
+		return
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["motor_speed_mode"] = mode
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
+def load_transit_speed_factor():
+	"""Return the persisted transit speed factor. Defaults to ``2.0``.
+	Clamped to the validation bounds on read so a malformed config
+	can't drive the motors at absurd rates."""
+	path = get_config_path()
+	if not path.exists():
+		return 2.0
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return 2.0
+	if not isinstance(data, dict):
+		return 2.0
+	raw = data.get("transit_speed_factor")
+	try:
+		val = float(raw)
+	except (TypeError, ValueError):
+		return 2.0
+	# Defensive clamp; mirrors validation.TRANSIT_SPEED_FACTOR_{MIN,MAX}
+	# without depending on it at import time.
+	return max(1.0, min(5.0, val))
+
+
+def save_transit_speed_factor(factor):
+	"""Persist the transit speed factor to config.json. Preserves
+	other top-level keys."""
+	try:
+		val = float(factor)
+	except (TypeError, ValueError):
+		return
+	val = max(1.0, min(5.0, val))
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["transit_speed_factor"] = val
 	with open(path, "w") as f:
 		json.dump(existing, f, indent=2)
 

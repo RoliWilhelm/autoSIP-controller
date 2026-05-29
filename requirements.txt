@@ -6,3 +6,9 @@
 adafruit-circuitpython-motorkit>=1.6,<1.7
 adafruit-circuitpython-motor>=3.4,<3.5
 gpiozero>=2.0,<2.1
+
+# Optional notification dispatch. Used for the ntfy.sh push channel
+# under Tools → Preferences → Notifications. autoSIP runs without
+# this — if requests isn't installed the ntfy channel logs once and
+# degrades to a no-op while audible notifications keep working.
+requests>=2.28,<3.0

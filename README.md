@@ -110,7 +110,7 @@ Two button names cover the same action in different places:
   software's tracked angle counters. In Automated mode it's also
   the mid-run recalibration entry point — clicking it while paused
   captures the current motor position so Resume can drive back
-  there and pop a Confirm Calibration dialog.
+  there and pop an Origin Calibration dialog.
 - **Return to Start Well** (Automated mode only) moves the needle
   to the plate-start coordinates — well **A1** of the plate — *not*
   to origin. Enabled only while idle; disabled mid-run.
@@ -256,7 +256,7 @@ needle to origin on exit*.
   software counters. Same action as Manual mode's Return to Origin
   button (the two are redundant by design). Also works mid-pause:
   clicking it captures the current position so the matching Resume
-  can drive the needle back and pop a Confirm Calibration dialog.
+  can drive the needle back and pop an Origin Calibration dialog.
   Used to recover from stepper-motor drift without aborting the run.
 - **Return to Start Well** — moves the needle to the plate-start
   coordinates (well A1) entered in Plate Parameters. Enabled only
@@ -359,10 +359,13 @@ maintenance:
   (bleach fill → soak → water rinse 1 → water rinse 2). More
   stringent than the inter-sample purge: the bleach is held
   static in the line for a configurable soak period before
-  rinsing. Use at session start, end of session, or during a
-  paused automated run. System Clean does not prime with sample
-  solution — that step belongs to the pre-fractionation prime
-  workflow or the inter-sample purge's final phase.
+  rinsing. The soak duration is entered at runtime in the
+  Phase 1 (Bleach Fill) dialog — default 5 minutes (range 0–30),
+  not persisted between invocations. Use at session start, end of
+  session, or during a paused automated run. System Clean does not
+  prime with sample solution — that step belongs to the
+  pre-fractionation prime workflow or the inter-sample purge's
+  final phase.
 
 A typical cleaning cycle is: switch to Cleaning mode, click
 **Move to Waste Bin**, click **Purge**, run the pump until the

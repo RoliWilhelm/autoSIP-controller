@@ -181,7 +181,7 @@ The *Skip inter-sample purge* behavioral preference moved to **Tools
   Return to Origin button (the two are redundant by design). Also
   works while a run is paused: the first click in a pause captures
   the current motor position so the matching Resume can drive the
-  needle back and pop a Confirm Calibration dialog. This is the
+  needle back and pop an Origin Calibration dialog. This is the
   mid-run recalibration entry point (see §6.3.6).
 - **Return to Start Well** — moves the needle to the plate-start
   (well A1) coordinates from Plate Parameters. Enabled only while
@@ -299,7 +299,11 @@ for flushing the fluid path between sample types.
 - **System Clean** — runs an on-demand four-phase decontamination
   routine (bleach fill → soak → water rinse 1 → water rinse 2). More
   stringent than the inter-sample purge: the bleach is held static in
-  the line for a configurable soak period before rinsing. Use at
+  the line for a configurable soak period before rinsing. The soak
+  duration is entered at runtime in the Phase 1 (Bleach Fill) dialog
+  — default 5 minutes (range 0-30); each invocation resets the field
+  to 5, so the value never carries over between System Clean runs and
+  no soak-time parameter is persisted in Cleaning Parameters. Use at
   session start or during a paused automated run; the button is
   disabled only during active (non-paused) dispensing. System Clean
   intentionally stops after the second water rinse — priming with
@@ -693,7 +697,7 @@ what files they produce.
 | Button                      | Available when                                                                 | Effect                                                                                                          | Resumable?                                                       | What it writes to `log.csv` / disk                                                                |
 | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | **Pause** / **Resume**      | During a run (pump, wait, or move phase)                                       | Cancels the in-flight `after()` task; pump relay off; motors hold position. Claim stays held.                   | Yes — click the same button (label becomes **Resume**)           | One `resume` breadcrumb row on Resume, if currently in the collection phase                       |
-| **Return to Origin** (mid-pause) | While the run is paused                                                   | Moves motors to `(0, 0)` and tares the counters; captures the paused position on the first click. Used for mid-run recalibration against stepper drift (§6.3.6). | Yes — on Resume, the application moves the needle back to the captured position and shows a Confirm Calibration dialog. | No row in `log.csv`. |
+| **Return to Origin** (mid-pause) | While the run is paused                                                   | Moves motors to `(0, 0)` and tares the counters; captures the paused position on the first click. Used for mid-run recalibration against stepper drift (§6.3.6). | Yes — on Resume, the application moves the needle back to the captured position and shows an Origin Calibration dialog. | No row in `log.csv`. |
 | **Continue to Next Sample** | After auto-pause at "Total reached"                                            | Starts a new series: increments series_index, runs the discard phase, then collects at the next available well. | Continues the run                                                | `resume` breadcrumb row                                                                           |
 | **Continue to Next Plate**  | After auto-pause at "Plate full"                                               | Opens the plate-swap dialog. After Continue, moves the carriage to A1 of the new plate and resumes.             | Continues the run after the dialog                               | `plate_swap` breadcrumb row                                                                       |
 | **End Run**                 | Any active run state (running, paused, total reached, plate full)              | Three-button prompt (Cancel / Don't Save / Save and End); pump off; motors released; visuals reset; FractionatorState counters zeroed. | Cancel stays in the run; Save and End / Don't Save terminate it. | On **Save and End**: `end_{ts}.json`, `summary_{ts}.md`, `summary_{plate_id}_{ts}.md`. On **Don't Save**: none.  |
@@ -705,7 +709,7 @@ When to use each:
   picks up at exactly the same point.
 - **Stepper drift suspected mid-run**: **Pause** → **Return to
   Origin** → manually re-park the carriage → **Resume** →
-  **Confirm Calibration**. See §6.3.6 for the full walkthrough.
+  **Origin Calibration**. See §6.3.6 for the full walkthrough.
 - **End-of-tube — swap source tubes**: **Continue to Next Sample**.
   autoSIP fires this auto-pause on its own when the per-sample
   fraction target is reached; update Sample ID and click Continue.
@@ -789,7 +793,7 @@ in landscape, bottom-left in portrait).
 
 4. **Click Resume.** The application drives the needle from the
    freshly-calibrated origin to the position captured in step 2,
-   then opens a **Confirm Calibration** modal showing the captured
+   then opens an **Origin Calibration** modal showing the captured
    coordinates and asking you to verify the needle is correctly
    positioned over the expected well.
 

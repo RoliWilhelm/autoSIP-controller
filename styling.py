@@ -302,6 +302,41 @@ def primary_button(parent, **kwargs):
 	return ttk.Button(parent, **kwargs)
 
 
+def bind_dynamic_wraplength(label, parent, padding=20, min_wraplength=100):
+	"""Re-set ``label``'s ``wraplength`` whenever ``parent`` resizes so
+	multi-line description text fills the available horizontal space
+	instead of leaving large whitespace gaps on the right.
+
+	Tkinter has no edge-aligned justification — the result is
+	left-aligned with a clean right edge, and ragged-right wrapping.
+	The label still benefits from a manual ``justify="left"`` on the
+	caller side so multi-line text doesn't center.
+
+	``padding`` accounts for the parent's internal padx/border so the
+	text doesn't crowd the LabelFrame edge. ``min_wraplength`` is the
+	floor — below this the text could become unreadable column
+	fragments. ``add="+"`` is used on the bind so existing
+	``<Configure>`` handlers on ``parent`` keep firing.
+
+	Stability note: when the wraplength changes the label's REQUIRED
+	width shrinks/grows, which can re-trigger ``<Configure>``. We
+	short-circuit if the new wraplength matches the current value so
+	the callback doesn't churn or feedback-loop.
+	"""
+
+	def _resize(event):
+		new_wraplength = max(min_wraplength, int(event.width) - padding)
+		try:
+			current = int(label.cget("wraplength"))
+		except (TypeError, ValueError):
+			current = 0
+		if new_wraplength == current:
+			return
+		label.config(wraplength=new_wraplength)
+
+	parent.bind("<Configure>", _resize, add="+")
+
+
 def make_centrifuge_tube_canvas(parent, size=36, bg=None, tube_color=None):
 	"""Render a 45-deg-rotated ultracentrifuge tube silhouette in a small
 	``tk.Canvas``. Used as the icon next to the Begin Fractionation
@@ -424,4 +459,127 @@ def make_bimodal_distribution_canvas(parent, width=64, height=40, bg=None,
 
 	canvas.create_line(*curve_a, fill=primary_color, width=2, smooth=True)
 	canvas.create_line(*curve_b, fill=secondary_color, width=2, smooth=True)
+	return canvas
+
+
+def make_mop_canvas(parent, size=60, bg=None,
+		handle_color="#8B7355", head_color="#F5DEB3"):
+	"""Render a simplified mop icon: a thin vertical handle with a
+	fanned-strand head at the base. Used as the left-flank decoration
+	on Cleaning Mode's System Clean header so the header reads as a
+	"cleaning ritual" at a glance.
+
+	``handle_color`` defaults to a warm wood-brown; ``head_color`` to
+	a cream. Both are overridable so a future theme can swap palettes.
+	``bg`` should match the surrounding frame so the canvas blends in
+	(defaults to the standard frame background).
+	"""
+	if bg is None:
+		bg = PALETTE["bg_frame"]
+	canvas = tk.Canvas(parent, width=size, height=size, bg=bg,
+		highlightthickness=0, bd=0)
+
+	cx = size / 2.0
+	# Handle: thin rectangle from near the top down to the head pivot,
+	# roughly two-thirds of the canvas height. 3 px (scaled by size /
+	# 60 so the icon looks consistent at non-default sizes).
+	handle_w = max(2, int(round(size * (3.0 / 60.0))))
+	handle_top = size * 0.10
+	handle_bot = size * 0.65
+	canvas.create_rectangle(
+		cx - handle_w / 2.0, handle_top,
+		cx + handle_w / 2.0, handle_bot,
+		fill=handle_color, outline=handle_color,
+	)
+
+	# Mop head: a fan of short angled strands radiating from the
+	# handle base. Drawn as individual lines so the silhouette reads
+	# as "strands" not as a polygon blob.
+	strand_top = handle_bot
+	strand_bot = size * 0.94
+	# Spread strands over a ±20° fan from vertical. Lower strands flare
+	# wider so the head has a triangular shape.
+	import math as _math
+	n_strands = 9
+	for i in range(n_strands):
+		# Angle from straight-down (positive = right). Fan from -22°
+		# to +22° in equal steps.
+		angle_deg = -22.0 + (i * (44.0 / (n_strands - 1)))
+		theta = _math.radians(angle_deg)
+		# Length tapers — outer strands shorter so the head has a
+		# slightly rounded bottom.
+		length_frac = 1.0 - 0.15 * (abs(angle_deg) / 22.0)
+		length = (strand_bot - strand_top) * length_frac
+		x0, y0 = cx, strand_top
+		x1 = cx + length * _math.sin(theta)
+		y1 = strand_top + length * _math.cos(theta)
+		canvas.create_line(x0, y0, x1, y1,
+			fill=head_color, width=max(2, int(round(size * (2.5 / 60.0)))),
+			capstyle=tk.ROUND)
+	# A small triangle filling the upper part of the head gives the
+	# strands a unified "cap" so they read as one mop, not nine
+	# loose lines.
+	cap_h = (strand_bot - strand_top) * 0.18
+	canvas.create_polygon(
+		cx - size * 0.10, strand_top,
+		cx + size * 0.10, strand_top,
+		cx + size * 0.06, strand_top + cap_h,
+		cx - size * 0.06, strand_top + cap_h,
+		fill=head_color, outline=head_color,
+	)
+	return canvas
+
+
+def make_bucket_canvas(parent, size=60, bg=None,
+		body_color="#A8A8A8", outline_color="#5A5A5A",
+		rim_color="#C8C8C8"):
+	"""Render a simplified bucket icon: trapezoidal silver body, dark
+	handle arc, and a thin top-rim ellipse for a hint of depth.
+
+	Used as the right-flank decoration on Cleaning Mode's System
+	Clean header to balance the mop on the left.
+	"""
+	if bg is None:
+		bg = PALETTE["bg_frame"]
+	canvas = tk.Canvas(parent, width=size, height=size, bg=bg,
+		highlightthickness=0, bd=0)
+
+	# Body trapezoid. Top-wider, bottom-narrower. Coords are picked so
+	# the icon sits visually centered with a little space above for
+	# the handle arc and a touch of padding at the bottom.
+	top_y = size * 0.34
+	bot_y = size * 0.88
+	top_half = size * 0.32        # half-width at top
+	bot_half = size * 0.24        # half-width at bottom (narrower)
+	cx = size / 2.0
+	canvas.create_polygon(
+		cx - top_half, top_y,
+		cx + top_half, top_y,
+		cx + bot_half, bot_y,
+		cx - bot_half, bot_y,
+		fill=body_color, outline=outline_color, width=2,
+	)
+	# Top rim ellipse — flatter than the body opening to suggest the
+	# viewer is looking slightly down into the bucket. A thin lighter
+	# stroke gives the rim a chrome highlight.
+	rim_h = size * 0.10
+	canvas.create_oval(
+		cx - top_half, top_y - rim_h / 2.0,
+		cx + top_half, top_y + rim_h / 2.0,
+		fill=rim_color, outline=outline_color, width=1,
+	)
+	# Handle arc — semi-circular bow above the rim, with the chord
+	# spanning roughly the rim's width and bowing up about a third of
+	# the canvas. ``create_arc`` with style=ARC draws just the curve.
+	arc_w = top_half * 1.7
+	arc_h = size * 0.40
+	arc_left = cx - arc_w / 2.0
+	arc_top = top_y - arc_h
+	arc_right = cx + arc_w / 2.0
+	arc_bot = top_y + arc_h * 0.10  # tuck slightly below the rim line
+	canvas.create_arc(
+		arc_left, arc_top, arc_right, arc_bot,
+		start=0, extent=180,
+		style=tk.ARC, outline=outline_color, width=2,
+	)
 	return canvas

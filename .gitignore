@@ -30,3 +30,9 @@ logs/
 # Stray-output guards (harmless if absent).
 runs/
 config.json
+
+# Notification config holds the ntfy topic — anyone who knows the topic can
+# read the operator's push stream, so the file must not be committed even
+# if a stray copy ever lands in the repo. Per-user file lives under
+# ~/.autosip/notification_config.json.
+notification_config.json

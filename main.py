@@ -20,13 +20,14 @@ import styling
 import validation
 import config_store
 from styling import (
-	FONTS, PALETTE, apply_style,
-	make_bimodal_distribution_canvas,
-	make_centrifuge_tube_canvas, primary_button,
+	FONTS, PALETTE, apply_style, bind_dynamic_wraplength,
+	make_bimodal_distribution_canvas, make_bucket_canvas,
+	make_centrifuge_tube_canvas, make_mop_canvas, primary_button,
 )
 from well_plate import WellPlateProgress, format_snapshot_log
 import run_logger
 from run_logger import RunLogger, _fmt_hms
+import notifications
 
 # GitHub URL displayed (clickable) in the About dialog. Hard-coded here so
 # the About dialog has a single source of truth.
@@ -217,6 +218,11 @@ class StepperMotor:
 	so the same class works against real hardware or mocks.
 	"""
 
+	# Default inter-microstep sleep in seconds — slow enough that a drop
+	# at the syringe tip stays put during transit. App can override via
+	# ``configure_speeds``.
+	DEFAULT_STEP_DELAY_S = 0.0001
+
 	def __init__(self, motor, steps_per_degree, lead_screw_pitch, reverse=False, name=None):
 		# Backend stepper object (real kit.stepperN or a mock from hardware.py)
 		self.motor = motor
@@ -232,6 +238,17 @@ class StepperMotor:
 		# Direction the needle is moving during fractionation
 		self.forwards = True
 
+		# Step-rate configuration. ``fractionation_step_delay`` is the
+		# slow per-microstep sleep used for well-to-well dispensing
+		# moves (and for every move when ``variable_speed_enabled`` is
+		# False). ``transit_step_delay`` is the fast value used when
+		# variable mode is enabled AND the caller passes ``is_transit=True``.
+		# App pushes the active values via ``configure_speeds`` at init
+		# and again whenever the operator changes Tools → Preferences.
+		self.fractionation_step_delay = self.DEFAULT_STEP_DELAY_S
+		self.transit_step_delay = self.DEFAULT_STEP_DELAY_S
+		self.variable_speed_enabled = False
+
 	def get_angle(self):
 		"""Return the current shaft angle in degrees (unbounded)."""
 		return self.angle
@@ -244,8 +261,35 @@ class StepperMotor:
 		"""Release the motor coils to prevent overheating."""
 		self.motor.release()
 
-	def move_relative(self, angle):
+	def configure_speeds(self, *, fractionation_step_delay,
+			transit_step_delay, variable_speed_enabled):
+		"""Push the active step-rate configuration into the motor.
+		Called by App at init and whenever the operator changes the
+		motor-speed preference. ``variable_speed_enabled=False`` means
+		every move uses ``fractionation_step_delay`` regardless of the
+		per-call ``is_transit`` flag — i.e. Slow speed mode."""
+		self.fractionation_step_delay = max(0.0, float(fractionation_step_delay))
+		self.transit_step_delay = max(0.0, float(transit_step_delay))
+		self.variable_speed_enabled = bool(variable_speed_enabled)
+
+	def _step_delay_for(self, is_transit):
+		"""Return the inter-microstep sleep for this move. Variable
+		mode + transit flag → fast delay; otherwise the slow
+		fractionation delay."""
+		if self.variable_speed_enabled and is_transit:
+			return self.transit_step_delay
+		return self.fractionation_step_delay
+
+	def move_relative(self, angle, *, is_transit=False):
 		"""Turn the shaft so the slider moves by ``angle`` degrees' worth.
+
+		``is_transit`` selects the per-microstep delay: in Variable
+		speed mode, transit moves (to/from waste bin, return to
+		origin, plate swaps, manual jogs) get the faster
+		``transit_step_delay``; well-to-well fractionation moves
+		stay on the slower ``fractionation_step_delay`` so syringe
+		droplets don't fling. In Slow speed mode (default) the flag
+		is ignored — every move uses the slow delay.
 
 		On a direction reversal, the motor must first rotate through the
 		lead-screw nut's mechanical play (backlash) before the slider
@@ -292,9 +336,10 @@ class StepperMotor:
 			self.name, angle, abs(total_steps), intent_steps, extra_steps, direction,
 		)
 
+		step_delay = self._step_delay_for(is_transit)
 		for _ in range(0, abs(total_steps)):
 			self.motor.onestep(direction=direction, style=hardware.MICROSTEP)
-			sleep(0.0001)
+			sleep(step_delay)
 
 		# Only the intent portion advanced the slider; the backlash portion
 		# took up gear play. Accumulate intent_steps so self.angle stays in
@@ -303,20 +348,24 @@ class StepperMotor:
 
 		self.release()
 
-	def move_absolute(self, angle):
+	def move_absolute(self, angle, *, is_transit=False):
 		"""Turn the shaft to ``angle`` degrees relative to its initial position."""
 		delta_angle = angle - self.angle
-		self.move_relative(delta_angle)
+		self.move_relative(delta_angle, is_transit=is_transit)
 
-	def move_dist_relative(self, dist):
-		"""Move the slider ``dist`` cm relative to its current position."""
-		logger.debug("%s move_dist_relative dist=%.3f cm", self.name, dist)
-		self.move_relative(dist / self.cm_per_deg)
+	def move_dist_relative(self, dist, *, is_transit=False):
+		"""Move the slider ``dist`` cm relative to its current position.
+		``is_transit`` selects the inter-step delay (see ``move_relative``)."""
+		logger.debug("%s move_dist_relative dist=%.3f cm transit=%s",
+			self.name, dist, is_transit)
+		self.move_relative(dist / self.cm_per_deg, is_transit=is_transit)
 
-	def move_dist_absolute(self, dist):
-		"""Move the slider to ``dist`` cm from its initial position."""
-		logger.debug("%s move_dist_absolute dist=%.3f cm", self.name, dist)
-		self.move_absolute(dist / self.cm_per_deg)
+	def move_dist_absolute(self, dist, *, is_transit=False):
+		"""Move the slider to ``dist`` cm from its initial position.
+		``is_transit`` selects the inter-step delay (see ``move_relative``)."""
+		logger.debug("%s move_dist_absolute dist=%.3f cm transit=%s",
+			self.name, dist, is_transit)
+		self.move_absolute(dist / self.cm_per_deg, is_transit=is_transit)
 
 
 class Tooltip:
@@ -636,10 +685,6 @@ class FractionatorState:
 	# runs for this many seconds between samples. Bypassed when
 	# skip_intersample_purge is True.
 	purge_time: float = 30.0
-	# Bleach soak time (minutes) for the on-demand System Clean routine.
-	# Live value — mid-routine edits don't apply to an in-flight soak,
-	# but the next System Clean starts with the current value.
-	soak_time_min: float = 5.0
 	skip_intersample_purge: bool = False
 	# Peristaltic-pump flow rate (mL/min) for purge-claim pumping (Manual
 	# Purge, Cleaning Purge, Purge Time Calibration, inter-sample purges).
@@ -670,7 +715,7 @@ class FractionatorState:
 	# flips True the first time the operator clicks Return to Origin
 	# during the current pause; on the matching Resume, the run drives
 	# the needle back to (paused_table_cm, paused_carriage_cm) and pops
-	# a Confirm Calibration dialog. Cleared on Resume-confirm, End Run,
+	# an Origin Calibration dialog. Cleared on Resume-confirm, End Run,
 	# Continue to Next Sample, and Continue to Next Plate.
 	origin_returned_during_pause: bool = False
 	paused_table_cm: float = 0.0
@@ -1109,9 +1154,10 @@ class AutomatedFrame(tk.Frame):
 		self.bulk_status_var = tk.StringVar(
 			value="Status: No bulk submission active."
 		)
-		tk.Label(bulk, textvariable=self.bulk_status_var, anchor="w",
-			justify="left", wraplength=380,
-		).grid(row=0, column=0, sticky="we")
+		bulk_status_lbl = tk.Label(bulk, textvariable=self.bulk_status_var,
+			anchor="w", justify="left", wraplength=380)
+		bulk_status_lbl.grid(row=0, column=0, sticky="we")
+		bind_dynamic_wraplength(bulk_status_lbl, bulk)
 		self.bulk_source_var = tk.StringVar(value="")
 		# Source-path line is gridded into row 1 only when bulk is
 		# active; bulk_source_lbl.grid_remove() hides it cleanly.
@@ -1119,6 +1165,7 @@ class AutomatedFrame(tk.Frame):
 			anchor="w", justify="left", wraplength=380, fg=PALETTE["fg_muted"])
 		self.bulk_source_lbl.grid(row=1, column=0, sticky="we")
 		self.bulk_source_lbl.grid_remove()
+		bind_dynamic_wraplength(self.bulk_source_lbl, bulk)
 		bulk_btn_row = tk.Frame(bulk, bg=PALETTE["bg_frame"])
 		bulk_btn_row.grid(row=2, column=0, sticky="w", pady=(4, 0))
 		self.bulk_template_btn = ttk.Button(
@@ -1376,22 +1423,15 @@ class AutomatedFrame(tk.Frame):
 			"many seconds. Use Cleaning mode's Purge Time Calibration to "
 			"measure the right value for your tubing.",
 		)
-		self.soak_time_te = TextEntry(
-			cleaning_params, "Bleach soak time (min):",
-			textvariable=app.soak_time_var,
-		)
-		self.soak_time_te.grid(row=1, column=0, sticky="we")
-		Tooltip(
-			self.soak_time_te.entry,
-			"Duration the bleach sits in the line during a System "
-			"Clean before rinsing. 5 min is standard for nucleic-acid "
-			"decontamination.",
-		)
+		# Bleach soak time was removed from Cleaning Parameters and is
+		# now collected per invocation in the System Clean Phase 1
+		# dialog (each run defaults to 5 min, range 0-30, captured
+		# at click time and discarded after Phase 2 finishes).
 		self.peristaltic_rate_te = TextEntry(
 			cleaning_params, "Peristaltic pump rate (mL/min):",
 			textvariable=app.peristaltic_rate_var,
 		)
-		self.peristaltic_rate_te.grid(row=2, column=0, sticky="we")
+		self.peristaltic_rate_te.grid(row=1, column=0, sticky="we")
 		Tooltip(
 			self.peristaltic_rate_te.entry,
 			"Flow rate of the peristaltic pump used for purges. Drives "
@@ -1402,7 +1442,7 @@ class AutomatedFrame(tk.Frame):
 			cleaning_params, "Max waste bin volume (mL):",
 			textvariable=app.max_waste_volume_var,
 		)
-		self.max_waste_te.grid(row=3, column=0, sticky="we")
+		self.max_waste_te.grid(row=2, column=0, sticky="we")
 		Tooltip(
 			self.max_waste_te.entry,
 			"Capacity of your waste container. autoSIP warns at 80% and "
@@ -1498,7 +1538,6 @@ class AutomatedFrame(tk.Frame):
 			"pump_rate": self.pump_rate_text_entry,
 			"drip_wait_time": self.drip_wait_te,
 			"purge_time": self.purge_time_te,
-			"soak_time": self.soak_time_te,
 			"peristaltic_rate": self.peristaltic_rate_te,
 			"max_waste_volume": self.max_waste_te,
 			"volume_per_well": self.vol_text_entry,
@@ -1655,7 +1694,6 @@ class AutomatedFrame(tk.Frame):
 			self.n_fractions_te, self.discard_te,
 			self.rows_text_entry, self.cols_text_entry, self.ws_text_entry,
 			self.pump_rate_text_entry, self.drip_wait_te, self.purge_time_te,
-			self.soak_time_te,
 			self.peristaltic_rate_te, self.max_waste_te,
 			self.vol_text_entry,
 			self.table_te, self.carriage_te,
@@ -1787,7 +1825,6 @@ class AutomatedFrame(tk.Frame):
 			(self.pump_rate_text_entry, validation.pump_rate),
 			(self.drip_wait_te, validation.drip_wait_time),
 			(self.purge_time_te, validation.purge_time),
-			(self.soak_time_te, validation.soak_time),
 			(self.peristaltic_rate_te, validation.peristaltic_rate),
 			(self.max_waste_te, validation.max_waste_volume),
 			(self.prime_time_te, validation.prime_time),
@@ -1808,7 +1845,7 @@ class AutomatedFrame(tk.Frame):
 		if not errors:
 			(project_v, sample_v, plate_v, n_v, d_v, vol_v,
 				rows_v, cols_v, ws_v, table_v, carriage_v, rate_v,
-				drip_v, purge_v, soak_v, peri_v, max_waste_v, prime_v) = parsed
+				drip_v, purge_v, peri_v, max_waste_v, prime_v) = parsed
 			capacity = rows_v * cols_v
 
 			# N must fit on the plate
@@ -1900,7 +1937,6 @@ class AutomatedFrame(tk.Frame):
 			table_start=table_v, carriage_start=carriage_v,
 			drip_wait_time=drip_v,
 			purge_time=purge_v,
-			soak_time_min=soak_v,
 			prime_time_s=prime_v,
 			skip_intersample_purge=self.app.skip_intersample_purge_var.get(),
 			peristaltic_rate_ml_per_min=peri_v,
@@ -2132,11 +2168,14 @@ class ManualFrame(tk.Frame):
 		cal.grid(row=3, column=0, sticky="new", padx=(4, 2), pady=(0, 4))
 		cal.grid_columnconfigure(0, weight=1)
 
-		tk.Label(cal, anchor="w", justify="left", wraplength=320, text=(
-			"Use the jog controls above to position the needle, then click "
-			"the corresponding button to save the current position as a "
-			"parameter used by Automated mode."
-		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+		pos_cal_desc = tk.Label(cal, anchor="w", justify="left",
+			wraplength=320, text=(
+				"Use the jog controls above to position the needle, then "
+				"click the corresponding button to save the current "
+				"position as a parameter used by Automated mode."
+			))
+		pos_cal_desc.grid(row=0, column=0, sticky="we", pady=(0, 6))
+		bind_dynamic_wraplength(pos_cal_desc, cal)
 
 		tk.Label(cal, anchor="w", justify="left",
 			text="1. Position the needle over well A1 of your plate.",
@@ -2181,12 +2220,15 @@ class ManualFrame(tk.Frame):
 		prime_cal.grid(row=3, column=1, sticky="new", padx=(2, 4), pady=(0, 4))
 		prime_cal.grid_columnconfigure(0, weight=1)
 
-		tk.Label(prime_cal, anchor="w", justify="left", wraplength=320, text=(
-			"Connect a sample tube, click Start, and watch the line as "
-			"solution walks toward the dispenser. Click Stop when the "
-			"solution reaches ~5 cm below the needle. Save to apply as "
-			"Prime time in Run Parameters."
-		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+		prime_cal_desc = tk.Label(prime_cal, anchor="w", justify="left",
+			wraplength=320, text=(
+				"Connect a sample tube, click Start, and watch the line "
+				"as solution walks toward the dispenser. Click Stop when "
+				"the solution reaches ~5 cm below the needle. Save to "
+				"apply as Prime time in Run Parameters."
+			))
+		prime_cal_desc.grid(row=0, column=0, sticky="we", pady=(0, 6))
+		bind_dynamic_wraplength(prime_cal_desc, prime_cal)
 
 		self._prime_cal_elapsed_var = tk.StringVar(value="Elapsed: 0.0 s")
 		tk.Label(prime_cal, textvariable=self._prime_cal_elapsed_var,
@@ -2374,7 +2416,11 @@ class ManualFrame(tk.Frame):
 			self.app.set_status(f"{label} at soft limit: {hi:.1f} cm")
 			return
 
-		motor.move_dist_relative(step_cm)
+		# Manual jogs are transit moves — operator is positioning the
+		# needle, not dispensing fluid mid-pump. Variable speed mode
+		# speeds them up; Slow mode keeps them at the fractionation
+		# cadence (variable_speed_enabled gates the choice).
+		motor.move_dist_relative(step_cm, is_transit=True)
 		self.refresh_position_readout()
 
 	def _home_clicked(self):
@@ -2564,13 +2610,17 @@ class CleaningFrame(tk.Frame):
 		super().__init__(master)
 		self.app = app
 
-		# Two-column grid with equal weights so the Waste bin and
-		# System Clean panels at row 1 split the available width.
+		# Two-column grid with equal weights so the Waste bin and the
+		# Purge Time Calibration Tool split width evenly on row 1,
+		# and so the Move/Purge buttons below them stay aligned with
+		# their respective panels.
 		self.grid_columnconfigure(0, weight=1)
 		self.grid_columnconfigure(1, weight=1)
 
-		# Run-active banner: gridded only while an Automated run is in
-		# flight. Spans both columns and sits above all controls.
+		# Run-active banner: gridded only while an Automated run is
+		# in flight. Spans both columns and sits at the very top so
+		# the operator's eye lands on the warning before the locked
+		# controls below.
 		self.run_active_banner = tk.Label(
 			self, anchor="w", justify="left", wraplength=540,
 			bg="#fff3cd", fg="#7a5d00",
@@ -2585,12 +2635,13 @@ class CleaningFrame(tk.Frame):
 			sticky="we", padx=2, pady=(2, 0))
 		self.run_active_banner.grid_remove()
 
-		# Waste-bin coords -- bound to the same App-level StringVars as
-		# Automated mode's Waste bin entries, so an edit in either mode
-		# propagates automatically. Sits in column 0 of row 1, paired
-		# with the System Clean panel in column 1.
+		# Waste-bin coords -- bound to the same App-level StringVars
+		# as Automated mode's Waste bin entries, so an edit in either
+		# mode propagates automatically. Row 1 col 0, paired with the
+		# Purge Time Calibration Tool in col 1; both sticky=nsew so
+		# the row's height tracks the taller panel.
 		bin_frame = tk.LabelFrame(self, text="Waste bin", padx=8, pady=4)
-		bin_frame.grid(row=1, column=0, sticky="new",
+		bin_frame.grid(row=1, column=0, sticky="nsew",
 			padx=(2, 2), pady=(2, 4))
 		bin_frame.grid_columnconfigure(0, weight=1)
 		self.waste_table_te = TextEntry(
@@ -2614,90 +2665,113 @@ class CleaningFrame(tk.Frame):
 			"Edits propagate in both directions.",
 		)
 
-		# System Clean: on-demand 4-phase decontamination routine
-		# (bleach fill → soak → water rinse ×2). Sits in column 1 of
-		# row 1 alongside the Waste bin panel. Runnable both from idle
-		# and during an operator-paused automated run; the button
-		# gates itself off only during ACTIVE (non-paused) runs.
-		sysclean_frame = tk.LabelFrame(self, text="System Clean",
-			padx=8, pady=4)
-		sysclean_frame.grid(row=1, column=1, sticky="new",
+		# Purge Time Calibration sub-panel. Measures how long wash
+		# takes to fully replace one tubing-volume so the operator
+		# can save the result as Automated mode's Purge time
+		# parameter. Row 1 col 1, paired with the Waste bin panel in
+		# col 0; same sticky=nsew so they share a row height.
+		cal = tk.LabelFrame(self, text="Purge Time Calibration Tool",
+			padx=8, pady=6)
+		cal.grid(row=1, column=1, sticky="nsew",
 			padx=(2, 2), pady=(2, 4))
-		sysclean_frame.grid_columnconfigure(0, weight=1)
-		tk.Label(
-			sysclean_frame, justify="left", anchor="w", wraplength=260,
-			text=(
-				"Four-phase decontamination: bleach fill → soak → "
-				"water rinse ×2. Use at session start or during a "
-				"paused run."
-			),
-			fg=PALETTE["fg_muted"],
-		).grid(row=0, column=0, sticky="we", pady=(0, 6))
-		self.sysclean_btn = primary_button(
-			sysclean_frame, text="System Clean",
-			command=self.system_clean_clicked,
-		)
-		self.sysclean_btn.grid(row=1, column=0, sticky="we")
-		Tooltip(
-			self.sysclean_btn,
-			"Four-phase decontamination: pump bleach, soak, then "
-			"double water rinse. Use at session start or during a "
-			"paused run for a stringent line clean. Priming with "
-			"sample is a separate workflow (inter-sample purge or "
-			"pre-fractionation prime).",
-		)
+		cal.grid_columnconfigure(0, weight=1)
 
+		purge_cal_desc = tk.Label(cal, anchor="w", justify="left",
+			wraplength=280, text=(
+				"Measure how long it takes wash solution to flow through "
+				"your tubing setup. The result can be saved as the Purge "
+				"time parameter used by Automated mode.\n"
+				"  1. Place the inlet line in your wash solution container.\n"
+				"  2. Click Start. The pump runs and a timer begins.\n"
+				"  3. Watch the outlet. Click Stop the moment wash first "
+				"appears at the outlet — this represents one full tubing volume."
+			))
+		purge_cal_desc.grid(row=0, column=0, sticky="we", pady=(0, 6))
+		bind_dynamic_wraplength(purge_cal_desc, cal)
+
+		# Move to Waste Bin + Purge side-by-side on row 2. The Move
+		# button stays vertically aligned with the Waste bin panel
+		# above it (col 0); the Purge button lands beneath the
+		# Calibration Tool (col 1) so the operator's eye reads
+		# Calibrate → run a Purge in one downward sweep.
 		self.move_btn = primary_button(
 			self, text="Move to Waste Bin", command=self.move_clicked,
 		)
-		self.move_btn.grid(row=2, column=0, columnspan=2, sticky="we", padx=2, pady=2)
+		self.move_btn.grid(row=2, column=0, sticky="we", padx=2, pady=2)
 		Tooltip(
 			self.move_btn,
 			"Drive the needle to the Waste bin coordinates above so "
 			"you can flush wash through the tubing into the bin.",
 		)
-		# Purge button + Space-shortcut hint. The hint sits next to the
-		# button (column 1 of the wrap frame) so the operator sees at a
-		# glance that Space toggles Purge in Cleaning mode. Lives inside
-		# CleaningFrame, so it's automatically hidden when the frame is
-		# grid_remove'd on a mode switch.
-		purge_wrap = tk.Frame(self)
-		purge_wrap.grid(row=3, column=0, columnspan=2, sticky="we", padx=2, pady=2)
-		purge_wrap.grid_columnconfigure(0, weight=1)
+		# Purge button. The (Space) hint was removed for visual
+		# cleanliness; the Space-bar shortcut still toggles Purge in
+		# Cleaning mode via the App-level key binding.
 		self.purge_btn = ttk.Button(
-			purge_wrap, text="Purge: OFF",
+			self, text="Purge: OFF",
 			command=lambda: app._handle_pump_click("purge", parent=self),
 			style="PumpOff.TButton", cursor="hand2",
 		)
-		self.purge_btn.grid(row=0, column=0, sticky="we")
+		self.purge_btn.grid(row=2, column=1, sticky="we", padx=2, pady=2)
 		Tooltip(
 			self.purge_btn,
 			"Toggle the peristaltic pump for a free-form cleaning purge. "
 			"Watch the tubing and click again to stop when the line "
 			"reads clean. Space-bar shortcut active in this mode.",
 		)
-		self.purge_space_lbl = tk.Label(
-			purge_wrap, text="(Space)", fg="gray40",
+
+		# Live elapsed-time readout for the manual Purge. Driven by
+		# the pump-state callback in ``refresh_pump_buttons`` — works
+		# whether Purge was toggled by the button or the Space key.
+		# Sits below the Move/Purge row in its own row, full width,
+		# so the operator's eye drops naturally from the Purge button
+		# to its timing readout.
+		self.purge_time_lbl = tk.Label(
+			self, text="Purge time: 0.0 s",
+			fg="gray40", anchor="center",
 		)
-		self.purge_space_lbl.grid(row=0, column=1, padx=(4, 0))
+		self.purge_time_lbl.grid(row=3, column=0, columnspan=2,
+			sticky="we", pady=(2, 4))
 
-		# Purge Time Calibration sub-panel. Measures how long wash takes
-		# to fully replace one tubing-volume so the operator can save the
-		# resulting value as Automated mode's Purge time parameter.
-		cal = tk.LabelFrame(self, text="Purge Time Calibration Tool",
-			padx=8, pady=6)
-		cal.grid(row=4, column=0, columnspan=2, sticky="we", padx=2, pady=(8, 2))
-		cal.grid_columnconfigure(0, weight=1)
+		# Purge-timer bookkeeping. ``_purge_was_on`` tracks the last
+		# observed relay-on state so refresh_pump_buttons fires the
+		# start / freeze transitions exactly once per ON→OFF cycle.
+		self._purge_timer_start_mono = None
+		self._purge_timer_after = None
+		self._purge_was_on = False
 
-		tk.Label(cal, anchor="w", justify="left", wraplength=540, text=(
-			"Measure how long it takes wash solution to flow through your "
-			"tubing setup. The result can be saved as the Purge time "
-			"parameter used by Automated mode.\n"
-			"  1. Place the inlet line in your wash solution container.\n"
-			"  2. Click Start. The pump runs and a timer begins.\n"
-			"  3. Watch the outlet. Click Stop the moment wash first "
-			"appears at the outlet — this represents one full tubing volume."
-		)).grid(row=0, column=0, sticky="we", pady=(0, 6))
+		# ---- System Clean header (prominent pink button + icons) ----
+		# Row 4 at the bottom: a centered three-widget trio — mop on
+		# the left, the pink "System Clean" button in the middle,
+		# bucket on the right. The trio is wrapped in a header frame
+		# whose own row is sticky="" so the whole group sits centered
+		# horizontally, growing left/right uniformly on resize.
+		sysclean_header = tk.Frame(self)
+		sysclean_header.grid(row=4, column=0, columnspan=2,
+			sticky="", padx=2, pady=(8, 4))
+		self.sysclean_mop_canvas = make_mop_canvas(sysclean_header, size=60)
+		self.sysclean_mop_canvas.grid(row=0, column=0, padx=(0, 10))
+		# tk.Button (not ttk) so we can directly drive bg / activebg
+		# / font / padx / pady — the role here is one-off prominent
+		# header, not the standard role-styled buttons.
+		self.sysclean_btn = tk.Button(
+			sysclean_header, text="System Clean",
+			command=self.system_clean_clicked,
+			bg="#FFB6C1", activebackground="#FF91A4",
+			fg="#3D1F2D", activeforeground="#3D1F2D",
+			font=(FONTS["family"], FONTS["size"] + 4, "bold"),
+			padx=20, pady=12, bd=1, cursor="hand2",
+			relief="solid",
+		)
+		self.sysclean_btn.grid(row=0, column=1)
+		Tooltip(
+			self.sysclean_btn,
+			"Four-phase decontamination: pump bleach, soak, then "
+			"double water rinse. Use at session start or during a "
+			"paused run for a stringent line clean.",
+		)
+		self.sysclean_bucket_canvas = make_bucket_canvas(
+			sysclean_header, size=60)
+		self.sysclean_bucket_canvas.grid(row=0, column=2, padx=(10, 0))
 
 		self._cal_elapsed_var = tk.StringVar(value="Elapsed: 0.0 s")
 		tk.Label(cal, textvariable=self._cal_elapsed_var,
@@ -2870,6 +2944,67 @@ class CleaningFrame(tk.Frame):
 	def refresh_pump_buttons(self, claimant, relay_on, in_run):
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
 		self._refresh_sysclean_gate()
+		self._sync_purge_timer(claimant, relay_on)
+
+	def _sync_purge_timer(self, claimant, relay_on):
+		"""Start / freeze the manual-Purge elapsed-time readout based
+		on the pump-state callback. Fires on every PumpController
+		transition; uses ``_purge_was_on`` to detect ON→OFF / OFF→ON
+		edges so the start anchor and tick are managed exactly once.
+
+		The label tracks ALL ``"purge"``-claim relay-ons regardless of
+		whether they were triggered from Cleaning Mode or Manual
+		Mode — both routes flow through the same PumpController, and
+		the operator wants a single readout for "how long the
+		peristaltic pump has been running". Fractionate-claim
+		activity is ignored.
+		"""
+		purge_now_on = (claimant == "purge" and bool(relay_on))
+		if purge_now_on and not self._purge_was_on:
+			# OFF → ON: reset and start ticking.
+			self._purge_timer_start_mono = monotonic()
+			self.purge_time_lbl.config(
+				text="Purge time: 0.0 s", fg="#1e7d20")
+			self._schedule_purge_tick()
+		elif self._purge_was_on and not purge_now_on:
+			# ON → OFF: cancel the tick and freeze the label at the
+			# final elapsed value (computed from the captured anchor
+			# rather than the just-cancelled tick so we don't truncate
+			# a few hundred milliseconds).
+			self._cancel_purge_tick()
+			if self._purge_timer_start_mono is not None:
+				final_s = monotonic() - self._purge_timer_start_mono
+				self.purge_time_lbl.config(
+					text=f"Purge time: {final_s:.1f} s",
+					fg="gray40",
+				)
+			self._purge_timer_start_mono = None
+		self._purge_was_on = purge_now_on
+
+	def _schedule_purge_tick(self):
+		if self._purge_timer_after is not None:
+			return
+		self._purge_timer_after = self.after(100, self._purge_tick)
+
+	def _cancel_purge_tick(self):
+		if self._purge_timer_after is not None:
+			try:
+				self.after_cancel(self._purge_timer_after)
+			except Exception:
+				pass
+			self._purge_timer_after = None
+
+	def _purge_tick(self):
+		"""100 ms tick that updates the live elapsed-time label.
+		Guarded by ``_purge_timer_start_mono`` so a late tick after
+		``_cancel_purge_tick`` is a no-op."""
+		self._purge_timer_after = None
+		if self._purge_timer_start_mono is None:
+			return
+		elapsed = monotonic() - self._purge_timer_start_mono
+		self.purge_time_lbl.config(
+			text=f"Purge time: {elapsed:.1f} s")
+		self._purge_timer_after = self.after(100, self._purge_tick)
 
 	def _refresh_sysclean_gate(self):
 		"""Enable System Clean when no automated run is active OR the
@@ -2938,7 +3073,8 @@ class CleaningFrame(tk.Frame):
 			return
 		if t_val is None and c_val is None:
 			return
-		self.app.move_to_positions(table_dist=t_val, carriage_dist=c_val)
+		self.app.move_to_positions(table_dist=t_val, carriage_dist=c_val,
+			is_transit=True)
 
 
 class App(tk.Tk):
@@ -3026,6 +3162,30 @@ class App(tk.Tk):
 		self.plate_orientation = config_store.load_plate_orientation()
 		self._apply_plate_orientation_to_motors()
 
+		# Stepper motor speed mode. ``"slow"`` (default) drives every
+		# move at the fractionation cadence so droplets don't fling
+		# from the syringe during transit; ``"variable"`` keeps
+		# well-to-well dispense moves slow but speeds up transit
+		# moves (waste bin approach, return to origin, plate swaps,
+		# manual jogs) by ``transit_speed_factor``. Both prefs are
+		# top-level in config.json; consulted by every motor call via
+		# ``StepperMotor._step_delay_for`` and the per-call
+		# ``is_transit`` flag.
+		self.motor_speed_mode = config_store.load_motor_speed_mode()
+		self.transit_speed_factor = config_store.load_transit_speed_factor()
+		self._apply_motor_speed_to_motors()
+
+		# Optional supplementary notifications (ntfy push + local
+		# beep). The on-screen dialog at every intervention point
+		# remains the source of truth; these calls are async, time-
+		# limited, and never raise into the caller. Config lives in
+		# its own file so the ntfy topic doesn't leak through
+		# shared profiles.
+		self.notification_config = config_store.load_notification_config()
+		self.notifications = notifications.NotificationManager(
+			config_provider=lambda: self.notification_config,
+		)
+
 		# Bulk Sample Submission. Operator imports a CSV of sample
 		# metadata before clicking Begin Fractionation. Each entry of
 		# ``bulk_samples`` is a dict with keys:
@@ -3068,10 +3228,6 @@ class App(tk.Tk):
 		self.skip_intersample_purge_var = tk.BooleanVar(
 			value=config_store.load_skip_intersample_purge()
 		)
-		# Bleach soak time in minutes. Read by Cleaning Mode's System
-		# Clean routine when the operator launches it. Default 5 min
-		# matches the standard nucleic-acid decontamination soak.
-		self.soak_time_var = tk.StringVar(value="5")
 		# Peristaltic pump rate (mL/min) used by all purge-claim waste
 		# tracking. Live value -- mid-run edits affect subsequent waste
 		# calculations.
@@ -3301,6 +3457,143 @@ class App(tk.Tk):
 			font=(FONTS["family"], FONTS["size"], "italic"),
 		).pack(anchor="w", padx=(16, 0), pady=(2, 12))
 
+		# Motor speed mode.
+		tk.Label(body, text="Motor speed mode:", anchor="w",
+			).pack(anchor="w", pady=(0, 2))
+		speed_var = tk.StringVar(value=self.motor_speed_mode)
+		tk.Radiobutton(body, variable=speed_var, value="slow",
+			text="Slow speed (default — all moves at fractionation speed)",
+		).pack(anchor="w", padx=(16, 0))
+		tk.Radiobutton(body, variable=speed_var, value="variable",
+			text="Variable speed (transit moves faster than fractionation)",
+		).pack(anchor="w", padx=(16, 0))
+		tk.Label(body,
+			text=(
+				"Slow speed drives all moves at the fractionation "
+				"speed to prevent droplets from being flung from the "
+				"syringe. Variable speed keeps well-to-well "
+				"fractionation slow but speeds up transit moves "
+				"(to/from the waste bin, return to origin, plate "
+				"swaps)."
+			),
+			justify="left", anchor="w", wraplength=420,
+			fg=PALETTE["fg_muted"],
+			font=(FONTS["family"], FONTS["size"], "italic"),
+		).pack(anchor="w", padx=(16, 0), pady=(2, 6))
+
+		# Transit speed factor — only meaningful when Variable speed
+		# is selected. The entry stays visible but is disabled in Slow
+		# mode so the operator still sees the configured value.
+		factor_row = tk.Frame(body)
+		factor_row.pack(anchor="w", padx=(16, 0), pady=(0, 2), fill=tk.X)
+		tk.Label(factor_row, text="Transit speed factor (×):",
+			).pack(side=tk.LEFT)
+		factor_var = tk.StringVar(value=f"{self.transit_speed_factor:.1f}")
+		factor_entry = ttk.Entry(factor_row, textvariable=factor_var, width=8)
+		factor_entry.pack(side=tk.LEFT, padx=(8, 0))
+		factor_err_lbl = tk.Label(body, text="", fg="red", anchor="w",
+			wraplength=420)
+		factor_err_lbl.pack(anchor="w", padx=(16, 0))
+		tk.Label(body,
+			text=(
+				"Default 2.0. Increase cautiously and verify the "
+				"carriage still reaches target positions without "
+				"stalling or missed steps."
+			),
+			justify="left", anchor="w", wraplength=420,
+			fg=PALETTE["fg_muted"],
+			font=(FONTS["family"], FONTS["size"], "italic"),
+		).pack(anchor="w", padx=(16, 0), pady=(2, 12))
+
+		def _sync_factor_state(*_):
+			if speed_var.get() == "variable":
+				factor_entry.state(["!disabled"])
+			else:
+				factor_entry.state(["disabled"])
+		speed_var.trace_add("write", _sync_factor_state)
+		_sync_factor_state()
+
+		# Notifications section. Optional, supplementary to the
+		# on-screen dialogs. ntfy push needs a topic; if absent or
+		# blank the channel is silently skipped at send time.
+		tk.Label(body, text="Notifications:", anchor="w",
+			).pack(anchor="w", pady=(0, 2))
+		ncfg = dict(self.notification_config or {})
+		audible_var = tk.BooleanVar(value=bool(ncfg.get("audible_enabled")))
+		tk.Checkbutton(body, variable=audible_var,
+			text="Audible alert on manual-intervention prompts",
+		).pack(anchor="w", padx=(16, 0))
+		ntfy_var = tk.BooleanVar(value=bool(ncfg.get("ntfy_enabled")))
+		tk.Checkbutton(body, variable=ntfy_var,
+			text="ntfy push notifications",
+		).pack(anchor="w", padx=(16, 0), pady=(0, 2))
+
+		ntfy_fields = tk.Frame(body)
+		ntfy_fields.pack(anchor="w", padx=(32, 0), fill=tk.X)
+		ntfy_fields.grid_columnconfigure(1, weight=1)
+		tk.Label(ntfy_fields, text="Server:", anchor="w").grid(
+			row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+		server_var = tk.StringVar(value=ncfg.get("ntfy_server") or "ntfy.sh")
+		ntfy_server_entry = ttk.Entry(ntfy_fields, textvariable=server_var,
+			width=24)
+		ntfy_server_entry.grid(row=0, column=1, sticky="we", pady=2)
+		tk.Label(ntfy_fields, text="Topic:", anchor="w").grid(
+			row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+		topic_var = tk.StringVar(value=ncfg.get("ntfy_topic") or "")
+		ntfy_topic_entry = ttk.Entry(ntfy_fields, textvariable=topic_var,
+			width=32)
+		ntfy_topic_entry.grid(row=1, column=1, sticky="we", pady=2)
+		tk.Label(body,
+			text=(
+				"Install the ntfy app on your phone and subscribe to "
+				"this topic. Choose a unique, hard-to-guess string — "
+				"anyone who knows it can see your notifications."
+			),
+			justify="left", anchor="w", wraplength=420,
+			fg=PALETTE["fg_muted"],
+			font=(FONTS["family"], FONTS["size"], "italic"),
+		).pack(anchor="w", padx=(32, 0), pady=(2, 6))
+
+		# Test button + inline result label.
+		test_row = tk.Frame(body)
+		test_row.pack(anchor="w", padx=(16, 0), pady=(0, 12), fill=tk.X)
+		test_result_lbl = tk.Label(test_row, text="", anchor="w",
+			fg=PALETTE["fg_muted"])
+		test_btn = ttk.Button(test_row, text="Send Test Notification")
+		test_btn.pack(side=tk.LEFT)
+		test_result_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
+		def _send_test():
+			# Read the LIVE entry / checkbox values so the operator
+			# doesn't have to OK + reopen prefs just to test a
+			# tweak. Build an ephemeral config the manager can read.
+			ephemeral = {
+				"audible_enabled": bool(audible_var.get()),
+				"ntfy_enabled": bool(ntfy_var.get()),
+				"ntfy_server": server_var.get().strip(),
+				"ntfy_topic": topic_var.get().strip(),
+			}
+			prior = self.notification_config
+			self.notification_config = ephemeral
+			try:
+				ok, detail = self.notifications.send_test()
+			except Exception as exc:
+				ok, detail = False, str(exc)
+			finally:
+				self.notification_config = prior
+			if ok:
+				test_result_lbl.config(text=f"✓ {detail}", fg="#1e7d20")
+			else:
+				test_result_lbl.config(text=f"✗ {detail}", fg="#b22222")
+		test_btn.configure(command=_send_test)
+
+		def _sync_ntfy_fields(*_):
+			st = "normal" if ntfy_var.get() else "disabled"
+			ntfy_server_entry.configure(state=st)
+			ntfy_topic_entry.configure(state=st)
+		ntfy_var.trace_add("write", _sync_ntfy_fields)
+		_sync_ntfy_fields()
+
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
 
@@ -3311,6 +3604,30 @@ class App(tk.Tk):
 			new_orientation = orientation_var.get()
 			if new_orientation not in ("portrait", "landscape"):
 				new_orientation = self.plate_orientation
+			new_speed_mode = speed_var.get()
+			if new_speed_mode not in ("slow", "variable"):
+				new_speed_mode = self.motor_speed_mode
+			# Validate the transit speed factor only when Variable
+			# mode is the *new* selection; in Slow mode the field is
+			# kept as-is for round-tripping but doesn't gate OK.
+			factor_err_lbl.config(text="")
+			new_factor = self.transit_speed_factor
+			if new_speed_mode == "variable":
+				ok, parsed = validation.transit_speed_factor(
+					factor_var.get())
+				if not ok:
+					factor_err_lbl.config(text=parsed)
+					return
+				new_factor = parsed
+			else:
+				# Slow mode: accept whatever the entry holds, but if
+				# it parses cleanly, keep it as the persisted value
+				# (so flipping to Variable later doesn't lose the
+				# operator's number).
+				ok, parsed = validation.transit_speed_factor(
+					factor_var.get())
+				if ok:
+					new_factor = parsed
 			# Orientation switch carries a migration prompt: changing
 			# the origin corner without re-deriving Starting Well /
 			# Waste Bin coords would send the needle to the wrong
@@ -3363,11 +3680,39 @@ class App(tk.Tk):
 				if mf is not None and hasattr(mf, "refresh_jog_tooltips"):
 					mf.refresh_jog_tooltips()
 				logger.info("Plate orientation switched to %s", new_orientation)
+			# Motor speed: apply if either the mode or the factor
+			# changed. The motor methods consult the active values
+			# per call, so a mid-session change takes effect on the
+			# very next move.
+			speed_changed = (
+				new_speed_mode != self.motor_speed_mode
+				or abs(new_factor - self.transit_speed_factor) > 1e-6
+			)
+			self.motor_speed_mode = new_speed_mode
+			self.transit_speed_factor = new_factor
+			if speed_changed:
+				self._apply_motor_speed_to_motors()
+				logger.info(
+					"Motor speed prefs updated: mode=%s factor=%.2f",
+					new_speed_mode, new_factor,
+				)
+			# Commit the notification settings into App state so the
+			# next intervention picks them up immediately, then
+			# persist to disk.
+			self.notification_config = {
+				"audible_enabled": bool(audible_var.get()),
+				"ntfy_enabled": bool(ntfy_var.get()),
+				"ntfy_server": server_var.get().strip(),
+				"ntfy_topic": topic_var.get().strip(),
+			}
 			try:
 				config_store.save_return_to_origin_on_exit(new_return)
 				config_store.save_skip_intersample_purge(new_skip)
 				config_store.save_purge_protocol(self.purge_protocol)
 				config_store.save_plate_orientation(self.plate_orientation)
+				config_store.save_motor_speed_mode(self.motor_speed_mode)
+				config_store.save_transit_speed_factor(self.transit_speed_factor)
+				config_store.save_notification_config(self.notification_config)
 			except Exception as exc:
 				logger.warning("Could not persist preferences: %s", exc)
 			dlg.destroy()
@@ -3645,8 +3990,8 @@ class App(tk.Tk):
 			try:
 				self.set_status("Returning to origin…")
 				self.update_idletasks()
-				self.table_motor.move_dist_absolute(0.0)
-				self.carriage_motor.move_dist_absolute(0.0)
+				self.table_motor.move_dist_absolute(0.0, is_transit=True)
+				self.carriage_motor.move_dist_absolute(0.0, is_transit=True)
 				self.table_motor.tare()
 				self.carriage_motor.tare()
 			except Exception as exc:
@@ -4024,7 +4369,7 @@ class App(tk.Tk):
 		  (1) Idle-time recentering equivalent to Manual mode's Home.
 		  (2) Mid-pause recalibration: captures the current motor
 		      position on the FIRST click in this pause so the matching
-		      Resume can drive back to it and pop a Confirm Calibration
+		      Resume can drive back to it and pop an Origin Calibration
 		      dialog.
 		  (3) Post-terminate recovery: clears the e-stopped lockdown
 		      so the operator can start a fresh run.
@@ -4084,7 +4429,8 @@ class App(tk.Tk):
 		(af.carriage_te.clear_error if c_ok else lambda: af.carriage_te.show_error(c_val))()
 		if not (t_ok and c_ok):
 			return
-		self.move_to_positions(table_dist=t_val, carriage_dist=c_val)
+		self.move_to_positions(table_dist=t_val, carriage_dist=c_val,
+			is_transit=True)
 		self.set_status(
 			f"Moved to starting well position "
 			f"({t_val:.2f} cm, {c_val:.2f} cm)."
@@ -4288,12 +4634,52 @@ class App(tk.Tk):
 
 	# -- Manual jog -------------------------------------------------------
 
-	def move_to_positions(self, table_dist=None, carriage_dist=None):
-		"""Move table and/or carriage to absolute positions (cm)."""
+	def move_to_positions(self, table_dist=None, carriage_dist=None, *,
+			is_transit=False):
+		"""Move table and/or carriage to absolute positions (cm).
+
+		``is_transit=True`` requests the fast Variable-speed cadence
+		for moves that don't carry pressurized fluid (waste-bin
+		approach, return to origin, plate swaps, jogs). Defaults to
+		False so well-to-well dispense moves stay on the slow
+		fractionation cadence.
+		"""
 		if table_dist is not None:
-			self.table_motor.move_dist_absolute(table_dist)
+			self.table_motor.move_dist_absolute(table_dist,
+				is_transit=is_transit)
 		if carriage_dist is not None:
-			self.carriage_motor.move_dist_absolute(carriage_dist)
+			self.carriage_motor.move_dist_absolute(carriage_dist,
+				is_transit=is_transit)
+
+	def _apply_motor_speed_to_motors(self):
+		"""Push the active speed configuration into both stepper
+		motors. Called at App init and whenever the operator changes
+		Motor speed mode / Transit speed factor in Tools →
+		Preferences. Idempotent.
+
+		The fractionation step delay is the existing
+		``StepperMotor.DEFAULT_STEP_DELAY_S`` (100 µs). The transit
+		step delay is ``fractionation_delay / transit_speed_factor`` —
+		so factor=2.0 halves the per-step sleep, making transit
+		moves ~2× faster than the slow cadence.
+		"""
+		fractionation_delay = StepperMotor.DEFAULT_STEP_DELAY_S
+		# Defensive clamp so a malformed factor can't drive the motors
+		# at absurd rates even if validation was bypassed.
+		factor = max(1.0, min(5.0, float(self.transit_speed_factor)))
+		transit_delay = fractionation_delay / factor
+		variable_enabled = (self.motor_speed_mode == "variable")
+		for motor in (self.table_motor, self.carriage_motor):
+			motor.configure_speeds(
+				fractionation_step_delay=fractionation_delay,
+				transit_step_delay=transit_delay,
+				variable_speed_enabled=variable_enabled,
+			)
+		logger.debug(
+			"motor speed applied: mode=%s factor=%.2f "
+			"(transit_delay=%.6fs / fractionation_delay=%.6fs)",
+			self.motor_speed_mode, factor, transit_delay, fractionation_delay,
+		)
 
 	def _apply_plate_orientation_to_motors(self):
 		"""Push the current ``plate_orientation`` into the carriage
@@ -4679,6 +5065,24 @@ class App(tk.Tk):
 			f"Waste bin at {severity} — pump auto-paused. "
 			"Empty container and click Reset to resume."
 		)
+		# Supplementary urgent push / beep. The threshold dialog
+		# remains the source of truth; this is the operator-away
+		# escape hatch.
+		if severity == "80%":
+			self.notifications.notify(
+				title="autoSIP: waste 80%",
+				message="Waste bin at 80%. Pump paused. Empty or Resume.",
+				urgent=True,
+			)
+		else:
+			self.notifications.notify(
+				title="autoSIP: waste 100%",
+				message=(
+					"Waste bin at 100%. Pump hard-stopped. Empty "
+					"the bin and Reset to resume."
+				),
+				urgent=True,
+			)
 		self._show_waste_threshold_dialog(severity, max_v)
 
 	def _show_waste_threshold_dialog(self, severity, max_v):
@@ -5046,8 +5450,9 @@ class App(tk.Tk):
 			self.move_to_positions(
 				table_dist=s.paused_table_cm,
 				carriage_dist=s.paused_carriage_cm,
+				is_transit=True,
 			)
-			confirmed = self._show_calibration_confirm_dialog(
+			confirmed = self._show_origin_calibration_dialog(
 				s.paused_table_cm, s.paused_carriage_cm,
 			)
 			if not confirmed:
@@ -5270,14 +5675,15 @@ class App(tk.Tk):
 		self.wait_window(dlg)
 		return result["choice"]
 
-	def _show_calibration_confirm_dialog(self, paused_x_cm, paused_y_cm):
+	def _show_origin_calibration_dialog(self, paused_x_cm, paused_y_cm):
 		"""Modal Toplevel asking the operator to verify the needle is
 		correctly positioned over the expected well after a mid-pause
 		Return-to-Origin recalibration. Returns True on Confirm, False
-		on Cancel (X button, Escape key).
+		on Cancel (X button, Escape key). Window title:
+		"Origin Calibration".
 		"""
 		dlg = tk.Toplevel(self)
-		dlg.title("Confirm Calibration")
+		dlg.title("Origin Calibration")
 		dlg.transient(self)
 		dlg.resizable(False, False)
 
@@ -5368,8 +5774,7 @@ class App(tk.Tk):
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, drip_wait_time,
 			purge_time, prime_time_s, skip_intersample_purge,
-			peristaltic_rate_ml_per_min, max_waste_volume_ml,
-			soak_time_min=5.0):
+			peristaltic_rate_ml_per_min, max_waste_volume_ml):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
 		Cross-field rules (N ≤ rows·cols, D < N, waste-bin coords required
@@ -5505,7 +5910,6 @@ class App(tk.Tk):
 		s.pump_time = pump_time
 		s.drip_wait_time = drip_wait_time
 		s.purge_time = purge_time
-		s.soak_time_min = float(soak_time_min)
 		s.skip_intersample_purge = skip_intersample_purge
 		s.peristaltic_rate_ml_per_min = peristaltic_rate_ml_per_min
 		s.max_waste_volume_ml = max_waste_volume_ml
@@ -5888,6 +6292,15 @@ class App(tk.Tk):
 				text="Manual prime: 0 cycles, 0.0 s total")
 			begin_btn.state(["!disabled"])
 			begin_btn.focus_set()
+			# Supplementary push / beep: operator needs to walk the
+			# solution to droplet formation and click Begin Run.
+			self.notifications.notify(
+				title="autoSIP: prime step",
+				message=(
+					"Automatic prime complete. Walk the sample to "
+					"droplet formation, then continue."
+				),
+			)
 
 		def _auto_done():
 			ctx["stop_after"] = None
@@ -5944,7 +6357,7 @@ class App(tk.Tk):
 			if ctx["cancelled"]:
 				return
 			self.move_to_positions(table_dist=target_x,
-				carriage_dist=target_y)
+				carriage_dist=target_y, is_transit=True)
 			# Re-check cancellation in case the user closed the dialog
 			# while the move was blocking the GUI mainloop.
 			if ctx["cancelled"] or not dlg.winfo_exists():
@@ -6073,11 +6486,15 @@ class App(tk.Tk):
 			if s.discards_done >= s.discards_at_series_start:
 				self._set_phase("collect")
 				if s.series_index == 1:
-					# First series: move to plate A1 (absolute).
+					# First series: move to plate A1 (absolute). Transit
+					# move — the discard phase is done; we're traversing
+					# to the dispense start position with no fluid in
+					# flight.
 					self.set_status("Moving to plate A1...")
 					self.move_to_positions(
 						table_dist=s.table_start_cm,
 						carriage_dist=s.carriage_start_cm,
+						is_transit=True,
 					)
 				else:
 					# Subsequent series: snake-step from the last collected
@@ -6200,6 +6617,17 @@ class App(tk.Tk):
 		)
 		self._update_run_control_buttons()
 
+		# Supplementary push / beep: phone-side awareness when the
+		# operator has stepped away. The on-screen status above is
+		# the source of truth.
+		self.notifications.notify(
+			title="autoSIP: sample complete",
+			message=(
+				f"Sample {s.current_sample_id} finished. "
+				"Inter-sample purge required before the next sample."
+			),
+		)
+
 		if self.bulk_mode_active:
 			# bulk_current_index pointed at the just-completed sample;
 			# advance to the next one before opening the dialog so the
@@ -6229,6 +6657,11 @@ class App(tk.Tk):
 		)
 		# Button row picks up the paused_plate_full layout.
 		self._update_run_control_buttons()
+		# Supplementary push / beep: operator needs to swap the plate.
+		self.notifications.notify(
+			title="autoSIP: plate full",
+			message=f"Plate {s.current_plate_id} is full. Plate swap required.",
+		)
 
 	def end_run(self):
 		"""Handle the End Run button click.
@@ -6281,6 +6714,10 @@ class App(tk.Tk):
 		# Determine final status: "completed" iff we hit total_reached
 		# before End Run; "manual_abort" otherwise.
 		final_status = "completed" if s.state == "total_reached" else "manual_abort"
+		# Snapshot the collected-wells total BEFORE the per-run
+		# counters reset further down. Used by the run-complete
+		# notification message.
+		collected_total = len(s.well_records)
 
 		# Reset state BEFORE pump release (button-refresh sees idle).
 		pre_state = s.state
@@ -6361,6 +6798,17 @@ class App(tk.Tk):
 				f"Run discarded. Partial log files at {discarded_run_dir} "
 				"may be deleted manually."
 			)
+		# Supplementary push / beep: operator-away notice that the
+		# run is finished and the bench is ready for plate unloading.
+		# Fires on both Save and Discard; phrased to fit either.
+		self.notifications.notify(
+			title="autoSIP: run complete",
+			message=(
+				f"Run finished ({final_status}). "
+				f"{collected_total} fraction"
+				f"{'s' if collected_total != 1 else ''} collected."
+			),
+		)
 		# End Run implicitly exits bulk mode so the next run starts
 		# with a clean Run Parameters slate.
 		if self.bulk_mode_active:
@@ -6523,9 +6971,12 @@ class App(tk.Tk):
 
 		if s.discards_at_series_start > 0:
 			self._set_phase("discard")
+			# Transit to the waste bin — fluid hasn't started flowing
+			# yet for this series.
 			self.move_to_positions(
 				table_dist=s.waste_bin_table,
 				carriage_dist=s.waste_bin_carriage,
+				is_transit=True,
 			)
 			self.automated_frame.progress.set_discard_status(0, s.discards_at_series_start)
 			self.pump_liquid()
@@ -6569,11 +7020,13 @@ class App(tk.Tk):
 		"""
 		s = self.state
 
-		# Move to waste bin first. Synchronous via move_to_positions.
+		# Move to waste bin first. Synchronous via move_to_positions —
+		# transit cadence since no fluid is flowing yet.
 		self.set_status("Moving to waste bin for inter-sample purge…")
 		self.move_to_positions(
 			table_dist=s.waste_bin_table,
 			carriage_dist=s.waste_bin_carriage,
+			is_transit=True,
 		)
 		self.set_status("Inter-sample purge: awaiting user.")
 
@@ -6954,6 +7407,20 @@ class App(tk.Tk):
 				action_btn.config(text="Continue", command=_on_continue)
 				set_pump_gate(False)
 				action_btn.focus_set()
+				# Supplementary push / beep only for the prime phase
+				# of the inter-sample purge — that's the manual-
+				# intervention point per the spec. Wash / bleach /
+				# rinse / clear phases complete passively to a
+				# Continue button and don't need a notification.
+				if phase == "prime":
+					self.notifications.notify(
+						title="autoSIP: prime step",
+						message=(
+							"Automatic prime complete. Walk the "
+							"sample to droplet formation, then "
+							"continue."
+						),
+					)
 
 			def _start_extension():
 				phase_state["ext"] += 1
@@ -7255,11 +7722,13 @@ class App(tk.Tk):
 		"""
 		s = self.state
 
-		# Live read soak time (minutes → seconds).
-		try:
-			soak_seconds = max(0.0, float(self.soak_time_var.get()) * 60.0)
-		except (TypeError, ValueError):
-			soak_seconds = max(0.0, float(s.soak_time_min) * 60.0)
+		# Soak time is collected per invocation in the Phase 1 dialog
+		# (default 5 min, range 0-30, captured at Start Bleach Fill).
+		# Stored as a mutable dict so Phase 1's submit handler can
+		# update the value that Phase 2's countdown reads. Each
+		# invocation starts at the 5-minute default — does NOT carry
+		# over between System Clean runs.
+		soak_state = {"seconds": 5.0 * 60.0, "minutes": 5.0}
 
 		# Live read purge time (seconds) — used by all four pumping
 		# phases. Phases 1, 3, 4 share the inter-sample purge cadence.
@@ -7273,7 +7742,8 @@ class App(tk.Tk):
 
 		self.set_status("Moving to waste bin for System Clean…")
 		self.update_idletasks()
-		self.move_to_positions(table_dist=waste_x, carriage_dist=waste_y)
+		self.move_to_positions(table_dist=waste_x, carriage_dist=waste_y,
+			is_transit=True)
 
 		sysclean_logger, owned_by_sysclean = self._sysclean_get_logger()
 
@@ -7362,11 +7832,21 @@ class App(tk.Tk):
 			)
 
 		def _build_modal(title, body_text, action_label, action_cmd, *,
-				checklist=None, note_text=None):
+				checklist=None, note_text=None,
+				after_checklist=None):
 			"""Build a sysclean phase modal. Layout: optional checklist
-			→ optional italic note → body text → pump status block →
-			[Cancel] [action_btn] row. Action button disabled while any
-			checklist item is unchecked or pump is ON."""
+			→ optional after-checklist extras → optional italic note →
+			body text → pump status block → [Cancel] [action_btn] row.
+			Action button disabled while any checklist item is
+			unchecked or pump is ON.
+
+			``after_checklist`` (optional) is a factory called with the
+			body Frame as its argument; it may add widgets (e.g. the
+			Phase 1 Bleach soak time entry) and return a validator
+			callable. The validator runs from the action button's
+			handler and should return True on success, False on
+			validation failure (in which case the action button's main
+			command is short-circuited)."""
 			dlg = tk.Toplevel(self)
 			dlg.title(title)
 			dlg.transient(self)
@@ -7385,6 +7865,12 @@ class App(tk.Tk):
 					check_vars.append(v)
 					ttk.Checkbutton(cl, text=item, variable=v).grid(
 						row=i, column=0, sticky="w", pady=1)
+
+			# Hook for phase-specific extras (Phase 1's soak-time
+			# entry). Runs between the checklist and the italic note.
+			extras_validator = None
+			if after_checklist is not None:
+				extras_validator = after_checklist(body)
 
 			if note_text:
 				tk.Label(body, text=note_text, justify="left", anchor="w",
@@ -7445,14 +7931,21 @@ class App(tk.Tk):
 			dlg.update_idletasks()
 			self._center_over_main(dlg)
 			return (dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
-				action_btn, set_pump_gate)
+				action_btn, set_pump_gate, extras_validator)
 
 		def _run_auto_phase(*, title, body_text, phase, pump_kind,
 				on_advance, checklist=None, action_label="Continue",
-				note_text=None):
+				note_text=None, after_checklist=None):
 			"""Auto-cycle pump phase with operator-Space extension. Same
 			shape as the inter-sample purge's _run_auto_phase but
-			parameterized for sysclean's logging path."""
+			parameterized for sysclean's logging path.
+
+			``after_checklist`` (optional) lets a phase add extra
+			widgets between the checklist and the body text (e.g.
+			Phase 1's Bleach soak time entry). The factory's returned
+			validator is invoked from the action-button handler before
+			the auto cycle starts; if it returns False the action is
+			aborted (e.g. invalid soak input)."""
 			if ctx["cancelled"]:
 				return
 			_claim("purge" if pump_kind == "peristaltic" else "fractionate")
@@ -7460,10 +7953,12 @@ class App(tk.Tk):
 			phase_state = {"ext": 0, "total_ext_s": 0.0, "complete": False}
 
 			(dlg, body_lbl, pump_lbl, cycle_lbl, total_lbl,
-				action_btn, set_pump_gate) = _build_modal(
+				action_btn, set_pump_gate,
+				extras_validator) = _build_modal(
 					title, body_text, action_label,
 					lambda: _start_auto_cycle(),
 					checklist=checklist, note_text=note_text,
+					after_checklist=after_checklist,
 				)
 
 			def _begin_cycle(extension):
@@ -7481,6 +7976,11 @@ class App(tk.Tk):
 				logger.debug(
 					"sysclean dialog: primary action (%s) fired; phase=%s purge_time=%.1f",
 					action_label, phase, purge_seconds)
+				# Phase-specific gating (Phase 1: Bleach soak time
+				# entry must parse cleanly into the valid range).
+				# Failure leaves the dialog open with an inline error.
+				if extras_validator is not None and not extras_validator():
+					return
 				body_lbl.config(text="Pumping…")
 				_begin_cycle(extension=0)
 				ctx["auto_done_at"] = monotonic() + purge_seconds
@@ -7596,10 +8096,11 @@ class App(tk.Tk):
 
 		def _run_soak_phase(*, title, on_advance):
 			"""Phase 2: timed wait with the pump OFF. mm:ss countdown
-			with a Skip soak button to advance early. Writes a single
-			``sysclean_soak`` log row with ``duration_s`` set to the
-			actual elapsed soak seconds (whether natural countdown end
-			or operator Skip)."""
+			with a Skip soak button to advance early. Reads the
+			captured Phase 1 soak duration from ``soak_state["seconds"]``.
+			Writes a single ``sysclean_soak`` log row with ``duration_s``
+			set to the actual elapsed soak seconds (whether natural
+			countdown end or operator Skip)."""
 			if ctx["cancelled"]:
 				return
 			# Defensive: pump should already be off after Phase 1's
@@ -7607,6 +8108,11 @@ class App(tk.Tk):
 			if self.pump_controller.relay_on:
 				self.pump_controller.set_relay(False)
 			ctx["is_pumping"] = False
+
+			# Snapshot the captured Phase 1 duration. Done here (not
+			# at start_system_clean entry) so the operator's entry
+			# in Phase 1 is what gets used.
+			soak_seconds = soak_state["seconds"]
 
 			dlg = tk.Toplevel(self)
 			dlg.title(title)
@@ -7642,7 +8148,7 @@ class App(tk.Tk):
 			btn_row.grid_columnconfigure(1, weight=1)
 
 			ctx["modal"] = dlg
-			soak_state = {
+			tick_state = {
 				"start_mono": monotonic(),
 				"start_iso": datetime.now().isoformat(timespec="milliseconds"),
 				"done_at": monotonic() + soak_seconds,
@@ -7651,22 +8157,22 @@ class App(tk.Tk):
 			}
 
 			def _finalize(advance):
-				if soak_state["advanced"]:
+				if tick_state["advanced"]:
 					return
-				soak_state["advanced"] = True
-				if soak_state["tick_after"] is not None:
+				tick_state["advanced"] = True
+				if tick_state["tick_after"] is not None:
 					try:
-						self.after_cancel(soak_state["tick_after"])
+						self.after_cancel(tick_state["tick_after"])
 					except Exception:
 						pass
-					soak_state["tick_after"] = None
-				elapsed = monotonic() - soak_state["start_mono"]
+					tick_state["tick_after"] = None
+				elapsed = monotonic() - tick_state["start_mono"]
 				end_iso = datetime.now().isoformat(timespec="milliseconds")
 				if sysclean_logger is not None:
 					try:
 						sysclean_logger.sysclean_committed(
 							phase="soak",
-							start_iso=soak_state["start_iso"],
+							start_iso=tick_state["start_iso"],
 							end_iso=end_iso, duration_s=elapsed,
 							waste_x_cm=waste_x, waste_y_cm=waste_y,
 						)
@@ -7684,11 +8190,11 @@ class App(tk.Tk):
 				_finalize(advance=True)
 
 			def _tick():
-				soak_state["tick_after"] = None
-				if ctx["cancelled"] or soak_state["advanced"]:
+				tick_state["tick_after"] = None
+				if ctx["cancelled"] or tick_state["advanced"]:
 					return
 				remaining = max(0.0,
-					soak_state["done_at"] - monotonic())
+					tick_state["done_at"] - monotonic())
 				mins = int(remaining // 60)
 				secs = int(remaining - mins * 60)
 				countdown_lbl.config(
@@ -7698,7 +8204,7 @@ class App(tk.Tk):
 					return
 				# 250 ms tick: snappy enough for sub-second responsiveness
 				# without burning cycles for a multi-minute wait.
-				soak_state["tick_after"] = self.after(250, _tick)
+				tick_state["tick_after"] = self.after(250, _tick)
 
 			ttk.Button(btn_row, text="Cancel",
 				command=_cancel_and_close, style="Danger.TButton"
@@ -7725,6 +8231,50 @@ class App(tk.Tk):
 		) if launched_during_pause else None
 
 		def _bleach_fill():
+			def _soak_entry_factory(body_frame):
+				"""Build the per-invocation Bleach soak time entry
+				between the checklist and the body text. Returns a
+				validator that the action button calls before
+				advancing — on success, ``soak_state`` is updated
+				with the captured minutes/seconds for Phase 2's
+				countdown to read."""
+				# Soak entry on one row: label + entry + 'min' unit.
+				field = tk.Frame(body_frame)
+				field.pack(anchor="w", pady=(0, 2))
+				tk.Label(field, text="Bleach soak time:").pack(
+					side=tk.LEFT)
+				soak_var = tk.StringVar(value="5")
+				soak_entry = ttk.Entry(field,
+					textvariable=soak_var, width=6)
+				soak_entry.pack(side=tk.LEFT, padx=(8, 4))
+				tk.Label(field, text="min").pack(side=tk.LEFT)
+				# Inline error placeholder — hidden until validation
+				# fails on Start Bleach Fill.
+				err_lbl = tk.Label(body_frame, text="",
+					fg="red", anchor="w", wraplength=420)
+				err_lbl.pack(anchor="w")
+				# Italic muted hint below the entry.
+				tk.Label(body_frame,
+					text=(
+						"Default 5 min for nucleic-acid "
+						"decontamination."
+					),
+					fg=PALETTE["fg_muted"],
+					font=(FONTS["family"], FONTS["size"], "italic"),
+				).pack(anchor="w", pady=(0, 8))
+
+				def _validate():
+					ok, val = validation.soak_time(soak_var.get())
+					if not ok:
+						err_lbl.config(text=val)
+						return False
+					err_lbl.config(text="")
+					soak_state["minutes"] = val
+					soak_state["seconds"] = val * 60.0
+					return True
+
+				return _validate
+
 			_run_auto_phase(
 				title="System Clean — Step 1 of 4",
 				body_text=(
@@ -7740,6 +8290,7 @@ class App(tk.Tk):
 				],
 				action_label="Start Bleach Fill",
 				note_text=paused_note,
+				after_checklist=_soak_entry_factory,
 			)
 
 		def _soak():
@@ -7823,12 +8374,15 @@ class App(tk.Tk):
 		if not self._show_plate_swap_cleanup_dialog(s.current_plate_id):
 			return
 		# Auto-move to plate-start coords. Synchronous via
-		# move_to_positions; idempotent when the needle is already there.
+		# move_to_positions; idempotent when the needle is already
+		# there. Transit cadence — operator just removed the prior
+		# plate, no dispense is in flight.
 		self.set_status("Moving needle to start coords for next plate...")
 		self.update_idletasks()
 		self.move_to_positions(
 			table_dist=s.table_start_cm,
 			carriage_dist=s.carriage_start_cm,
+			is_transit=True,
 		)
 		# Dialog 2: placement + Plate ID entry. Returns the validated
 		# new Plate ID on Continue; None on Cancel.
@@ -8330,9 +8884,11 @@ class App(tk.Tk):
 		# move_to_positions call here is idempotent (no-op when
 		# already at the target) but kept defensively to guarantee
 		# the physical needle is where the state machine expects.
+		# Transit cadence — same reasoning as Dialog 1's auto-move.
 		self.move_to_positions(
 			table_dist=s.table_start_cm,
 			carriage_dist=s.carriage_start_cm,
+			is_transit=True,
 		)
 		s.x = 0
 		s.y = 0
@@ -8451,9 +9007,11 @@ class App(tk.Tk):
 		return s.y < s.ROWS
 
 	def carriage_return(self):
-		"""Return the needle to the starting position."""
-		self.table_motor.move_dist_absolute(0.0)
-		self.carriage_motor.move_dist_absolute(0.0)
+		"""Return the needle to the starting position. Transit move —
+		dispense isn't in flight when this fires (Return to Origin from
+		idle / end of run)."""
+		self.table_motor.move_dist_absolute(0.0, is_transit=True)
+		self.carriage_motor.move_dist_absolute(0.0, is_transit=True)
 
 
 def parse_args(argv=None):

@@ -53,6 +53,14 @@ PRIME_TIME_MIN, PRIME_TIME_MAX = 0.0, 600.0
 # decontamination protocols.
 SOAK_TIME_MIN, SOAK_TIME_MAX = 0.0, 30.0
 
+# Transit speed factor for Variable speed motor mode. Multiplier
+# applied to the fractionation step rate when a move is flagged as
+# transit (to/from waste bin, return to origin, plate swaps, etc.).
+# Lower bound 1.0 = no speed-up (effectively same as Slow mode);
+# upper bound 5.0 is a generous ceiling — beyond that, missed steps
+# become likely on most lead-screw setups.
+TRANSIT_SPEED_FACTOR_MIN, TRANSIT_SPEED_FACTOR_MAX = 1.0, 5.0
+
 # Peristaltic pump rate, mL/min. Adafruit 3910 nominal ~100 mL/min; bound
 # leaves room for slower flow restrictors below it and faster pumps above.
 PERISTALTIC_RATE_MIN, PERISTALTIC_RATE_MAX = 1.0, 200.0
@@ -171,6 +179,16 @@ def soak_time(text):
 	before rinsing."""
 	return _parse_float(text, "Bleach soak time", SOAK_TIME_MIN, SOAK_TIME_MAX,
 		unit="min")
+
+
+def transit_speed_factor(text):
+	"""Validate the Variable speed mode's transit multiplier: float in
+	``[TRANSIT_SPEED_FACTOR_MIN, TRANSIT_SPEED_FACTOR_MAX]``."""
+	return _parse_float(
+		text, "Transit speed factor",
+		TRANSIT_SPEED_FACTOR_MIN, TRANSIT_SPEED_FACTOR_MAX,
+		unit="×",
+	)
 
 
 def peristaltic_rate(text):
