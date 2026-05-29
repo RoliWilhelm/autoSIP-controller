@@ -168,6 +168,12 @@ move:
   to `0` to skip the discard phase entirely.
 - **Volume per well (mL)** — float in `[0.1, 2.0]`, e.g. `0.22`.
   The pump runs for `volume / pump_rate` seconds per well.
+- **Prime time (s)** — float in `[0.0, 600.0]`, default `60`.
+  Duration the syringe pump runs automatically at the start of
+  every run to walk the sample solution from the tube up to roughly
+  5 cm below the dispenser. Used by the pre-fractionation priming
+  workflow (see *Pre-fractionation priming* below). Manual mode's
+  *Prime Time Calibration Tool* measures it empirically.
 
 **Bulk Sample Submission** — preload metadata for a multi-sample
 session from a spreadsheet, so you don't have to retype Sample ID /
@@ -237,14 +243,19 @@ inter-sample purges, manual purges, and Cleaning Purge:
   default `100.0`. Used by the waste-bin estimator to convert
   purge-phase pump-on time into a volume contribution.
 - **Max waste bin volume (mL)** — float in `[10.0, 5000.0]`, default
-  `250.0`. autoSIP's waste-bin estimator warns when the running
-  estimate reaches 80 % of this capacity and **halts all pump
-  activity** at 100 %. The estimate is based on configured pump rates
-  × pump-on time, not a real measurement; the *Reset* button in the
-  status bar is the ground-truth mechanism after a physical empty.
-  The counter resets to 0 on every app launch (so closing and
-  reopening the app produces a fresh counter — empty the bin first
-  if you want the new counter to reflect reality).
+  `250.0`. autoSIP's waste-bin estimator tracks the running
+  estimate **live** (the flask icon in the status bar fills and
+  changes colour from green → amber → orange → red while any pump
+  is on), shows an advisory **80% auto-pause** dialog (where the
+  operator may Reset after a physical empty *or* Resume past the
+  warning) and a blocking **100% hard stop** dialog (where Resume
+  is disabled until Reset is clicked). The estimate is based on
+  configured pump rates × pump-on time, not a real measurement;
+  the *Reset* button in the status bar is the ground-truth
+  mechanism after a physical empty. The counter resets to 0 on
+  every app launch (so closing and reopening the app produces a
+  fresh counter — empty the bin first if you want the new counter
+  to reflect reality).
 
 The *Skip inter-sample purge* preference moved to **Tools →
 Preferences** so it persists across launches alongside *Return
@@ -278,6 +289,21 @@ center of the strip, flanked by a centrifuge-tube icon on the left
 and the SIP-readout bimodal-distribution icon on the right. Click to
 validate inputs, confirm the run summary, and start the state
 machine.
+
+**Pre-fractionation priming.** After the Begin-Fractionation
+confirmation, the needle moves to its first-dispense position
+(waste bin if Discard fractions > 0, otherwise plate start well
+A1) and a *Prime Fractionation Line* modal opens. The syringe pump
+runs automatically for the configured **Prime time** seconds with a
+live countdown; when the automatic prime completes, the dialog
+switches to a *manual walk-to-droplet* phase — press **Space** to
+start the pump, watch the line until an even droplet forms at the
+needle, press **Space** again to stop, then click **Begin Run**.
+Multiple Space-toggle extensions are allowed; each press-on →
+press-off pair is logged. For bulk submissions, this priming runs
+once before the first sample only — later samples are primed by
+the inter-sample purge's final phase, which uses the same
+Prime-time-driven mechanic.
 
 **Progress display** — a to-scale rendering of the well plate
 beneath the run controls.
@@ -340,6 +366,21 @@ no text-entry widget has keyboard focus** (so space still types a
 literal space inside a name field). The most-recently-used pump
 persists across application restarts.
 
+**Position Calibration Tool** — captures the carriage's current cm
+position into either *Starting well* or *Waste bin* with one click.
+The full step-by-step calibration walkthrough lives in
+[Operation Instructions §6.3.1](docs/operation_instructions.md).
+
+**Prime Time Calibration Tool** — a stopwatch panel that measures
+the *Prime time* parameter empirically for your tubing geometry.
+Connect a sample tube, click **Start** to run the syringe pump and
+begin the timer, watch the line, and click **Stop** the moment the
+solution reaches ~5 cm below the syringe needle. Click **Save as
+Prime Time** to write the measured value into Automated mode's
+Prime time field. **Reset** clears the measurement between
+attempts. The measurement is not logged to `log.csv` — it is a
+setup operation, not a fractionation event.
+
 ### Cleaning mode
 
 ![Figure: Cleaning mode panel](docs/figures/cleaning_mode.png)
@@ -372,6 +413,74 @@ A typical cleaning cycle is: switch to Cleaning mode, click
 fluid path is clear, click **Purge** again to stop. For a
 stringent end-of-session decontamination, click **System
 Clean** instead.
+
+### Inter-sample purge workflow
+
+Between samples in a multi-sample run, autoSIP opens a modal
+sequence that walks the operator through swapping the syringe,
+attaching tubing, cleaning the line, and re-priming. The protocol
+is selected in **Tools → Preferences → Inter-sample purge
+protocol**:
+
+- **Water only (3 phases)** — wash, air clear, prime sample.
+- **Decontamination (5 phases)** — sterile water flush, **0.5%
+  v/v sodium hypochlorite (bleach) flush** (1:10 dilution of
+  household bleach, *prepared fresh on the day of use*), sterile
+  water rinse, air clear, prime sample.
+
+Each phase opens with a checklist of physical actions the
+operator must perform — disengage the used syringe, attach the
+collector tube to the wash line, swap the inlet between containers,
+attach a new syringe, connect the next sample tube. The primary
+action button starts the appropriate pump (peristaltic for
+wash/bleach/rinse/clear, syringe for the final *Prime sample*
+phase). Wash/bleach/rinse/clear phases run for *Purge time*
+seconds with a live countdown; the *Prime sample* phase runs the
+syringe pump for **Prime time** seconds, then enters a
+walk-to-droplet state where pressing **Space** extends pumping
+until the operator sees an even droplet. A dynamic line in the
+prime dialog names the destination of the priming output (the
+waste bin if the next sample has discards, or the current well
+otherwise — so the operator knows whether to walk minimally or
+freely). The workflow can be bypassed entirely by ticking
+*Skip inter-sample purge* in Preferences.
+
+### Preferences
+
+**Tools → Preferences** exposes six persistent behavioral
+preferences. Five are stored in `~/.autosip/config.json`; the
+sensitive notification topic lives in a separate
+`~/.autosip/notification_config.json` that is `.gitignore`d.
+
+- **Return needle to origin when closing the application**
+  (default on) — the close handler drives both motors back to
+  `(0, 0)` and tares before the window goes away.
+- **Skip inter-sample purge** (default off) — bypass the
+  inter-sample purge modal between samples.
+- **Inter-sample purge protocol** — *Water only* (default) or
+  *Decontamination*.
+- **Plate orientation** — *Portrait* (default on fresh installs;
+  rows on X-axis, A1 at bottom-left, +Y up) or *Landscape*
+  (columns on X-axis, A1 at upper-left, +Y down). Switching
+  changes the origin corner and snake pattern; recalibrate
+  Starting Well and Waste Bin positions after a switch.
+- **Motor speed mode** — *Slow speed* (default; all moves at the
+  fractionation cadence) or *Variable speed* (well-to-well
+  dispensing stays slow but transit moves — waste-bin approach,
+  return to origin, plate swaps, Manual jogs — speed up by a
+  configurable factor of 1.0–5.0).
+- **Notifications** — optional supplementary alerts that fire *in
+  addition to* the on-screen dialog at every manual-intervention
+  point (sample auto-pause, plate full, prime-step complete,
+  waste 80%/100%, run complete). Two channels: a local audible
+  beep (via `aplay alert.wav` if available, else terminal bell)
+  and an ntfy.sh push to a user-chosen topic. Network failures
+  are logged and swallowed — a failed push never blocks a run.
+  Subscribe to your chosen topic in the [ntfy phone
+  app](https://ntfy.sh) to receive pushes. **Choose a unique,
+  hard-to-guess topic string — anyone who knows it can read your
+  notifications.** A **Send Test Notification** button fires both
+  channels using the live entry values.
 
 ### Fractionate and Purge: how the two pump labels work
 
@@ -412,7 +521,7 @@ cover halt needs:
 The application's one autonomous emergency path is the waste-bin
 overflow lockdown: when the running waste-volume estimate reaches
 the configured maximum, all pump activity halts and a
-`waste_shutoff` row is appended to `log.csv`. Empty the container
+`waste_hardstop` row is appended to `log.csv`. Empty the container
 and click **Reset** next to the flask icon to clear the lockdown.
 
 ### Logging output
@@ -449,6 +558,20 @@ logs/
     (Continue to Next Plate).
   - `emergency_stopped` — the run was terminated while this
     well or discard cycle was mid-dispense.
+  - `prime_auto` / `prime_manual_ext` — pre-fractionation
+    automatic prime cycle and each Space-toggle extension.
+  - `purge_wash` / `purge_clear` / `purge_bleach` / `purge_prime`
+    — inter-sample purge phase cycles; `_ext{N}` for extensions.
+  - `sysclean_bleach` / `sysclean_soak` / `sysclean_rinse1` /
+    `sysclean_rinse2` — System Clean phases; soak duration is
+    actual elapsed seconds.
+  - `waste_autopause` / `waste_hardstop` / `waste_reset` — 80%
+    advisory, 100% hard stop, operator Reset.
+  - `checklist_skipped` — operator clicked Skip Checklist
+    (Expert) on a purge or plate-swap dialog.
+
+  See [docs/logging_reference.md](docs/logging_reference.md) for
+  the complete column-by-column and status-by-status reference.
 - **`end_{end_timestamp}.json`** — written only if you choose
   "Yes, save" at End Run. Final status (`completed`,
   `manual_abort`, or `emergency_stopped`), wells completed,
