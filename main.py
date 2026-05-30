@@ -2756,8 +2756,8 @@ class CleaningFrame(tk.Frame):
 		self.sysclean_btn = tk.Button(
 			sysclean_header, text="System Clean",
 			command=self.system_clean_clicked,
-			bg="#FFB6C1", activebackground="#FF91A4",
-			fg="#3D1F2D", activeforeground="#3D1F2D",
+			bg="#26A69A", activebackground="#00897B",
+			fg="#FFFFFF", activeforeground="#FFFFFF",
 			font=(FONTS["family"], FONTS["size"] + 4, "bold"),
 			padx=20, pady=12, bd=1, cursor="hand2",
 			relief="solid",
@@ -3404,106 +3404,125 @@ class App(tk.Tk):
 		self.config(menu=menubar)
 
 	def _show_preferences_dialog(self):
-		"""Modal preferences dialog. OK persists each checkbox to
-		config.json and applies immediately; Cancel discards."""
+		"""Modal preferences dialog. OK persists each setting to
+		config.json and applies immediately; Cancel discards.
+
+		Layout is a two-column grid of ``tk.LabelFrame`` sections —
+		**Plate**, **Inter-sample Purge**, **Run Behavior** in
+		column 0; **Motor Movement** and **Notifications** in
+		column 1 — so the window is wider than tall and related
+		settings cluster visually. The bottom row carries the
+		OK / Cancel buttons spanning both columns."""
 		dlg = tk.Toplevel(self)
 		dlg.title("Preferences")
 		dlg.transient(self)
-		dlg.resizable(False, False)
-		body = tk.Frame(dlg, padx=18, pady=14)
+		dlg.resizable(True, True)
+		body = tk.Frame(dlg, padx=14, pady=12)
 		body.pack(fill=tk.BOTH, expand=True)
+		body.grid_columnconfigure(0, weight=1, uniform="prefcols")
+		body.grid_columnconfigure(1, weight=1, uniform="prefcols")
 
-		return_var = tk.BooleanVar(value=self.return_to_origin_on_exit)
-		tk.Checkbutton(
-			body, variable=return_var,
-			text="Return needle to origin when closing the application",
-		).pack(anchor="w", pady=(0, 8))
+		# Section LabelFrames use a slightly bolder title than the
+		# inner widget labels so the panel headings read at a glance.
+		section_font = (FONTS["family"], FONTS["size"], "bold")
+		def _section(text, row, column, *, rowspan=1):
+			lf = tk.LabelFrame(body, text=text, padx=10, pady=6,
+				font=section_font)
+			lf.grid(row=row, column=column, rowspan=rowspan,
+				sticky="nsew", padx=4, pady=4)
+			lf.grid_columnconfigure(0, weight=1)
+			return lf
 
-		skip_var = tk.BooleanVar(value=self.skip_intersample_purge_var.get())
-		tk.Checkbutton(
-			body, variable=skip_var,
-			text="Skip inter-sample purge",
-		).pack(anchor="w", pady=(0, 12))
+		def _hint(parent, text, wraplength=300):
+			"""Italic muted help text, gridded into the next row of
+			the surrounding LabelFrame."""
+			lbl = tk.Label(parent, text=text, justify="left", anchor="w",
+				wraplength=wraplength, fg=PALETTE["fg_muted"],
+				font=(FONTS["family"], FONTS["size"], "italic"))
+			return lbl
 
-		tk.Label(body, text="Inter-sample purge protocol:", anchor="w",
-			).pack(anchor="w", pady=(0, 2))
-		protocol_var = tk.StringVar(value=self.purge_protocol)
-		tk.Radiobutton(body, variable=protocol_var, value="basic",
-			text="Water only (water → sample)",
-		).pack(anchor="w", padx=(16, 0))
-		tk.Radiobutton(body, variable=protocol_var, value="decontamination",
-			text="Decontamination (water → bleach → water → sample)",
-		).pack(anchor="w", padx=(16, 0), pady=(0, 12))
-
-		tk.Label(body, text="Plate orientation:", anchor="w",
-			).pack(anchor="w", pady=(0, 2))
+		# ---- Col 0: Plate ---------------------------------------------
+		plate_lf = _section("Plate", 0, 0)
+		tk.Label(plate_lf, text="Plate orientation:", anchor="w",
+			).grid(row=0, column=0, sticky="we", pady=(0, 2))
 		orientation_var = tk.StringVar(value=self.plate_orientation)
-		tk.Radiobutton(body, variable=orientation_var, value="portrait",
-			text="Portrait (default — rows on X-axis, A1 at bottom-left)",
-		).pack(anchor="w", padx=(16, 0))
-		tk.Radiobutton(body, variable=orientation_var, value="landscape",
+		tk.Radiobutton(plate_lf, variable=orientation_var, value="portrait",
+			text="Portrait (rows on X-axis, A1 at bottom-left)",
+		).grid(row=1, column=0, sticky="w", padx=(16, 0))
+		tk.Radiobutton(plate_lf, variable=orientation_var, value="landscape",
 			text="Landscape (columns on X-axis, A1 at upper-left)",
-		).pack(anchor="w", padx=(16, 0))
-		tk.Label(body,
-			text=(
-				"Portrait is recommended for this XY table's sizing. "
-				"Switching orientations changes the origin corner and "
-				"the snake pattern; recalibrate the Starting Well and "
-				"Waste Bin positions afterward using the Position "
-				"Calibration tool."
-			),
-			justify="left", anchor="w", wraplength=420,
-			fg=PALETTE["fg_muted"],
-			font=(FONTS["family"], FONTS["size"], "italic"),
-		).pack(anchor="w", padx=(16, 0), pady=(2, 12))
+		).grid(row=2, column=0, sticky="w", padx=(16, 0))
+		_hint(plate_lf,
+			"Portrait is recommended for this XY table's sizing. "
+			"Switching orientations changes the origin corner and "
+			"the snake pattern; recalibrate the Starting Well and "
+			"Waste Bin positions afterward using the Position "
+			"Calibration tool.",
+			wraplength=320,
+		).grid(row=3, column=0, sticky="we", padx=(16, 0), pady=(4, 0))
 
-		# Motor speed mode.
-		tk.Label(body, text="Motor speed mode:", anchor="w",
-			).pack(anchor="w", pady=(0, 2))
+		# ---- Col 0: Inter-sample Purge --------------------------------
+		purge_lf = _section("Inter-sample Purge", 1, 0)
+		tk.Label(purge_lf, text="Protocol:", anchor="w",
+			).grid(row=0, column=0, sticky="we", pady=(0, 2))
+		protocol_var = tk.StringVar(value=self.purge_protocol)
+		tk.Radiobutton(purge_lf, variable=protocol_var, value="basic",
+			text="Water only (water → sample)",
+		).grid(row=1, column=0, sticky="w", padx=(16, 0))
+		tk.Radiobutton(purge_lf, variable=protocol_var, value="decontamination",
+			text="Decontamination (water → bleach → water → sample)",
+		).grid(row=2, column=0, sticky="w", padx=(16, 0))
+		skip_var = tk.BooleanVar(value=self.skip_intersample_purge_var.get())
+		tk.Checkbutton(purge_lf, variable=skip_var,
+			text="Skip inter-sample purge entirely",
+		).grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+		# ---- Col 0: Run Behavior --------------------------------------
+		behav_lf = _section("Run Behavior", 2, 0)
+		return_var = tk.BooleanVar(value=self.return_to_origin_on_exit)
+		tk.Checkbutton(behav_lf, variable=return_var,
+			text="Return needle to origin when closing the application",
+		).grid(row=0, column=0, sticky="w")
+
+		# ---- Col 1: Motor Movement ------------------------------------
+		motor_lf = _section("Motor Movement", 0, 1)
+		tk.Label(motor_lf, text="Motor speed mode:", anchor="w",
+			).grid(row=0, column=0, sticky="we", pady=(0, 2))
 		speed_var = tk.StringVar(value=self.motor_speed_mode)
-		tk.Radiobutton(body, variable=speed_var, value="slow",
-			text="Slow speed (default — all moves at fractionation speed)",
-		).pack(anchor="w", padx=(16, 0))
-		tk.Radiobutton(body, variable=speed_var, value="variable",
+		tk.Radiobutton(motor_lf, variable=speed_var, value="slow",
+			text="Slow speed (all moves at fractionation speed)",
+		).grid(row=1, column=0, sticky="w", padx=(16, 0))
+		tk.Radiobutton(motor_lf, variable=speed_var, value="variable",
 			text="Variable speed (transit moves faster than fractionation)",
-		).pack(anchor="w", padx=(16, 0))
-		tk.Label(body,
-			text=(
-				"Slow speed drives all moves at the fractionation "
-				"speed to prevent droplets from being flung from the "
-				"syringe. Variable speed keeps well-to-well "
-				"fractionation slow but speeds up transit moves "
-				"(to/from the waste bin, return to origin, plate "
-				"swaps)."
-			),
-			justify="left", anchor="w", wraplength=420,
-			fg=PALETTE["fg_muted"],
-			font=(FONTS["family"], FONTS["size"], "italic"),
-		).pack(anchor="w", padx=(16, 0), pady=(2, 6))
+		).grid(row=2, column=0, sticky="w", padx=(16, 0))
+		_hint(motor_lf,
+			"Slow speed drives all moves at the fractionation speed "
+			"to prevent droplets from being flung from the syringe. "
+			"Variable speed keeps well-to-well fractionation slow but "
+			"speeds up transit moves (to/from the waste bin, return "
+			"to origin, plate swaps).",
+			wraplength=320,
+		).grid(row=3, column=0, sticky="we", padx=(16, 0), pady=(4, 4))
 
-		# Transit speed factor — only meaningful when Variable speed
-		# is selected. The entry stays visible but is disabled in Slow
-		# mode so the operator still sees the configured value.
-		factor_row = tk.Frame(body)
-		factor_row.pack(anchor="w", padx=(16, 0), pady=(0, 2), fill=tk.X)
+		# Transit speed factor — disabled in Slow mode but kept
+		# visible so the operator can see the configured value.
+		factor_row = tk.Frame(motor_lf)
+		factor_row.grid(row=4, column=0, sticky="we", padx=(16, 0),
+			pady=(0, 2))
 		tk.Label(factor_row, text="Transit speed factor (×):",
 			).pack(side=tk.LEFT)
 		factor_var = tk.StringVar(value=f"{self.transit_speed_factor:.1f}")
 		factor_entry = ttk.Entry(factor_row, textvariable=factor_var, width=8)
 		factor_entry.pack(side=tk.LEFT, padx=(8, 0))
-		factor_err_lbl = tk.Label(body, text="", fg="red", anchor="w",
-			wraplength=420)
-		factor_err_lbl.pack(anchor="w", padx=(16, 0))
-		tk.Label(body,
-			text=(
-				"Default 2.0. Increase cautiously and verify the "
-				"carriage still reaches target positions without "
-				"stalling or missed steps."
-			),
-			justify="left", anchor="w", wraplength=420,
-			fg=PALETTE["fg_muted"],
-			font=(FONTS["family"], FONTS["size"], "italic"),
-		).pack(anchor="w", padx=(16, 0), pady=(2, 12))
+		factor_err_lbl = tk.Label(motor_lf, text="", fg="red", anchor="w",
+			wraplength=320)
+		factor_err_lbl.grid(row=5, column=0, sticky="we", padx=(16, 0))
+		_hint(motor_lf,
+			"Default 2.0. Increase cautiously and verify the "
+			"carriage still reaches target positions without "
+			"stalling or missed steps.",
+			wraplength=320,
+		).grid(row=6, column=0, sticky="we", padx=(16, 0), pady=(2, 0))
 
 		def _sync_factor_state(*_):
 			if speed_var.get() == "variable":
@@ -3513,54 +3532,50 @@ class App(tk.Tk):
 		speed_var.trace_add("write", _sync_factor_state)
 		_sync_factor_state()
 
-		# Notifications section. Optional, supplementary to the
-		# on-screen dialogs. ntfy push needs a topic; if absent or
-		# blank the channel is silently skipped at send time.
-		tk.Label(body, text="Notifications:", anchor="w",
-			).pack(anchor="w", pady=(0, 2))
+		# ---- Col 1: Notifications -------------------------------------
+		# Spans rows 1 + 2 so its taller content balances Plate +
+		# Inter-sample Purge + Run Behavior stacked in column 0.
+		notif_lf = _section("Notifications", 1, 1, rowspan=2)
 		ncfg = dict(self.notification_config or {})
 		audible_var = tk.BooleanVar(value=bool(ncfg.get("audible_enabled")))
-		tk.Checkbutton(body, variable=audible_var,
+		tk.Checkbutton(notif_lf, variable=audible_var,
 			text="Audible alert on manual-intervention prompts",
-		).pack(anchor="w", padx=(16, 0))
+		).grid(row=0, column=0, sticky="w")
 		ntfy_var = tk.BooleanVar(value=bool(ncfg.get("ntfy_enabled")))
-		tk.Checkbutton(body, variable=ntfy_var,
+		tk.Checkbutton(notif_lf, variable=ntfy_var,
 			text="ntfy push notifications",
-		).pack(anchor="w", padx=(16, 0), pady=(0, 2))
+		).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-		ntfy_fields = tk.Frame(body)
-		ntfy_fields.pack(anchor="w", padx=(32, 0), fill=tk.X)
+		ntfy_fields = tk.Frame(notif_lf)
+		ntfy_fields.grid(row=2, column=0, sticky="we", padx=(20, 0),
+			pady=(2, 0))
 		ntfy_fields.grid_columnconfigure(1, weight=1)
 		tk.Label(ntfy_fields, text="Server:", anchor="w").grid(
 			row=0, column=0, sticky="w", padx=(0, 6), pady=2)
 		server_var = tk.StringVar(value=ncfg.get("ntfy_server") or "ntfy.sh")
 		ntfy_server_entry = ttk.Entry(ntfy_fields, textvariable=server_var,
-			width=24)
+			width=20)
 		ntfy_server_entry.grid(row=0, column=1, sticky="we", pady=2)
 		tk.Label(ntfy_fields, text="Topic:", anchor="w").grid(
 			row=1, column=0, sticky="w", padx=(0, 6), pady=2)
 		topic_var = tk.StringVar(value=ncfg.get("ntfy_topic") or "")
 		ntfy_topic_entry = ttk.Entry(ntfy_fields, textvariable=topic_var,
-			width=32)
+			width=20)
 		ntfy_topic_entry.grid(row=1, column=1, sticky="we", pady=2)
-		tk.Label(body,
-			text=(
-				"Install the ntfy app on your phone and subscribe to "
-				"this topic. Choose a unique, hard-to-guess string — "
-				"anyone who knows it can see your notifications."
-			),
-			justify="left", anchor="w", wraplength=420,
-			fg=PALETTE["fg_muted"],
-			font=(FONTS["family"], FONTS["size"], "italic"),
-		).pack(anchor="w", padx=(32, 0), pady=(2, 6))
+		_hint(notif_lf,
+			"Install the ntfy app on your phone and subscribe to "
+			"this topic. Choose a unique, hard-to-guess string — "
+			"anyone who knows it can see your notifications.",
+			wraplength=320,
+		).grid(row=3, column=0, sticky="we", padx=(20, 0), pady=(4, 4))
 
 		# Test button + inline result label.
-		test_row = tk.Frame(body)
-		test_row.pack(anchor="w", padx=(16, 0), pady=(0, 12), fill=tk.X)
-		test_result_lbl = tk.Label(test_row, text="", anchor="w",
-			fg=PALETTE["fg_muted"])
+		test_row = tk.Frame(notif_lf)
+		test_row.grid(row=4, column=0, sticky="we", pady=(4, 0))
 		test_btn = ttk.Button(test_row, text="Send Test Notification")
 		test_btn.pack(side=tk.LEFT)
+		test_result_lbl = tk.Label(test_row, text="", anchor="w",
+			fg=PALETTE["fg_muted"])
 		test_result_lbl.pack(side=tk.LEFT, padx=(8, 0))
 
 		def _send_test():
@@ -3594,8 +3609,10 @@ class App(tk.Tk):
 		ntfy_var.trace_add("write", _sync_ntfy_fields)
 		_sync_ntfy_fields()
 
+		# ---- Bottom button row (spans both columns) ------------------
 		btn_row = tk.Frame(body)
-		btn_row.pack(fill=tk.X)
+		btn_row.grid(row=3, column=0, columnspan=2, sticky="we",
+			padx=4, pady=(8, 0))
 
 		def _ok():
 			new_return = bool(return_var.get())
@@ -3726,10 +3743,17 @@ class App(tk.Tk):
 		dlg.bind("<Return>", lambda _e: _ok())
 		dlg.bind("<Escape>", lambda _e: _cancel())
 
+		# Default geometry: wider than tall — about 2× the old width
+		# so the two columns of LabelFrames don't crowd each other.
+		# Set a minsize too so the user can resize back to a sensible
+		# baseline after dragging it smaller.
 		dlg.update_idletasks()
-		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
-		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		default_w = max(820, dlg.winfo_reqwidth())
+		default_h = max(420, dlg.winfo_reqheight())
+		x = self.winfo_rootx() + (self.winfo_width() - default_w) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - default_h) // 3
+		dlg.geometry(f"{default_w}x{default_h}+{max(0, x)}+{max(0, y)}")
+		dlg.minsize(720, 380)
 		dlg.grab_set()
 
 	def _show_about_dialog(self):

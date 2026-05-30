@@ -568,17 +568,27 @@ def make_bucket_canvas(parent, size=60, bg=None,
 		cx + top_half, top_y + rim_h / 2.0,
 		fill=rim_color, outline=outline_color, width=1,
 	)
-	# Handle arc — semi-circular bow above the rim, with the chord
-	# spanning roughly the rim's width and bowing up about a third of
-	# the canvas. ``create_arc`` with style=ARC draws just the curve.
-	arc_w = top_half * 1.7
-	arc_h = size * 0.40
-	arc_left = cx - arc_w / 2.0
-	arc_top = top_y - arc_h
-	arc_right = cx + arc_w / 2.0
-	arc_bot = top_y + arc_h * 0.10  # tuck slightly below the rim line
+	# Handle arc — semicircular bow whose endpoints attach to the
+	# bucket's top rim, with a small 2 px inset on each side so they
+	# look like a real handle pivoting inboard of the rim corners.
+	#
+	# Critical: Tk's ``create_arc`` with ``start=0, extent=180``
+	# places the two endpoints at the bbox's HORIZONTAL midline
+	# (i.e. ``(x1, midy)`` and ``(x2, midy)``), NOT at the bottom
+	# edge of the bbox — the arc traces the *upper* half of the
+	# inscribed ellipse from 3 o'clock counter-clockwise to 9
+	# o'clock. To attach the handle endpoints just below the rim,
+	# the bbox's vertical midpoint must equal that rim coordinate,
+	# i.e. the bbox extends EQUALLY above and below the rim. The
+	# bottom half of the bbox is invisible space (extent=180 only
+	# draws the upper semicircle).
+	handle_inset = 2.0
+	handle_chord_half = top_half - handle_inset  # half of the chord width
+	handle_reach = handle_chord_half  # square bbox → true semicircle
+	midy = top_y + 1                  # endpoints sit just below the rim line
 	canvas.create_arc(
-		arc_left, arc_top, arc_right, arc_bot,
+		cx - handle_chord_half, midy - handle_reach,
+		cx + handle_chord_half, midy + handle_reach,
 		start=0, extent=180,
 		style=tk.ARC, outline=outline_color, width=2,
 	)

@@ -232,11 +232,22 @@ class WellPlateProgress(tk.Frame):
 	  - ``end_run`` stops the pulsing border and the clock tick.
 	"""
 
-	# Margins reserved for the row letters (left) and column numbers (top).
+	# Margins reserved inside the canvas for the row letters
+	# (left) and column numbers (top) in landscape orientation.
+	# Portrait swaps these: row letters along the bottom, column
+	# numbers along the left, both rotated 90°. The portrait
+	# bottom/left margins below are sized to comfortably hold a
+	# rotated label at the largest plausible label_font_size.
 	_LEFT_MARGIN = 22
 	_TOP_MARGIN = 18
 	_RIGHT_MARGIN = 6
 	_BOTTOM_MARGIN = 6
+
+	# Extra clearance reserved in portrait for the rotated labels,
+	# which live along the bottom edge (row letters) and the left
+	# edge (column numbers) adjacent to the wells.
+	_PORTRAIT_LABEL_GAP = 6
+	_PORTRAIT_LABEL_CLEARANCE = 30
 
 	_PULSE_INTERVAL_MS = 500
 	_CLOCK_INTERVAL_MS = 1000
@@ -644,27 +655,12 @@ class WellPlateProgress(tk.Frame):
 		# bottom-to-top (col 1 at the bottom = A1 corner). Both
 		# portrait label sets are rotated 90° so they read along
 		# their respective axes when the operator tilts the screen
-		# clockwise to match the physical plate. The portrait
-		# margins also include ``_PORTRAIT_LABEL_GAP`` of extra
-		# padding (visual breathing room between wells and labels)
-		# plus ``_PORTRAIT_LABEL_CLEARANCE`` of dedicated label
-		# space — the latter guarantees the rotated text's full
-		# vertical extent fits even when the canvas is
-		# height-limited and the plate is centered (in which case
-		# the clearance from label center to canvas edge collapses
-		# to ``bottom_margin / 2``). Without this clearance the
-		# bottoms of A-H and the lefts of 1-12 get sliced.
-		_PORTRAIT_LABEL_GAP = 12
-		_PORTRAIT_LABEL_CLEARANCE = 24
+		# clockwise to match the physical plate.
+		portrait_label_band = self._PORTRAIT_LABEL_GAP + self._PORTRAIT_LABEL_CLEARANCE
 		if self.orientation == "portrait":
-			label_margin = (
-				self._LEFT_MARGIN
-				+ _PORTRAIT_LABEL_GAP
-				+ _PORTRAIT_LABEL_CLEARANCE
-			)
 			top_margin = self._BOTTOM_MARGIN
-			bottom_margin = label_margin
-			left_margin = label_margin
+			bottom_margin = self._BOTTOM_MARGIN + portrait_label_band
+			left_margin = self._RIGHT_MARGIN + portrait_label_band
 			right_margin = self._RIGHT_MARGIN
 		else:
 			top_margin = self._TOP_MARGIN
@@ -708,82 +704,46 @@ class WellPlateProgress(tk.Frame):
 		# (cap a few pts below the in-well sequence font).
 		label_font_size = max(8, min(int(cell_size // 4), icon_font_size - 1))
 
-		# Canvas-column captions:
-		#   landscape — column numbers across the TOP edge.
-		#   portrait  — row letters (A-H) across the BOTTOM edge, each
-		#               rotated 90° (counterclockwise in Tk's
-		#               convention) so they read along the row when
-		#               the operator tilts the screen 90° clockwise to
-		#               match a physical plate's reading orientation.
-		#
-		# Portrait label_y is anchored to the plate's bottom edge
-		# plus the fixed ``_PORTRAIT_LABEL_GAP`` plus half the
-		# rotated text's visual height — so the operator-visible gap
-		# stays constant regardless of how much canvas height is
-		# reserved below for the text descent. (Centering the label
-		# in ``bottom_margin / 2`` instead would push the label
-		# further from the plate as we enlarged the margin for
-		# clipping clearance.)
-		if self.orientation == "portrait":
-			label_y = (
-				y_offset + plate_h
-				+ _PORTRAIT_LABEL_GAP
-				+ label_font_size / 2
-			)
-		else:
-			label_y = y_offset - top_margin / 2
-		for c in range(canvas_cols):
-			cx = x_offset + cell_size * (c + 0.5)
-			if self.orientation == "portrait":
-				# canvas col c maps to plate row index c (rows on X-axis).
-				caption = chr(ord("A") + c)
+		# Labels — orientation-dependent placement, both drawn in
+		# the main canvas adjacent to the wells.
+		if self.orientation == "landscape":
+			# Row letters down the LEFT inside-margin, column
+			# numbers across the TOP inside-margin. No rotation.
+			for c in range(canvas_cols):
+				cx = x_offset + cell_size * (c + 0.5)
 				self.canvas.create_text(
-					cx, label_y,
-					text=caption,
-					font=("TkDefaultFont", label_font_size),
-					angle=90,
-				)
-			else:
-				caption = str(c + 1)
-				self.canvas.create_text(
-					cx, label_y,
-					text=caption,
+					cx, y_offset - top_margin / 2,
+					text=str(c + 1),
 					font=("TkDefaultFont", label_font_size),
 				)
-
-		# Left labels (canvas-row captions): column numbers in portrait
-		# (12 at the top, 1 at the bottom, since col 1 lives at A1 = the
-		# bottom-left corner); row letters in landscape (A at the top).
-		# Portrait rotates the numbers 90° to match the row-letter
-		# rotation and anchors them to the plate's left edge plus
-		# ``_PORTRAIT_LABEL_GAP`` plus half the rotated text height —
-		# same constant-gap formulation as the bottom-edge labels so
-		# the canvas's enlarged label margin can hold the rotated
-		# digits without clipping their left edges. Landscape uses
-		# the centered-margin placement with horizontal text.
-		for r in range(canvas_rows):
-			cy = y_offset + cell_size * (r + 0.5)
-			if self.orientation == "portrait":
-				# canvas row r maps to plate col idx (cols-1) - r → number
-				# (cols-1) - r + 1 = cols - r.
-				caption = str(self.cols - r)
-				label_x = (
-					x_offset
-					- _PORTRAIT_LABEL_GAP
-					- label_font_size / 2
-				)
-				self.canvas.create_text(
-					label_x, cy,
-					text=caption,
-					font=("TkDefaultFont", label_font_size),
-					angle=90,
-				)
-			else:
-				caption = chr(ord("A") + r)
+			for r in range(canvas_rows):
+				cy = y_offset + cell_size * (r + 0.5)
 				self.canvas.create_text(
 					x_offset - left_margin / 2, cy,
-					text=caption,
+					text=chr(ord("A") + r),
 					font=("TkDefaultFont", label_font_size),
+				)
+		else:
+			# Portrait: rotated row letters along the BOTTOM,
+			# rotated column numbers down the LEFT.
+			label_band_mid = self._PORTRAIT_LABEL_CLEARANCE / 2
+			label_y = y_offset + plate_h + self._PORTRAIT_LABEL_GAP + label_band_mid
+			label_x = x_offset - self._PORTRAIT_LABEL_GAP - label_band_mid
+			for c in range(canvas_cols):
+				cx = x_offset + cell_size * (c + 0.5)
+				self.canvas.create_text(
+					cx, label_y,
+					text=chr(ord("A") + c),
+					font=("TkDefaultFont", label_font_size),
+					angle=90,
+				)
+			for r in range(canvas_rows):
+				cy = y_offset + cell_size * (r + 0.5)
+				self.canvas.create_text(
+					label_x, cy,
+					text=str(self.cols - r),
+					font=("TkDefaultFont", label_font_size),
+					angle=90,
 				)
 
 		# Wells. Iterate logical coords; place each at its rotated
