@@ -106,25 +106,24 @@ def parse_well_id(well_id):
 def well_id_to_cm(well_id, start_x_cm, start_y_cm, well_width_cm,
 		orientation="portrait"):
 	"""Return the absolute ``(x_cm, y_cm)`` table+carriage positions
-	for a SBS well_id given the calibrated A1 origin and well width.
+	for a SBS well_id given the calibrated A1 location and well width.
 
-	Orientation determines how the plate's logical (row, col) indices
-	map to the X/Y motion axes:
+	Origin (0, 0) is always the upper-left mechanical limit and the
+	motor reverse flags are fixed regardless of orientation. Plate
+	orientation only changes which plate axis maps to which motor
+	axis:
 
-	  * ``"landscape"`` — columns on X, rows on Y. A1 at upper-left.
+	  * ``"landscape"`` — columns on X, rows on Y.
 	    ``x = start_x + col_idx × well_width``
 	    ``y = start_y + row_idx × well_width``
 
-	  * ``"portrait"`` — rows on X, columns on Y. A1 at bottom-left.
+	  * ``"portrait"`` — rows on X, columns on Y.
 	    ``x = start_x + row_idx × well_width``
 	    ``y = start_y + col_idx × well_width``
 
-	The Y direction inversion (+Y down in landscape vs +Y up in
-	portrait) is handled by the carriage motor's reverse flag, not by
-	the sign here — both expressions are written with positive
-	well_width contributions, and the operator-calibrated ``start_y_cm``
-	carries whatever sign is appropriate for the current orientation's
-	cm convention.
+	``start_x_cm`` / ``start_y_cm`` are the operator-calibrated A1
+	coordinates for the current orientation; they're the sole input
+	that differs between orientations.
 
 	The mechanical state machine does NOT yet call this function — it
 	uses relative moves in ``_snake_step`` instead — but it's exported
@@ -221,6 +220,190 @@ def format_snapshot_log(snap):
 	return "\n".join(lines)
 
 
+# XY table physical dimensions in millimetres. X (table screw, +X east)
+# spans the shorter axis; Y (carriage screw, +Y south) spans the taller
+# axis. Used by ``TableView`` to scale motor coordinates into canvas
+# pixels.
+TABLE_WIDTH_MM = 170.96   # X (table-screw axis)
+TABLE_HEIGHT_MM = 255.52  # Y (carriage-screw axis)
+
+
+class TableView(tk.Frame):
+	"""Whole-XY-table visualization showing the plate, fixed reference
+	markers (origin, waste bin), and a live crosshair for the
+	dispenser's real-time position.
+
+	Lives next to ``WellPlateProgress`` in Automated mode. Origin
+	(0, 0 cm) is the upper-left corner of the table; +X moves east,
+	+Y moves south, matching the canvas's native coordinate
+	convention so no axis flipping is needed — only a scale from
+	cm to pixels.
+
+	Implementation rolls out across five phases (see the spec the
+	user provided). This file's current scope is **Phase 1 only** —
+	static table outline + plate outline + empty wells — so the
+	user can validate before later phases add markers, the
+	crosshair, resize handling, and polish.
+	"""
+
+	# Padding inside the canvas before the table outline starts —
+	# leaves room for axis labels in later phases.
+	_INNER_PAD_PX = 10
+
+	def __init__(self, parent, min_width=220, min_height=320):
+		super().__init__(parent)
+		self.canvas = tk.Canvas(
+			self, bg="#f4f4f4", bd=0, highlightthickness=1,
+			highlightbackground="#bbbbbb",
+			width=min_width, height=min_height,
+		)
+		self.canvas.pack(fill=tk.BOTH, expand=True)
+
+		# Plate parameters — set by ``set_plate``; ``None`` until the
+		# operator finishes entering valid Plate Parameters.
+		self.rows = 0
+		self.cols = 0
+		self.well_size_cm = 0.0
+		self.table_start_cm = 0.0
+		self.carriage_start_cm = 0.0
+		self.orientation = "landscape"
+		self._has_plate = False
+
+		# Resize redraws — Phase 4 makes this responsive; for Phase 1
+		# the bind exists so the first ``<Configure>`` after pack()
+		# triggers a draw at the real geometry.
+		self.canvas.bind("<Configure>", lambda _e: self._redraw())
+
+	# -- Public API -----------------------------------------------------
+
+	def set_plate(self, rows, cols, well_size_cm, table_start_cm,
+			carriage_start_cm, orientation):
+		"""Set the plate parameters and re-render."""
+		self.rows = int(rows)
+		self.cols = int(cols)
+		self.well_size_cm = float(well_size_cm)
+		self.table_start_cm = float(table_start_cm)
+		self.carriage_start_cm = float(carriage_start_cm)
+		if orientation in ("portrait", "landscape"):
+			self.orientation = orientation
+		self._has_plate = True
+		self._redraw()
+
+	def clear(self):
+		"""Drop the plate from the view (Plate Parameters became
+		invalid). Table outline still draws so the operator sees the
+		canvas is alive — it's the plate that hides."""
+		self._has_plate = False
+		self._redraw()
+
+	# -- Geometry -------------------------------------------------------
+
+	def _scale(self):
+		"""Return ``(px_per_mm, table_x_offset_px, table_y_offset_px,
+		table_w_px, table_h_px)`` for the current canvas size. The
+		table is centered (letter-boxed) so aspect ratio is preserved
+		regardless of how the operator stretches the window.
+		"""
+		w = max(self.canvas.winfo_width(), 1)
+		h = max(self.canvas.winfo_height(), 1)
+		usable_w = max(1, w - 2 * self._INNER_PAD_PX)
+		usable_h = max(1, h - 2 * self._INNER_PAD_PX)
+		px_per_mm = min(
+			usable_w / TABLE_WIDTH_MM,
+			usable_h / TABLE_HEIGHT_MM,
+		)
+		table_w_px = TABLE_WIDTH_MM * px_per_mm
+		table_h_px = TABLE_HEIGHT_MM * px_per_mm
+		x_offset = (w - table_w_px) / 2
+		y_offset = (h - table_h_px) / 2
+		return px_per_mm, x_offset, y_offset, table_w_px, table_h_px
+
+	def _cm_to_px(self, x_cm, y_cm, geom=None):
+		"""Convert a motor (table_cm, carriage_cm) point to canvas
+		pixels. Pass the cached ``_scale()`` tuple as ``geom`` to
+		avoid recomputing it for many points in one draw."""
+		if geom is None:
+			geom = self._scale()
+		px_per_mm, x_offset, y_offset, _w, _h = geom
+		return (
+			x_offset + x_cm * 10.0 * px_per_mm,
+			y_offset + y_cm * 10.0 * px_per_mm,
+		)
+
+	# -- Drawing --------------------------------------------------------
+
+	def _redraw(self):
+		"""Repaint the table outline, the plate (if parameters are
+		set), and the empty well grid inside the plate. Markers and
+		crosshair are added in later phases.
+		"""
+		self.canvas.delete("all")
+		w = self.canvas.winfo_width()
+		h = self.canvas.winfo_height()
+		if w < 30 or h < 30:
+			return
+		geom = self._scale()
+		_pxmm, x_off, y_off, t_w, t_h = geom
+
+		# Table outline — solid rectangle covering the scaled extent
+		# of the physical table. Fill is a slightly lighter shade so
+		# it visibly stands apart from the canvas background.
+		self.canvas.create_rectangle(
+			x_off, y_off, x_off + t_w, y_off + t_h,
+			fill="#fafafa", outline="#555555", width=1,
+		)
+
+		if not self._has_plate or self.rows <= 0 or self.cols <= 0:
+			return
+		if self.well_size_cm <= 0:
+			return
+
+		# Plate bounding box. Each well is rendered as an empty circle
+		# at its motor-cm position. The plate's outline rectangle
+		# tightly bounds the well centers ± half well_size_cm.
+		ws = self.well_size_cm
+		half = ws / 2.0
+		if self.orientation == "landscape":
+			# cols on X (table), rows on Y (carriage)
+			plate_x_min = self.table_start_cm - half
+			plate_x_max = (self.table_start_cm
+				+ (self.cols - 1) * ws + half)
+			plate_y_min = self.carriage_start_cm - half
+			plate_y_max = (self.carriage_start_cm
+				+ (self.rows - 1) * ws + half)
+		else:
+			# portrait: rows on X (table), cols on Y (carriage)
+			plate_x_min = self.table_start_cm - half
+			plate_x_max = (self.table_start_cm
+				+ (self.rows - 1) * ws + half)
+			plate_y_min = self.carriage_start_cm - half
+			plate_y_max = (self.carriage_start_cm
+				+ (self.cols - 1) * ws + half)
+
+		px1, py1 = self._cm_to_px(plate_x_min, plate_y_min, geom)
+		px2, py2 = self._cm_to_px(plate_x_max, plate_y_max, geom)
+		self.canvas.create_rectangle(
+			px1, py1, px2, py2,
+			fill="#ffffff", outline="#444444", width=1,
+		)
+
+		# Wells — empty outlined circles at scaled motor positions.
+		well_r_px = (ws / 2.0) * 10.0 * geom[0] * 0.85
+		for col_idx in range(self.cols):
+			for row_idx in range(self.rows):
+				x_cm, y_cm = well_id_to_cm(
+					f"{chr(ord('A') + row_idx)}{col_idx + 1}",
+					self.table_start_cm, self.carriage_start_cm,
+					ws, orientation=self.orientation,
+				)
+				cx, cy = self._cm_to_px(x_cm, y_cm, geom)
+				self.canvas.create_oval(
+					cx - well_r_px, cy - well_r_px,
+					cx + well_r_px, cy + well_r_px,
+					fill="", outline="#999999", width=1,
+				)
+
+
 class WellPlateProgress(tk.Frame):
 	"""Per-well progress view backed by a Tk Canvas.
 
@@ -297,15 +480,17 @@ class WellPlateProgress(tk.Frame):
 		# Plate state
 		self.rows = 0
 		self.cols = 0
-		# Plate orientation drives the canvas layout. ``"landscape"``
-		# (legacy default): plate cols across the canvas X-axis, rows
-		# down the Y-axis, A1 at the upper-left. ``"portrait"`` (new
+		# Plate orientation drives the canvas layout (tall vs wide).
+		# ``"landscape"`` (legacy default): plate cols across the
+		# canvas X-axis, rows down the Y-axis. ``"portrait"`` (current
 		# default in App init): plate ROWS across the canvas X-axis,
-		# COLS down the Y-axis with col 1 at the bottom, A1 at the
-		# bottom-left. Both modes store status_grid keyed by the
-		# orientation-independent (col_idx, row_idx) tuple — the
-		# remapping happens at paint time so well_dispensing(x, y)
-		# callers don't need to know about orientation.
+		# COLS down the Y-axis with col 1 at the bottom. Both modes
+		# store status_grid keyed by the orientation-independent
+		# (col_idx, row_idx) tuple — the remapping happens at paint
+		# time so well_dispensing(x, y) callers don't need to know
+		# about orientation. The widget's "A1 corner" is a layout
+		# choice; the mechanical origin lives in App and is always the
+		# upper-left mechanical limit regardless of orientation.
 		self.orientation = "landscape"
 		self.volume_per_well = 0.0
 		self.pump_time = 0.0
@@ -321,6 +506,13 @@ class WellPlateProgress(tk.Frame):
 		self._well_items = {}        # (x, y) -> oval id
 		self._well_text_items = {}   # (x, y) -> text id
 		self._geom = None            # last computed layout for hit-testing
+
+		# Preview mode: set by ``show_preview`` before any run starts so
+		# the widget paints an empty plate the operator can use to
+		# position labware on the table. Cleared by ``begin_run`` (the
+		# live visualization takes over) and by ``clear_preview`` (when
+		# Plate Parameters become invalid).
+		self._is_preview = False
 
 		# Pulse animation state
 		self._pulse_thick = False
@@ -361,11 +553,12 @@ class WellPlateProgress(tk.Frame):
 		"""Reset the plate to a fresh run and start the elapsed-time clock.
 
 		``orientation`` (optional) selects the canvas layout:
-		``"portrait"`` (tall, 8 cols × 12 rows, A1 at bottom-left) or
-		``"landscape"`` (wide, 12 cols × 8 rows, A1 at upper-left).
-		``None`` keeps whatever orientation the widget already holds.
-		Callers without orientation context get the legacy landscape
-		layout (the widget's default).
+		``"portrait"`` (tall, 8 cols × 12 rows; col 1 anchored at the
+		bottom of the canvas) or ``"landscape"`` (wide, 12 cols × 8
+		rows; col 1 anchored at the left). ``None`` keeps whatever
+		orientation the widget already holds. Callers without
+		orientation context get the legacy landscape layout (the
+		widget's default).
 		"""
 		self.rows = rows
 		self.cols = cols
@@ -377,6 +570,8 @@ class WellPlateProgress(tk.Frame):
 		self.error_reasons = {}
 		self.well_records = {}
 		self.dispensing_xy = None
+		# Live run takes over from any preview state.
+		self._is_preview = False
 		self._stop_pulse()
 		self._elapsed_accum_s = 0.0
 		self._active_since_mono = monotonic()
@@ -384,6 +579,63 @@ class WellPlateProgress(tk.Frame):
 		self._redraw()
 		self._update_header_count()
 		self.current_lbl["text"] = ""
+
+	def show_preview(self, cols, rows, orientation=None):
+		"""Render an empty plate preview before any run starts.
+
+		Drawn whenever the Plate Parameters in Automated mode all
+		validate, so the operator can use the canvas as a placement
+		guide for orienting the labware on the table. Unlike
+		``begin_run`` this does NOT start the elapsed-time clock and
+		does NOT count as a run start — the App's state machine stays
+		at ``"idle"`` until the operator clicks Begin Fractionation.
+
+		The well grid uses the same drawing logic as a live run; the
+		only visible differences are:
+
+		  * A subtle accent ring around well A1 anchors the operator's
+		    orientation reference.
+		  * The plate-label header reads "Plate preview — orient the
+		    plate according to this layout." instead of the run's
+		    plate ID.
+
+		Idempotent — calling repeatedly with the same args is a no-op
+		paint. Safe to call at any moment while the app is idle; the
+		caller is responsible for not invoking it during an active run
+		(``App`` gates this via ``state.state == "idle"``).
+		"""
+		self.rows = rows
+		self.cols = cols
+		if orientation in ("portrait", "landscape"):
+			self.orientation = orientation
+		self.status_grid = {(x, y): UNVISITED for x in range(cols)
+			for y in range(rows)}
+		self.error_reasons = {}
+		self.well_records = {}
+		self.dispensing_xy = None
+		self._is_preview = True
+		self._stop_pulse()
+		# Preview is static — no elapsed clock, no header counters.
+		self.plate_lbl["text"] = (
+			"Plate preview — orient the plate according to this layout."
+		)
+		self.current_lbl["text"] = ""
+		self._redraw()
+
+	def clear_preview(self):
+		"""Hide the plate preview (called when Plate Parameters fall
+		out of validation). Idempotent. Caller is responsible for not
+		invoking this during an active run."""
+		self._is_preview = False
+		self.rows = 0
+		self.cols = 0
+		self.status_grid = {}
+		self.error_reasons = {}
+		self.well_records = {}
+		self.dispensing_xy = None
+		self.plate_lbl["text"] = ""
+		self.current_lbl["text"] = ""
+		self._redraw()
 
 	def well_dispensing(self, x, y):
 		# A different well dispensing? Stop its pulse before starting ours.
@@ -767,6 +1019,22 @@ class WellPlateProgress(tk.Frame):
 					font=("TkDefaultFont", icon_font_size, "bold"),
 				)
 				self._well_text_items[(x, y)] = text_id
+
+		# Preview-mode A1 accent: a thin green ring around well A1 so
+		# the operator can see at a glance where A1 lands in the
+		# current orientation. Drawn AFTER the wells so it sits on top.
+		# In landscape A1 is at the canvas upper-left; in portrait it's
+		# at the canvas lower-left.
+		if self._is_preview and self.cols > 0 and self.rows > 0:
+			a1_cc, a1_cr = self._logical_to_canvas(0, 0)
+			a1_cx = x_offset + cell_size * (a1_cc + 0.5)
+			a1_cy = y_offset + cell_size * (a1_cr + 0.5)
+			accent_r = well_radius + 3
+			self.canvas.create_oval(
+				a1_cx - accent_r, a1_cy - accent_r,
+				a1_cx + accent_r, a1_cy + accent_r,
+				outline="#1e7d20", width=2,
+			)
 
 		self._geom = {
 			"x_offset": x_offset, "y_offset": y_offset,

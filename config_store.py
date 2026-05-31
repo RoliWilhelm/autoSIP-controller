@@ -354,8 +354,13 @@ def save_purge_protocol(protocol):
 # included in saved profiles so a shared profile doesn't leak the
 # topic.
 
+# ``audible_enabled`` was removed from the operator-facing Preferences
+# (Pi lacks native audio; ntfy push covers the away-from-machine case).
+# Older notification_config.json files may still carry the key — it is
+# tolerated by the JSON loader and silently ignored on read. The audible
+# helper code in notifications.py is retained for a future build with a
+# speaker.
 _NOTIFICATION_DEFAULTS = {
-	"audible_enabled": False,
 	"ntfy_enabled": False,
 	"ntfy_server": "ntfy.sh",
 	"ntfy_topic": "",
@@ -381,9 +386,10 @@ def load_notification_config():
 		return out
 	if not isinstance(data, dict):
 		return out
-	# Audible / ntfy enable flags coerced to bool so a malformed value
-	# can't disable the on-screen dialog or anything else upstream.
-	out["audible_enabled"] = bool(data.get("audible_enabled", False))
+	# ntfy enable flag coerced to bool so a malformed value can't
+	# disable the on-screen dialog or anything else upstream.
+	# ``audible_enabled`` is intentionally NOT loaded — see the
+	# defaults block above.
 	out["ntfy_enabled"] = bool(data.get("ntfy_enabled", False))
 	server = data.get("ntfy_server")
 	if isinstance(server, str) and server.strip():
@@ -402,7 +408,6 @@ def save_notification_config(values):
 	if not isinstance(values, dict):
 		return
 	payload = {
-		"audible_enabled": bool(values.get("audible_enabled", False)),
 		"ntfy_enabled": bool(values.get("ntfy_enabled", False)),
 		"ntfy_server": str(values.get("ntfy_server") or "ntfy.sh"),
 		"ntfy_topic": str(values.get("ntfy_topic") or ""),
@@ -513,10 +518,12 @@ def save_transit_speed_factor(factor):
 
 # Top-level string preference selecting how the plate sits on the XY
 # table. ``"portrait"`` (default for fresh installs): plate rows along
-# the X-axis (table), columns along the Y-axis (carriage); A1 at the
-# bottom-left mechanical corner; +Y physically goes UP. ``"landscape"``:
-# columns on X, rows on Y; A1 at upper-left; +Y goes DOWN. Switching
-# orientations also inverts the carriage motor's reverse flag.
+# the X-axis (table), columns along the Y-axis (carriage).
+# ``"landscape"``: columns on X, rows on Y. Origin (0, 0) is the
+# upper-left mechanical limit and motor reverse flags are fixed
+# regardless of orientation — switching only changes which plate axis
+# maps to which motor axis when the operator calibrates the Starting
+# Well Position.
 
 def load_plate_orientation():
 	"""Return the persisted plate orientation. ``"portrait"`` for fresh

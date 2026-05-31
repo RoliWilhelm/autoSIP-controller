@@ -24,7 +24,7 @@ from styling import (
 	make_bimodal_distribution_canvas, make_bucket_canvas,
 	make_centrifuge_tube_canvas, make_mop_canvas, primary_button,
 )
-from well_plate import WellPlateProgress, format_snapshot_log
+from well_plate import WellPlateProgress, TableView, format_snapshot_log
 import run_logger
 from run_logger import RunLogger, _fmt_hms
 import notifications
@@ -1499,7 +1499,16 @@ class AutomatedFrame(tk.Frame):
 		# LabelFrames above it shrink the canvas to ~70 px tall and the
 		# plate clamps to its 12-px-per-well floor.
 		self.progress = WellPlateProgress(self, min_width=500, min_height=400)
-		self.progress.grid(row=5, column=0, columnspan=2, sticky="nsew")
+		self.progress.grid(row=5, column=0, sticky="nsew")
+		# Whole-XY-table view to the right of the plate canvas. The
+		# plate sits as one element inside it, alongside the operator's
+		# reference markers (origin, waste bin) and — added in later
+		# phases — a real-time crosshair tracking the dispenser
+		# position. Phase 1 scope: static table outline + plate + empty
+		# wells. Markers, crosshair, resize handling, and polish land
+		# in phases 2-5.
+		self.table_view = TableView(self, min_width=240, min_height=360)
+		self.table_view.grid(row=5, column=1, sticky="nsew", padx=(4, 0))
 		self.grid_rowconfigure(5, weight=1)
 
 		# Mirror Project/Sample ID entry text into state.project /
@@ -1512,6 +1521,22 @@ class AutomatedFrame(tk.Frame):
 		# callback sees the latest value on every CSV write.
 		self.plate_id_te.var.trace_add("write", lambda *_: self._on_plate_id_text_changed())
 		self.project_te.entry.bind("<FocusOut>", self._on_project_focus_out, add="+")
+
+		# Plate preview: render an empty plate visualization whenever
+		# all five Plate Parameters validate, so the operator can use
+		# the canvas as a placement guide before clicking Begin
+		# Fractionation. ``_refresh_plate_preview`` is a no-op once a
+		# run is active. Trace the five parameter vars; programmatic
+		# ``.set()`` from the labware loader or a profile fires these
+		# the same as keyboard edits.
+		for _te in (self.rows_text_entry, self.cols_text_entry,
+				self.ws_text_entry, self.table_te, self.carriage_te):
+			_te.var.trace_add("write",
+				lambda *_a: self._refresh_plate_preview())
+		# Initial render once the frame is fully constructed and the
+		# App has finished init — defer one event loop tick so loaded
+		# prefs have had a chance to populate the entries.
+		self.after_idle(self._refresh_plate_preview)
 
 		# Persist field values to ~/.autosip/config.json on every focus-out
 		# so the next launch can repopulate. Bound on each entry widget --
@@ -1645,6 +1670,53 @@ class AutomatedFrame(tk.Frame):
 		ok, _ = validation.plate_id(text)
 		if ok:
 			self.plate_id_te.clear_error()
+
+	def _plate_parameters_valid(self):
+		"""Return the parsed ``(rows, cols, well_size, table_start,
+		carriage_start)`` tuple if all five Plate Parameters fields
+		validate; otherwise return ``None``. Used to gate the plate
+		preview render.
+		"""
+		checks = (
+			(self.rows_text_entry, validation.rows),
+			(self.cols_text_entry, validation.cols),
+			(self.ws_text_entry, validation.well_size),
+			(self.table_te, validation.table_pos),
+			(self.carriage_te, validation.carriage_pos),
+		)
+		parsed = []
+		for te, fn in checks:
+			ok, val = fn(te.get())
+			if not ok:
+				return None
+			parsed.append(val)
+		return tuple(parsed)
+
+	def _refresh_plate_preview(self, *_):
+		"""Re-render the empty plate preview AND the table view from
+		the current Plate Parameters entries. Fires on every parameter
+		edit (via ``trace_add``), on initial frame construction
+		(deferred via ``after_idle``), and on plate-orientation
+		switches in Preferences. No-op while a run is in flight — the
+		live visualization owns the canvas then.
+		"""
+		if self.app.state.state != "idle":
+			return
+		params = self._plate_parameters_valid()
+		if params is None:
+			self.progress.clear_preview()
+			self.table_view.clear()
+			return
+		rows_v, cols_v, ws_v, tx_v, ty_v = params
+		self.progress.show_preview(
+			cols=cols_v, rows=rows_v,
+			orientation=self.app.plate_orientation,
+		)
+		self.table_view.set_plate(
+			rows=rows_v, cols=cols_v, well_size_cm=ws_v,
+			table_start_cm=tx_v, carriage_start_cm=ty_v,
+			orientation=self.app.plate_orientation,
+		)
 
 	def _on_project_focus_out(self, _event=None):
 		"""If the Project changed mid-run, prompt for confirmation; revert
@@ -1988,16 +2060,11 @@ class ManualFrame(tk.Frame):
 	#
 	# Y range is [-15, 0] (not [0, 15]) so from home (motor=0) the
 	# direction that moves the needle into valid travel matches the
-	# motor's existing reverse=True wiring. The PHYSICAL direction "+Y"
-	# points depends on plate orientation: in landscape (origin
-	# upper-left, ``carriage_motor.reverse=True``) +Y physically goes
-	# UP toward the home corner; in portrait (origin bottom-left,
-	# ``carriage_motor.reverse=False`` per
-	# ``_apply_plate_orientation_to_motors``) +Y physically inverts.
-	# The numeric range stays the same so the operator's saved
-	# Starting Well / Waste Bin cm values still parse; recalibration
-	# after an orientation switch produces new values within this
-	# range.
+	# motor's reverse=True wiring. Origin (0, 0) is always the
+	# upper-left mechanical limit; +X moves east, +Y moves south,
+	# regardless of plate orientation. The numeric range is
+	# orientation-independent — only the Starting Well Position the
+	# operator calibrates differs between orientations.
 	_X_MIN, _X_MAX = 0.0, 20.0
 	_Y_MIN, _Y_MAX = -15.0, 0.0
 
@@ -2056,11 +2123,11 @@ class ManualFrame(tk.Frame):
 		# Plus-pad of directional buttons. Corners empty.
 		pad = tk.Frame(jog)
 		pad.grid(row=1, column=0, pady=(0, 8))
-		# Jog buttons. +X is always "right" in both orientations; the
-		# Y arrows' compass meaning depends on plate orientation, so
-		# the tooltip text refreshes via ``refresh_jog_tooltips``
-		# (called at construction time and again whenever the
-		# operator changes orientation in Preferences).
+		# Jog buttons drive the motors in fixed physical directions
+		# regardless of plate orientation: +X moves east, +Y moves
+		# south (away from the upper-left origin), and their inverses
+		# the opposite way. Tooltip text is set once via
+		# ``refresh_jog_tooltips``.
 		self.y_plus_btn = ttk.Button(
 			pad, text="▲ Y+", width=8,
 			command=lambda: self._jog("y", +1),
@@ -2542,34 +2609,21 @@ class ManualFrame(tk.Frame):
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
 
 	def refresh_jog_tooltips(self):
-		"""Update the Y+/Y- tooltips to reflect the current plate
-		orientation. +X is always "right" so its tooltips never change.
-		Called at construction and whenever the operator changes the
-		orientation in Tools → Preferences."""
-		orientation = self.app.plate_orientation
-		if orientation == "portrait":
-			y_plus = (
-				"Jog one step in the +Y direction. In portrait "
-				"orientation +Y physically moves the carriage UP, "
-				"away from the bottom-left origin (toward higher "
-				"column numbers)."
-			)
-			y_minus = (
-				"Jog one step in the −Y direction. In portrait "
-				"orientation −Y physically moves the carriage DOWN, "
-				"toward the bottom-left origin."
-			)
-		else:
-			y_plus = (
-				"Jog one step in the +Y direction. In landscape "
-				"orientation +Y physically moves the carriage UP, "
-				"toward the upper-left origin (refused at the limit)."
-			)
-			y_minus = (
-				"Jog one step in the −Y direction. In landscape "
-				"orientation −Y physically moves the carriage DOWN, "
-				"away from the upper-left origin (toward the plate)."
-			)
+		"""Set the Y+/Y− tooltips. The Manual jog buttons drive the motors
+		in fixed physical directions regardless of plate orientation —
+		origin (0, 0) is always the upper-left mechanical limit; +X
+		always moves east, +Y always moves south. Kept as a method (not
+		a one-shot at construction) so the rest of the App can call it
+		uniformly; orientation is no longer consulted.
+		"""
+		y_plus = (
+			"Jog one step in the +Y direction (carriage moves south, "
+			"away from the upper-left mechanical limit, toward the plate)."
+		)
+		y_minus = (
+			"Jog one step in the −Y direction (carriage moves north, "
+			"toward the upper-left mechanical limit; refused at the limit)."
+		)
 		self._y_plus_tooltip.text = y_plus
 		self._y_minus_tooltip.text = y_minus
 
@@ -3154,13 +3208,16 @@ class App(tk.Tk):
 		self.purge_protocol = config_store.load_purge_protocol()
 
 		# Plate orientation: "portrait" (default for fresh installs;
-		# plate rows on X-axis, columns on Y-axis, A1 at bottom-left,
-		# +Y up) or "landscape" (columns on X, rows on Y, A1 at
-		# upper-left, +Y down). Top-level preference persisted in
-		# config.json; consulted by _snake_step for iteration order
-		# and applied to carriage_motor.reverse for direction inversion.
+		# plate rows on X-axis, columns on Y-axis) or "landscape"
+		# (columns on X, rows on Y). Top-level preference persisted in
+		# config.json. Origin (0, 0) is the upper-left mechanical limit
+		# and the motor reverse flags are fixed regardless of
+		# orientation — orientation only affects which plate axis maps
+		# to which motor axis when the operator calibrates the
+		# Starting Well Position, the snake's physical motor mapping
+		# (see ``_snake_step``), and the plate-progress visualization
+		# layout.
 		self.plate_orientation = config_store.load_plate_orientation()
-		self._apply_plate_orientation_to_motors()
 
 		# Stepper motor speed mode. ``"slow"`` (default) drives every
 		# move at the fractionation cadence so droplets don't fling
@@ -3447,17 +3504,18 @@ class App(tk.Tk):
 			).grid(row=0, column=0, sticky="we", pady=(0, 2))
 		orientation_var = tk.StringVar(value=self.plate_orientation)
 		tk.Radiobutton(plate_lf, variable=orientation_var, value="portrait",
-			text="Portrait (rows on X-axis, A1 at bottom-left)",
+			text="Portrait (plate rows on the X-axis)",
 		).grid(row=1, column=0, sticky="w", padx=(16, 0))
 		tk.Radiobutton(plate_lf, variable=orientation_var, value="landscape",
-			text="Landscape (columns on X-axis, A1 at upper-left)",
+			text="Landscape (plate columns on the X-axis)",
 		).grid(row=2, column=0, sticky="w", padx=(16, 0))
 		_hint(plate_lf,
 			"Portrait is recommended for this XY table's sizing. "
-			"Switching orientations changes the origin corner and "
-			"the snake pattern; recalibrate the Starting Well and "
-			"Waste Bin positions afterward using the Position "
-			"Calibration tool.",
+			"The origin (0, 0) is always the upper-left mechanical "
+			"limit and Manual jog buttons always drive the motors in "
+			"the same physical direction; only the Starting Well "
+			"Position differs between orientations. Recalibrate it "
+			"after switching using the Position Calibration tool.",
 			wraplength=320,
 		).grid(row=3, column=0, sticky="we", padx=(16, 0), pady=(4, 0))
 
@@ -3535,19 +3593,20 @@ class App(tk.Tk):
 		# ---- Col 1: Notifications -------------------------------------
 		# Spans rows 1 + 2 so its taller content balances Plate +
 		# Inter-sample Purge + Run Behavior stacked in column 0.
+		# Audible-alert checkbox removed: the Pi has no native audio and
+		# ntfy push notifications cover the "operator out of earshot"
+		# case. The underlying _audible / _bell helpers in
+		# notifications.py are retained but unreachable so they can be
+		# revived by a future build that includes a speaker.
 		notif_lf = _section("Notifications", 1, 1, rowspan=2)
 		ncfg = dict(self.notification_config or {})
-		audible_var = tk.BooleanVar(value=bool(ncfg.get("audible_enabled")))
-		tk.Checkbutton(notif_lf, variable=audible_var,
-			text="Audible alert on manual-intervention prompts",
-		).grid(row=0, column=0, sticky="w")
 		ntfy_var = tk.BooleanVar(value=bool(ncfg.get("ntfy_enabled")))
 		tk.Checkbutton(notif_lf, variable=ntfy_var,
 			text="ntfy push notifications",
-		).grid(row=1, column=0, sticky="w", pady=(4, 0))
+		).grid(row=0, column=0, sticky="w")
 
 		ntfy_fields = tk.Frame(notif_lf)
-		ntfy_fields.grid(row=2, column=0, sticky="we", padx=(20, 0),
+		ntfy_fields.grid(row=1, column=0, sticky="we", padx=(20, 0),
 			pady=(2, 0))
 		ntfy_fields.grid_columnconfigure(1, weight=1)
 		tk.Label(ntfy_fields, text="Server:", anchor="w").grid(
@@ -3567,11 +3626,11 @@ class App(tk.Tk):
 			"this topic. Choose a unique, hard-to-guess string — "
 			"anyone who knows it can see your notifications.",
 			wraplength=320,
-		).grid(row=3, column=0, sticky="we", padx=(20, 0), pady=(4, 4))
+		).grid(row=2, column=0, sticky="we", padx=(20, 0), pady=(4, 4))
 
 		# Test button + inline result label.
 		test_row = tk.Frame(notif_lf)
-		test_row.grid(row=4, column=0, sticky="we", pady=(4, 0))
+		test_row.grid(row=3, column=0, sticky="we", pady=(4, 0))
 		test_btn = ttk.Button(test_row, text="Send Test Notification")
 		test_btn.pack(side=tk.LEFT)
 		test_result_lbl = tk.Label(test_row, text="", anchor="w",
@@ -3583,7 +3642,6 @@ class App(tk.Tk):
 			# doesn't have to OK + reopen prefs just to test a
 			# tweak. Build an ephemeral config the manager can read.
 			ephemeral = {
-				"audible_enabled": bool(audible_var.get()),
 				"ntfy_enabled": bool(ntfy_var.get()),
 				"ntfy_server": server_var.get().strip(),
 				"ntfy_topic": topic_var.get().strip(),
@@ -3645,19 +3703,22 @@ class App(tk.Tk):
 					factor_var.get())
 				if ok:
 					new_factor = parsed
-			# Orientation switch carries a migration prompt: changing
-			# the origin corner without re-deriving Starting Well /
-			# Waste Bin coords would send the needle to the wrong
-			# absolute positions. Confirm before applying.
+			# Orientation switch carries a migration prompt: the well-
+			# to-XY mapping changes (which plate axis maps to which
+			# motor axis), so the operator must re-derive the Starting
+			# Well Position before the next run. The origin (0, 0) and
+			# physical motor directions are NOT affected by the switch.
 			if new_orientation != self.plate_orientation:
 				go = messagebox.askyesno(
 					"Switch plate orientation?",
-					"Switching plate orientation changes the origin "
-					"corner and snake pattern. Recalibrate the "
-					"Starting Well and Waste Bin positions using the "
-					"Position Calibration tool before your next run.\n\n"
-					"Saved coordinates are kept but will reference the "
-					"old origin until you re-derive them.\n\n"
+					"Switching plate orientation changes which plate "
+					"axis maps to which motor axis, so saved Starting "
+					"Well and Waste Bin positions will reference the "
+					"old mapping until re-derived. Recalibrate them "
+					"using the Position Calibration tool before your "
+					"next run.\n\n"
+					"The origin (0, 0) and the physical direction of "
+					"each Manual jog button are NOT affected.\n\n"
 					"Continue with the switch?",
 					parent=dlg,
 				)
@@ -3678,24 +3739,21 @@ class App(tk.Tk):
 			orientation_changed = (new_orientation != self.plate_orientation)
 			self.plate_orientation = new_orientation
 			if orientation_changed:
-				# Re-apply the carriage-motor direction inversion for
-				# the new orientation. The next motor move uses the
-				# updated reverse flag.
-				self._apply_plate_orientation_to_motors()
-				# Push the new orientation into the live plate canvas
-				# so the idle visualisation reflects the switch
-				# immediately (and a subsequent run picks it up via
-				# begin_run too).
+				# Motor reverse flags are NOT touched by an orientation
+				# switch — origin and physical +X/+Y directions are
+				# fixed (upper-left mechanical limit / east / south)
+				# regardless of orientation. Push the new orientation
+				# into the live plate canvas so the idle visualisation
+				# reflects the switch immediately (a subsequent run
+				# picks it up via begin_run too).
 				af = getattr(self, "automated_frame", None)
 				progress = getattr(af, "progress", None)
 				if progress is not None and hasattr(progress, "set_orientation"):
 					progress.set_orientation(new_orientation)
-				# Manual jog tooltips also change wording based on
-				# orientation; refresh them so the next hover shows
-				# the new direction labels.
-				mf = getattr(self, "manual_frame", None)
-				if mf is not None and hasattr(mf, "refresh_jog_tooltips"):
-					mf.refresh_jog_tooltips()
+				# Refresh the empty-plate preview so the A1 anchor and
+				# layout match the new orientation immediately.
+				if af is not None and hasattr(af, "_refresh_plate_preview"):
+					af._refresh_plate_preview()
 				logger.info("Plate orientation switched to %s", new_orientation)
 			# Motor speed: apply if either the mode or the factor
 			# changed. The motor methods consult the active values
@@ -3717,7 +3775,6 @@ class App(tk.Tk):
 			# next intervention picks them up immediately, then
 			# persist to disk.
 			self.notification_config = {
-				"audible_enabled": bool(audible_var.get()),
 				"ntfy_enabled": bool(ntfy_var.get()),
 				"ntfy_server": server_var.get().strip(),
 				"ntfy_topic": topic_var.get().strip(),
@@ -4424,17 +4481,19 @@ class App(tk.Tk):
 			self._set_controls_enabled(True)
 			self._terminated = False
 		if s.is_paused:
-			origin_label = (
-				"bottom-left limit"
-				if self.plate_orientation == "portrait"
-				else "upper-left limit"
-			)
+			# Pop the Origin Calibration dialog: walks the operator
+			# through the re-park against the mechanical limit and
+			# owns the Resume action that drives the needle back to
+			# the captured pause position. The dialog handles its
+			# own re-entry (clicking Return to Origin again while
+			# the dialog is open dismisses the prior instance).
 			self.set_status(
-				"Returned to origin. Manually re-park the carriage "
-				f"against the {origin_label}, then click Resume."
+				"Returned to origin. Origin Calibration dialog open."
 			)
-		else:
-			self.set_status("Returned to origin.")
+			self._update_run_control_buttons()
+			self._show_origin_calibration_dialog()
+			return
+		self.set_status("Returned to origin.")
 		self._update_run_control_buttons()
 
 	def return_to_start_well(self):
@@ -4703,33 +4762,6 @@ class App(tk.Tk):
 			"motor speed applied: mode=%s factor=%.2f "
 			"(transit_delay=%.6fs / fractionation_delay=%.6fs)",
 			self.motor_speed_mode, factor, transit_delay, fractionation_delay,
-		)
-
-	def _apply_plate_orientation_to_motors(self):
-		"""Push the current ``plate_orientation`` into the carriage
-		motor's ``reverse`` flag so a positive Y move always carries
-		the carriage AWAY from the chosen origin corner.
-
-		Convention:
-		  * landscape — origin at upper-left, +Y physically goes DOWN,
-		    matches the pre-orientation-feature hardware setup; carriage
-		    motor uses ``reverse=True``.
-		  * portrait — origin at bottom-left, +Y physically goes UP;
-		    carriage motor uses ``reverse=False``.
-
-		``table_motor.reverse`` is NOT touched — the +X direction is
-		"right" in both orientations.
-
-		Saved start/waste coordinates are NOT auto-transformed when
-		orientation flips; the operator must recalibrate against the
-		new origin corner (the Preferences dialog warns about this).
-		"""
-		# Landscape preserves the pre-feature behavior (reverse=True);
-		# portrait flips the carriage so +Y goes the OTHER way.
-		self.carriage_motor.reverse = (self.plate_orientation == "landscape")
-		logger.debug(
-			"plate_orientation=%s applied: carriage_motor.reverse=%s",
-			self.plate_orientation, self.carriage_motor.reverse,
 		)
 
 	# -- Pump / pause -----------------------------------------------------
@@ -5449,6 +5481,16 @@ class App(tk.Tk):
 			self._update_run_control_buttons()
 			return
 
+		# Mid-pause recalibration owns its own Resume path through the
+		# Origin Calibration dialog. If the operator clicks the main-UI
+		# Resume while a recalibration is pending, redirect them to
+		# the dialog instead of bypassing the re-park checklist + the
+		# return-to-captured-position move.
+		s = self.state
+		if s.is_paused and s.origin_returned_during_pause:
+			self._show_origin_calibration_dialog()
+			return
+
 		self.state.is_paused = not self.state.is_paused
 
 		if self.state.is_paused:
@@ -5463,37 +5505,7 @@ class App(tk.Tk):
 			self._update_run_control_buttons()
 			return
 
-		# --- Resuming branch ---
-		# If the operator clicked Return to Origin during this pause to
-		# recalibrate against the upper-left mechanical limit, drive the
-		# needle back to the captured position FIRST and pop a Confirm
-		# Calibration dialog before re-arming the state machine.
-		s = self.state
-		if s.origin_returned_during_pause:
-			self.set_status("Returning to paused position…")
-			self.move_to_positions(
-				table_dist=s.paused_table_cm,
-				carriage_dist=s.paused_carriage_cm,
-				is_transit=True,
-			)
-			confirmed = self._show_origin_calibration_dialog(
-				s.paused_table_cm, s.paused_carriage_cm,
-			)
-			if not confirmed:
-				# Cancel: leave the flag True and the run paused so the
-				# operator can re-park and re-attempt without losing
-				# their place. The needle stays at the captured position
-				# (the operator is now in "verify the rig" mode).
-				s.is_paused = True
-				self.set_status(
-					"Calibration not confirmed. Run remains paused."
-				)
-				self._update_run_control_buttons()
-				return
-			# Confirmed -- clear the flag so a subsequent ordinary
-			# Pause+Resume doesn't re-fire the dialog.
-			s.origin_returned_during_pause = False
-
+		# --- Resuming branch (non-recalibration pauses) ---
 		self.set_status("Fractionation in progress...")
 		self.automated_frame.progress.resume_elapsed()
 
@@ -5518,6 +5530,24 @@ class App(tk.Tk):
 			self.pump_liquid()
 
 		self._update_run_control_buttons()
+
+	def _recalibration_resume(self):
+		"""Drive the needle from origin back to the captured pause
+		position, clear the recalibration flag, and trigger the
+		normal Resume path. Called by the Origin Calibration dialog's
+		Resume button after the operator confirms the re-park.
+		"""
+		s = self.state
+		self.set_status("Returning to last visited well…")
+		self.move_to_positions(
+			table_dist=s.paused_table_cm,
+			carriage_dist=s.paused_carriage_cm,
+			is_transit=True,
+		)
+		# Clear the flag so toggle_pause's recalibration guard doesn't
+		# re-open the dialog when we hand off to the normal Resume.
+		s.origin_returned_during_pause = False
+		self.toggle_pause()
 
 	# -- Dialog helpers ---------------------------------------------------
 
@@ -5699,95 +5729,183 @@ class App(tk.Tk):
 		self.wait_window(dlg)
 		return result["choice"]
 
-	def _show_origin_calibration_dialog(self, paused_x_cm, paused_y_cm):
-		"""Modal Toplevel asking the operator to verify the needle is
-		correctly positioned over the expected well after a mid-pause
-		Return-to-Origin recalibration. Returns True on Confirm, False
-		on Cancel (X button, Escape key). Window title:
-		"Origin Calibration".
+	def _show_origin_calibration_dialog(self):
+		"""Open the post-Return-to-Origin recalibration dialog.
+
+		Fires after ``return_to_origin`` finishes its move to (0, 0)
+		when the run is mid-pause AND the operator clicked Return to
+		Origin during this pause. Walks the operator through the
+		manual re-park against the mechanical limit and provides the
+		Resume button that triggers the return-move to the captured
+		pause position.
+
+		Non-blocking: the caller returns to the Tk event loop while
+		the dialog stays open. Resume / Cancel destroy the dialog and
+		do their own follow-up work. Re-opening (operator clicks
+		Return to Origin again, or main-UI Resume) destroys the
+		previous instance first so there's only ever one calibration
+		dialog on screen.
 		"""
+		s = self.state
+		# Dismiss any prior calibration dialog -- re-entry from a
+		# second Return to Origin click or a main-UI Resume should
+		# refresh state rather than stack a duplicate window.
+		prior = getattr(self, "_origin_calibration_dlg", None)
+		if prior is not None:
+			try:
+				if prior.winfo_exists():
+					prior.destroy()
+			except tk.TclError:
+				pass
+			self._origin_calibration_dlg = None
+
+		# Origin is always the upper-left mechanical limit regardless
+		# of plate orientation.
+		corner = "upper-left"
+		current_well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+
 		dlg = tk.Toplevel(self)
 		dlg.title("Origin Calibration")
 		dlg.transient(self)
 		dlg.resizable(False, False)
-
-		result = {"confirmed": False}
+		self._origin_calibration_dlg = dlg
 
 		body = tk.Frame(dlg, padx=14, pady=12)
 		body.pack(fill=tk.BOTH, expand=True)
+
 		tk.Label(
-			body, justify="left", anchor="w", wraplength=440,
+			body, justify="left", anchor="w", wraplength=460,
 			text=(
-				"The needle has returned to the position where the run "
-				"was paused\n"
-				f"(X = {paused_x_cm:.2f} cm, Y = {paused_y_cm:.2f} cm).\n\n"
-				"Please verify visually that the needle is correctly "
-				"positioned over the expected well before resuming.\n\n"
-				"If calibration looks correct, click Confirm to resume "
-				"fractionation. If not, click Cancel — the run stays "
-				"paused so you can re-park the carriage and try again."
+				"The dispenser has returned to origin and the position "
+				"has been tared. Use this opportunity to true-up "
+				"against stepper drift:"
 			),
-		).pack(anchor="w", pady=(0, 10))
+		).pack(anchor="w", pady=(0, 8))
+
+		# Checklist
+		var_pushed = tk.BooleanVar(value=False)
+		var_seated = tk.BooleanVar(value=False)
+
+		def _refresh_resume_state():
+			if var_pushed.get() and var_seated.get():
+				resume_btn.state(["!disabled"])
+			else:
+				resume_btn.state(["disabled"])
+
+		cb1 = tk.Checkbutton(
+			body, variable=var_pushed,
+			text=(
+				f"Manually pushed the carriage against the {corner} "
+				"mechanical limit"
+			),
+			anchor="w", justify="left", wraplength=440,
+			command=_refresh_resume_state,
+		)
+		cb1.pack(anchor="w", pady=(0, 2))
+		cb2 = tk.Checkbutton(
+			body, variable=var_seated,
+			text="Verified the carriage is firmly seated against the limit",
+			anchor="w", justify="left", wraplength=440,
+			command=_refresh_resume_state,
+		)
+		cb2.pack(anchor="w", pady=(0, 8))
+
+		tk.Label(body, anchor="w", justify="left", fg="#444",
+			text="── Return Information ─────────────",
+		).pack(anchor="w", pady=(2, 4))
+		info_frame = tk.Frame(body)
+		info_frame.pack(anchor="w", pady=(0, 8))
+		tk.Label(info_frame, anchor="w", justify="left",
+			text=f"Last visited well:  {current_well_id}",
+		).pack(anchor="w")
+		tk.Label(info_frame, anchor="w", justify="left",
+			text=f"Returning to:       X = {s.paused_table_cm:.2f} cm",
+		).pack(anchor="w")
+		tk.Label(info_frame, anchor="w", justify="left",
+			text=f"                    Y = {s.paused_carriage_cm:.2f} cm",
+		).pack(anchor="w")
+
+		tk.Label(body, anchor="w", justify="left", wraplength=460,
+			text=(
+				"Click Resume to return to the last visited well and "
+				"continue fractionation."
+			),
+		).pack(anchor="w", pady=(0, 12))
 
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X)
 
-		def _cancel(_event=None):
-			dlg.destroy()
-		def _confirm(_event=None):
-			result["confirmed"] = True
-			dlg.destroy()
+		def _close_dialog():
+			if dlg.winfo_exists():
+				try:
+					dlg.grab_release()
+				except tk.TclError:
+					pass
+				dlg.destroy()
+			self._origin_calibration_dlg = None
 
-		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.LEFT, padx=4)
-		ttk.Button(btn_row, text="Confirm", command=_confirm,
-			style="Primary.TButton").pack(side=tk.RIGHT, padx=4)
+		def _cancel(_event=None):
+			_close_dialog()
+			self.set_status(
+				"Origin Calibration cancelled. Run remains paused."
+			)
+			self._update_run_control_buttons()
+
+		def _resume(_event=None):
+			if str(resume_btn.cget("state")) == "disabled":
+				return
+			_close_dialog()
+			self._recalibration_resume()
+
+		def _skip():
+			# Operator override: pre-check both boxes so Resume enables.
+			# Useful when the operator already trusts the rig (lab veteran)
+			# and doesn't need the prompt.
+			var_pushed.set(True)
+			var_seated.set(True)
+			_refresh_resume_state()
+
+		cancel_btn = ttk.Button(btn_row, text="Cancel", command=_cancel)
+		cancel_btn.pack(side=tk.LEFT, padx=4)
+		skip_btn = ttk.Button(btn_row, text="Skip Checklist (Expert)",
+			command=_skip)
+		skip_btn.pack(side=tk.LEFT, padx=4)
+		resume_btn = ttk.Button(btn_row, text="Resume", command=_resume,
+			style="Primary.TButton")
+		resume_btn.pack(side=tk.RIGHT, padx=4)
+		resume_btn.state(["disabled"])
+
 		dlg.bind("<Escape>", _cancel)
-		dlg.bind("<Return>", _confirm)
+		dlg.bind("<Return>", _resume)
 		dlg.protocol("WM_DELETE_WINDOW", _cancel)
 
 		dlg.update_idletasks()
-		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
-		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
-		dlg.grab_set()
-		self.wait_window(dlg)
-		return result["confirmed"]
+		self._center_over_main(dlg)
+		try:
+			dlg.grab_set()
+		except tk.TclError:
+			pass
 
 	def _next_well_after_resume(self):
-		"""Pure mirror of _snake_step's advancing logic so we can name the
-		next well without firing any motors. Used only by the resume
-		breadcrumb. Must follow the orientation-aware snake direction
-		(``_snake_step`` switches on ``self.plate_orientation``)."""
+		"""Pure mirror of ``_snake_step``'s advancing logic so we can
+		name the next well without firing any motors. Used only by the
+		resume breadcrumb. Column-snake in both orientations: inner
+		sweep on ``s.y`` (rows), outer step on ``s.x`` (cols).
+		"""
 		s = self.state
 		x, y, fwd = s.x, s.y, s.carriage_forwards
-		if self.plate_orientation == "portrait":
-			# Column snake: inner sweep on y (rows), outer step on x (cols).
-			if fwd:
-				y = y + 1
-				if y >= s.ROWS:
-					y = s.ROWS - 1
-					x = x + 1
-			else:
-				y = y - 1
-				if y < 0:
-					y = 0
-					x = x + 1
-			if s.COLS:
-				x = min(x, s.COLS - 1)
-			return x, y
-		# Landscape — row snake: inner sweep on x (cols), outer step on y (rows).
 		if fwd:
-			x = x + 1
-			if x >= s.COLS:
-				x = s.COLS - 1
-				y = y + 1
+			y = y + 1
+			if y >= s.ROWS:
+				y = s.ROWS - 1
+				x = x + 1
 		else:
-			x = x - 1
-			if x < 0:
-				x = 0
-				y = y + 1
-		if s.ROWS:
-			y = min(y, s.ROWS - 1)
+			y = y - 1
+			if y < 0:
+				y = 0
+				x = x + 1
+		if s.COLS:
+			x = min(x, s.COLS - 1)
 		return x, y
 
 	# -- Automated fractionation flow ------------------------------------
@@ -6145,6 +6263,26 @@ class App(tk.Tk):
 		s = self.state
 		prime_s = max(0.0, float(s.prime_time_s))
 
+		# Destination note — same conditional wording as the inter-
+		# sample purge Step 3 dialog. Mirrors the move/logging choice
+		# made in _priming_workflow (waste bin when D > 0, start
+		# well A1 when D == 0). The D == 0 wording is intentionally
+		# reassuring so the operator doesn't worry that sample
+		# material is being wasted.
+		if s.discards_at_series_start > 0:
+			dest_note = (
+				"Priming output will be dispensed into the waste bin "
+				"— discard fractions are configured, so this material "
+				"is discarded along with them."
+			)
+		else:
+			dest_note = (
+				"Priming output will be dispensed into well A1 (the "
+				"start well) — no discards configured, so this is "
+				"collected as sample material. Walk only as much as "
+				"needed to form an even droplet at the needle."
+			)
+
 		ctx = {"cancelled": False, "state": "priming",
 			"tick_after": None, "stop_after": None,
 			"auto_start_iso": None, "auto_start_mono": None,
@@ -6161,7 +6299,13 @@ class App(tk.Tk):
 		header_lbl = tk.Label(body, justify="left", anchor="w",
 			wraplength=460,
 			text=f"Needle parked above the {target_label}.")
-		header_lbl.pack(anchor="w", pady=(0, 8))
+		header_lbl.pack(anchor="w", pady=(0, 4))
+
+		dest_note_lbl = tk.Label(body, justify="left", anchor="w",
+			wraplength=460, fg="#444",
+			font=("TkDefaultFont", 9, "italic"),
+			text=dest_note)
+		dest_note_lbl.pack(anchor="w", pady=(0, 8))
 
 		body_lbl = tk.Label(body, justify="left", anchor="w",
 			wraplength=460,
@@ -6585,35 +6729,28 @@ class App(tk.Tk):
 			self._auto_pause_total_reached()
 			return
 
-		# Snake-step to next well.
-		if s.carriage_forwards:
-			s.y = s.y + 1
-			if s.y < s.ROWS:
-				self.carriage_motor.move_dist_relative(s.well_size)
-			else:
-				s.y = s.ROWS - 1
-				self.table_motor.move_dist_relative(-s.well_size)
-				s.x = s.x + 1
-				s.carriage_forwards = not s.carriage_forwards
-		else:
-			s.y = s.y - 1
-			if s.y >= 0:
-				self.carriage_motor.move_dist_relative(-s.well_size)
-			else:
-				s.y = 0
-				self.table_motor.move_dist_relative(-s.well_size)
-				s.x = s.x + 1
-				s.carriage_forwards = not s.carriage_forwards
+		# Snake-step to next well. Defer to ``_snake_step`` so the same
+		# orientation-aware logic drives the inner sweep / outer step
+		# direction AND the off-plate check used by ``_commit_new_series``
+		# (which calls ``_snake_step`` for the first well of every
+		# subsequent sample). Keeping the two code paths in sync via a
+		# single implementation is what makes the inter-sample handoff
+		# land on the right next well in both orientations — the previous
+		# inline step was hard-coded to portrait's column-snake regardless
+		# of ``self.plate_orientation``, so in landscape ``move()`` and
+		# ``_snake_step`` disagreed about which axis to advance and the
+		# next-sample resume jumped to the wrong well.
+		on_plate = self._snake_step()
 
 		if s.is_paused:
 			return
 
-		if s.x == s.COLS:
+		if not on_plate:
 			# Plate fully traversed -- should be unreachable since the
-			# auto-pause above fires first when wells_collected reaches its
-			# target (and validation ensures N <= rows*cols). Defensive:
-			# fall through to auto-pause-total-reached so the run still
-			# finalizes cleanly.
+			# auto-pause above fires first when wells_collected reaches
+			# its target (and validation ensures N <= rows*cols).
+			# Defensive: fall through to auto-pause-total-reached so the
+			# run still finalizes cleanly.
 			self._auto_pause_total_reached()
 		else:
 			self.pump_liquid()
@@ -6814,6 +6951,11 @@ class App(tk.Tk):
 		af.progress.reset()
 		af.progress.set_plate_label(plate_id)
 		af.progress.current_lbl["text"] = "Ready. Click Begin Fractionation to start."
+		# Bring back the empty-plate preview if Plate Parameters are
+		# still valid — the preview's plate-label caption overrides the
+		# "Plate: {id}" header set above, which is the right behavior
+		# for the pre-run state.
+		af._refresh_plate_preview()
 		self._update_run_control_buttons()
 		if save:
 			self.set_status(f"Run ended ({final_status}). Logs saved.")
@@ -6957,6 +7099,7 @@ class App(tk.Tk):
 			self._start_intersample_purge(
 				new_sample_id=current_sample,
 				next_series_index=s.series_index + 1,
+				next_discards=new_d_val,
 				on_done=_proceed,
 			)
 
@@ -7016,7 +7159,8 @@ class App(tk.Tk):
 
 		self._update_run_control_buttons()
 
-	def _start_intersample_purge(self, new_sample_id, next_series_index, on_done):
+	def _start_intersample_purge(self, new_sample_id, next_series_index,
+			next_discards, on_done):
 		"""Run the inter-sample purge workflow.
 
 		Phase count depends on ``self.purge_protocol``:
@@ -7091,11 +7235,24 @@ class App(tk.Tk):
 				return
 			elapsed = monotonic() - ctx["cycle_start_mono"]
 			end_iso = datetime.now().isoformat(timespec="milliseconds")
+			# Destination coords: the wash/bleach/rinse/clear phases
+			# all dispense into the waste bin; the prime phase
+			# dispenses into the waste bin or the current well
+			# depending on next_discards. ctx["prime_dest_x_cm"] /
+			# ["prime_dest_y_cm"] are set at _prime_phase entry to
+			# reflect that choice. For non-prime phases the values
+			# are absent — fall back to the waste-bin coords.
+			if phase == "prime" and "prime_dest_x_cm" in ctx:
+				dest_x_cm = ctx["prime_dest_x_cm"]
+				dest_y_cm = ctx["prime_dest_y_cm"]
+			else:
+				dest_x_cm = s.waste_bin_table
+				dest_y_cm = s.waste_bin_carriage
 			try:
 				self.run_logger.purge_committed(
 					phase=phase, series_index=next_series_index,
-					waste_x_cm=s.waste_bin_table,
-					waste_y_cm=s.waste_bin_carriage,
+					waste_x_cm=dest_x_cm,
+					waste_y_cm=dest_y_cm,
 					start_iso=ctx["cycle_start_iso"],
 					end_iso=end_iso, duration_s=elapsed,
 					extension=ctx["cycle_extension"],
@@ -7626,25 +7783,59 @@ class App(tk.Tk):
 			# (not purge_time), and the framing emphasizes that
 			# sample solution is moving, not a wash.
 			prime_s = float(s.prime_time_s)
-			# Destination line: dynamic, informational only (not a
-			# checkbox). Tells the operator whether the prime fluid
-			# is heading to waste (D > 0) or to the well the needle
-			# is currently parked over (D == 0), so they can judge
-			# how aggressively to walk the solution.
-			if s.discards_planned > 0:
+			# Destination depends on the NEXT sample's discard count
+			# (parsed from the edited entry box when the operator
+			# clicked Continue to Next Sample):
+			#   - D > 0: discards are configured, so prime output is
+			#     discarded along with them. Needle stays at the waste
+			#     bin (already parked there from the wash/bleach/rinse
+			#     phases).
+			#   - D == 0: no discards, so prime output is collected
+			#     sample material. The needle must return from the
+			#     waste bin to the current well so the output lands
+			#     in the well, not in waste — and so the operator's
+			#     visual position matches what the dialog promises.
+			if next_discards > 0:
+				dest_x_cm = s.waste_bin_table
+				dest_y_cm = s.waste_bin_carriage
 				dest_note = (
 					"Priming output will be dispensed into the waste "
-					"bin (discard fractions are configured for this "
-					"sample)."
+					"bin — discard fractions are configured for the "
+					"next sample, so this material is discarded along "
+					"with them."
 				)
 			else:
 				current_well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+				if self.plate_orientation == "portrait":
+					dest_x_cm = s.table_start_cm + s.y * s.well_size
+					dest_y_cm = s.carriage_start_cm + s.x * s.well_size
+				else:
+					dest_x_cm = s.table_start_cm + s.x * s.well_size
+					dest_y_cm = s.carriage_start_cm + s.y * s.well_size
+				# Physically return the needle from the waste bin to
+				# the current well BEFORE the dialog opens. Transit
+				# cadence (no fluid flowing) — same pattern as the
+				# waste-bin move at the top of _start_intersample_purge.
+				self.set_status(
+					f"Moving to well {current_well_id} for priming…")
+				self.move_to_positions(
+					table_dist=dest_x_cm,
+					carriage_dist=dest_y_cm,
+					is_transit=True,
+				)
+				self.set_status("Inter-sample purge: awaiting user.")
 				dest_note = (
 					f"Priming output will be dispensed into well "
 					f"{current_well_id} — no discards configured, so "
-					"this is collected sample material. Walk only as "
-					"much as needed to form an even droplet."
+					"this is collected as sample material. Walk only "
+					"as much as needed to form an even droplet at the "
+					"needle."
 				)
+			# Record the destination for _log_current_cycle so the
+			# prime-phase log rows carry the actual destination cm
+			# (well coords when D == 0, waste-bin coords when D > 0).
+			ctx["prime_dest_x_cm"] = dest_x_cm
+			ctx["prime_dest_y_cm"] = dest_y_cm
 			_run_auto_phase(
 				title=f"Inter-sample Purge — Step {step_no} of {total}",
 				body_text=(
@@ -8963,72 +9154,59 @@ class App(tk.Tk):
 		moves. Returns True if we stayed on the plate, False if we walked
 		off — the caller decides what to do then.
 
-		Iteration order depends on ``self.plate_orientation``:
+		Snake pattern is COLUMN-WISE in both orientations: within a
+		column the inner sweep advances ``s.y`` across rows A→H (and
+		alternates direction column-to-column); when the column
+		finishes, ``s.x`` increments to the next column. Off-plate when
+		``s.x >= s.COLS``. The same logical sequence (A1, B1, C1, C2,
+		B2, A2, A3, ...) is produced regardless of orientation.
 
-		  ``"portrait"`` — column snake. Rows (s.y, A-H) are on the
-		    X-axis (table_motor); columns (s.x, 1-12) are on the Y-axis
-		    (carriage_motor). Within a column the inner sweep advances
-		    s.y across rows A→H (table moves); when the column finishes,
-		    s.x increments to the next column (carriage moves). Off-plate
-		    when ``s.x >= s.COLS``.
+		Only the PHYSICAL motor mapping differs between orientations,
+		since rows and columns live on different physical axes:
 
-		  ``"landscape"`` — row snake. Columns (s.x, 1-12) are on the
-		    X-axis (table_motor); rows (s.y, A-H) are on the Y-axis
-		    (carriage_motor). Within a row the inner sweep advances s.x
-		    across columns 1→12 (table moves); when the row finishes,
-		    s.y increments to the next row (carriage moves). Off-plate
-		    when ``s.y >= s.ROWS``.
+		  ``"portrait"`` — rows (s.y, A-H) on the X-axis (table_motor);
+		    columns (s.x, 1-12) on the Y-axis (carriage_motor). Inner
+		    sweep moves TABLE; column wrap moves CARRIAGE.
 
-		In both orientations: inner-sweep motion is on TABLE; outer
-		step (next sweep) is on CARRIAGE. ``carriage_forwards`` is the
-		inner-sweep direction flag (alternating). Direction inversion
-		of the carriage motor between orientations (+Y = down landscape,
-		+Y = up portrait) is handled once at App init / pref change via
-		``_apply_plate_orientation_to_motors``; the sign of the relative
-		moves here stays uniform.
+		  ``"landscape"`` — rows (s.y, A-H) on the Y-axis (carriage_motor);
+		    columns (s.x, 1-12) on the X-axis (table_motor). Inner
+		    sweep moves CARRIAGE; column wrap moves TABLE.
+
+		``carriage_forwards`` is the inner-sweep direction flag
+		(alternating). Motor reverse flags are fixed (origin = upper-
+		left mechanical limit, +X east, +Y south) regardless of
+		orientation; the sign of the relative moves here stays uniform.
 		"""
 		s = self.state
+		# Pick the physical motors that drive "row" (inner sweep) and
+		# "column" (outer step) for this orientation. Logical iteration
+		# is column-wise either way.
 		if self.plate_orientation == "portrait":
-			# Column snake: inner=rows (s.y) on TABLE; outer=cols (s.x) on CARRIAGE.
-			if s.carriage_forwards:
-				s.y = s.y + 1
-				if s.y < s.ROWS:
-					self.table_motor.move_dist_relative(s.well_size)
-				else:
-					s.y = s.ROWS - 1
-					self.carriage_motor.move_dist_relative(s.well_size)
-					s.x = s.x + 1
-					s.carriage_forwards = False
-			else:
-				s.y = s.y - 1
-				if s.y >= 0:
-					self.table_motor.move_dist_relative(-s.well_size)
-				else:
-					s.y = 0
-					self.carriage_motor.move_dist_relative(s.well_size)
-					s.x = s.x + 1
-					s.carriage_forwards = True
-			return s.x < s.COLS
-		# Landscape — row snake: inner=cols (s.x) on TABLE; outer=rows (s.y) on CARRIAGE.
+			row_motor = self.table_motor
+			col_motor = self.carriage_motor
+		else:
+			row_motor = self.carriage_motor
+			col_motor = self.table_motor
+
 		if s.carriage_forwards:
-			s.x = s.x + 1
-			if s.x < s.COLS:
-				self.table_motor.move_dist_relative(s.well_size)
+			s.y = s.y + 1
+			if s.y < s.ROWS:
+				row_motor.move_dist_relative(s.well_size)
 			else:
-				s.x = s.COLS - 1
-				self.carriage_motor.move_dist_relative(s.well_size)
-				s.y = s.y + 1
+				s.y = s.ROWS - 1
+				col_motor.move_dist_relative(s.well_size)
+				s.x = s.x + 1
 				s.carriage_forwards = False
 		else:
-			s.x = s.x - 1
-			if s.x >= 0:
-				self.table_motor.move_dist_relative(-s.well_size)
+			s.y = s.y - 1
+			if s.y >= 0:
+				row_motor.move_dist_relative(-s.well_size)
 			else:
-				s.x = 0
-				self.carriage_motor.move_dist_relative(s.well_size)
-				s.y = s.y + 1
+				s.y = 0
+				col_motor.move_dist_relative(s.well_size)
+				s.x = s.x + 1
 				s.carriage_forwards = True
-		return s.y < s.ROWS
+		return s.x < s.COLS
 
 	def carriage_return(self):
 		"""Return the needle to the starting position. Transit move —

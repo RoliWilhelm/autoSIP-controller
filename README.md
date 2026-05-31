@@ -71,22 +71,19 @@ are wherever they were left in their last session. The software treats
 that physical position as `(0, 0)` cm — the **origin**. The origin is a
 software reference, not a guaranteed physical location.
 
-The convention is to park the carriage at the **mechanical-limit
-corner** of the lead screws (gently against the stop) before launching
-the software. Which corner counts as the "origin" depends on the plate
-orientation selected under Tools → Preferences:
+The convention is to park the carriage at the **upper-left
+mechanical-limit corner** of the lead screws (gently against the stop)
+before launching the software. This corner is the origin `(0, 0)`
+regardless of plate orientation; the Manual jog buttons drive the
+motors in fixed physical directions (`+X` moves east, `+Y` moves
+south) regardless of orientation too.
 
-- **Portrait** (default): origin = **bottom-left** mechanical limit;
-  A1 sits at the origin corner; `+Y` physically goes UP toward
-  higher column numbers.
-- **Landscape**: origin = **upper-left** mechanical limit; A1 sits at
-  the origin corner; `+Y` physically goes DOWN toward higher row
-  letters.
-
-Doing this consistently makes `(0, 0)` cm equal to the chosen origin
-corner, and gives every coordinate you later enter a stable physical
-meaning. Switching orientation invalidates previously calibrated
-Starting Well / Waste Bin coordinates — recalibrate after a switch.
+Doing this consistently makes `(0, 0)` cm equal to the upper-left
+mechanical limit and gives every coordinate you later enter a stable
+physical meaning. Switching plate orientation only changes which
+plate axis maps to which motor axis (and therefore the Starting Well
+Position you calibrate) — recalibrate the Starting Well and Waste
+Bin coordinates after a switch.
 
 Two consequences follow from that convention:
 
@@ -118,8 +115,8 @@ Two button names cover the same action in different places:
 The re-zeroing matters: stepper motors can miss steps over a long
 session, and the software counters drift away from the true physical
 position. Periodically re-park the carriage manually against the
-origin corner (upper-left in landscape; bottom-left in portrait) and
-click **Return to Origin** to recalibrate.
+upper-left mechanical limit and click **Return to Origin** to
+recalibrate.
 
 ### The three operating modes
 
@@ -328,9 +325,10 @@ the fraction's position within that sample.
 **Jog Controls** — directional movement:
 
 - Four directional buttons: **▲ Y+**, **◀ X−**, **X+ ▶**, **Y− ▼**.
-  The Y axis is oriented so that pressing **▼ Y−** moves the needle
-  *down* (toward higher row indices, A → H), matching a plate origin
-  at the upper-left corner.
+  Each button drives the motor in a fixed physical direction
+  regardless of plate orientation: `+X` moves east, `+Y` moves south
+  (away from the upper-left origin and into the plate-side travel
+  range).
 - **Step** selector — `0.1 mm`, `1 mm`, or `10 mm`. The step size
   translates directly to the cm units used in Automated mode (a
   10 mm jog covers the same distance as typing `1.0` cm into a
@@ -460,10 +458,12 @@ sensitive notification topic lives in a separate
 - **Inter-sample purge protocol** — *Water only* (default) or
   *Decontamination*.
 - **Plate orientation** — *Portrait* (default on fresh installs;
-  rows on X-axis, A1 at bottom-left, +Y up) or *Landscape*
-  (columns on X-axis, A1 at upper-left, +Y down). Switching
-  changes the origin corner and snake pattern; recalibrate
-  Starting Well and Waste Bin positions after a switch.
+  plate rows on the X-axis) or *Landscape* (plate columns on the
+  X-axis). The origin `(0, 0)` is always the upper-left mechanical
+  limit and Manual jog directions are fixed regardless of
+  orientation. Switching only changes which plate axis maps to
+  which motor axis; recalibrate Starting Well and Waste Bin
+  positions after a switch.
 - **Motor speed mode** — *Slow speed* (default; all moves at the
   fractionation cadence) or *Variable speed* (well-to-well
   dispensing stays slow but transit moves — waste-bin approach,
@@ -472,15 +472,13 @@ sensitive notification topic lives in a separate
 - **Notifications** — optional supplementary alerts that fire *in
   addition to* the on-screen dialog at every manual-intervention
   point (sample auto-pause, plate full, prime-step complete,
-  waste 80%/100%, run complete). Two channels: a local audible
-  beep (via `aplay alert.wav` if available, else terminal bell)
-  and an ntfy.sh push to a user-chosen topic. Network failures
-  are logged and swallowed — a failed push never blocks a run.
-  Subscribe to your chosen topic in the [ntfy phone
-  app](https://ntfy.sh) to receive pushes. **Choose a unique,
-  hard-to-guess topic string — anyone who knows it can read your
-  notifications.** A **Send Test Notification** button fires both
-  channels using the live entry values.
+  waste 80%/100%, run complete). Single channel: an ntfy.sh push
+  to a user-chosen topic. Network failures are logged and
+  swallowed — a failed push never blocks a run. Subscribe to your
+  chosen topic in the [ntfy phone app](https://ntfy.sh) to receive
+  pushes. **Choose a unique, hard-to-guess topic string — anyone
+  who knows it can read your notifications.** A **Send Test
+  Notification** button fires the push using the live entry values.
 
 ### Fractionate and Purge: how the two pump labels work
 

@@ -1,29 +1,29 @@
 """Optional, non-blocking, fail-safe operator notifications for autoSIP.
 
 The on-screen dialog at every manual-intervention point is the source of
-truth. These notifications are SUPPLEMENTARY — phone alerts and an
-optional local beep — so the operator can step away from the bench and
-be called back when the system needs them. Every send happens in a
-daemon thread with a hard timeout; every failure path is logged and
-swallowed so a network drop or missing audio device never blocks or
-crashes a run.
+truth. These notifications are SUPPLEMENTARY — phone alerts so the
+operator can step away from the bench and be called back when the
+system needs them. Every send happens in a daemon thread with a hard
+timeout; every failure path is logged and swallowed so a network drop
+never blocks or crashes a run.
 
-Two channels:
-
-  * Audible: local-only. Tries ``aplay`` against a short bundled .wav
-    if present; otherwise writes ``\\a`` to stderr (terminal bell).
-    Repeats 2-3 times when ``urgent`` is True.
+Channels:
 
   * ntfy push: HTTP POST to ``https://{server}/{topic}`` with the
     message as the body, a ``Title`` header, and ``Priority: high`` on
     urgent. Default server ``ntfy.sh``. Requires the ``requests``
     package; if missing, the channel logs once and degrades to no-op.
 
+  * Audible: DISABLED. The Pi lacks native audio and ntfy push covers
+    the away-from-machine case. The ``_audible`` / ``_bell`` helpers
+    below are retained so a future build with a USB speaker can revive
+    the channel by re-enabling the gates in ``notify`` / ``send_test``.
+
 The ``NotificationManager`` is constructed by ``App`` with a read-only
-view of the current notification configuration (audible enabled, ntfy
-enabled, server, topic). The config is reloaded on every notify() call
-so a mid-session Preferences change takes effect immediately without
-recreating the manager.
+view of the current notification configuration (ntfy enabled, server,
+topic). The config is reloaded on every notify() call so a mid-session
+Preferences change takes effect immediately without recreating the
+manager.
 """
 
 from __future__ import annotations
@@ -47,6 +47,14 @@ _NTFY_TIMEOUT_S = 10.0
 # the background — the join is just for telemetry / logging context.
 _THREAD_JOIN_S = 0.1
 
+# Master gate for the audible channel. The Pi has no native audio and the
+# ntfy push covers the away-from-machine case; keeping this False means
+# the _audible / _bell helpers below are unreachable from notify() and
+# send_test(). Flip to True to revive the channel on a build that
+# includes a USB speaker (the operator-facing checkbox in Preferences
+# was also removed; bring it back if you flip this).
+_AUDIBLE_DISABLED = True
+
 
 class NotificationManager:
 	"""Dispatch supplementary notifications to enabled channels.
@@ -58,13 +66,14 @@ class NotificationManager:
 	The ``config_provider`` callable should return a dict shaped like::
 
 	    {
-	      "audible_enabled": bool,
 	      "ntfy_enabled": bool,
 	      "ntfy_server": str,    # e.g. "ntfy.sh"
 	      "ntfy_topic": str,     # operator-chosen, optionally blank
 	    }
 
-	Missing keys are treated as falsey / empty.
+	Missing keys are treated as falsey / empty. ``audible_enabled`` is
+	still accepted in the dict for forward-compat with older config
+	files but is currently never consulted (see ``_AUDIBLE_DISABLED``).
 	"""
 
 	def __init__(self, config_provider):
@@ -88,7 +97,11 @@ class NotificationManager:
 		except Exception as exc:
 			logger.warning("notifications: config read failed: %s", exc)
 			return
-		if cfg.get("audible_enabled"):
+		# Audible channel is gated off — see _AUDIBLE_DISABLED. The
+		# helper methods (_audible, _bell, _bundled_wav) remain in
+		# place so a future build can revive the channel without
+		# rewriting it.
+		if not _AUDIBLE_DISABLED and cfg.get("audible_enabled"):
 			self._spawn(self._audible, title, message, urgent, cfg)
 		if cfg.get("ntfy_enabled") and cfg.get("ntfy_topic"):
 			self._spawn(self._ntfy, title, message, urgent, cfg)
@@ -111,8 +124,9 @@ class NotificationManager:
 		except Exception as exc:
 			return False, f"Config read failed: {exc}"
 		channels_tried = 0
-		# Audible: fire-and-forget. Always returns ok=True if enabled.
-		if cfg.get("audible_enabled"):
+		# Audible: gated off (see _AUDIBLE_DISABLED). Helper retained
+		# for a future build with a speaker.
+		if not _AUDIBLE_DISABLED and cfg.get("audible_enabled"):
 			channels_tried += 1
 			self._spawn(self._audible, title, message, False, cfg)
 		# ntfy: synchronous within the test path so we can report the

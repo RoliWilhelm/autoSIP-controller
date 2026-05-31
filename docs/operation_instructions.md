@@ -19,13 +19,13 @@ pip install -r requirements.txt
 ```
 
 Before each session, **park the dispensing carriage at the
-orientation-specific mechanical-limit corner** of the lead screws —
-gently slide both axes against their stops by hand while the autoSIP
-is powered off. In **portrait** orientation (Tools → Preferences
-default) this corner is the **bottom-left** mechanical limit; in
-**landscape** orientation it is the **upper-left**. This physical
-position becomes the software's coordinate origin `(0, 0)` once the
-application launches.
+upper-left mechanical limit** of the lead screws — gently slide both
+axes against their stops by hand while the autoSIP is powered off.
+This physical position becomes the software's coordinate origin
+`(0, 0)` once the application launches. The origin and the physical
+direction of `+X` / `+Y` are fixed regardless of plate orientation;
+plate orientation only affects the Starting Well Position the
+operator calibrates per session.
 
 The autoSIP supports two pumps connected to a single Digital Loggers
 IoT relay on Raspberry Pi GPIO 5:
@@ -250,8 +250,8 @@ those live in Automated mode.
   tracked angle counters. The Position readout then reads exactly
   `Position: X = 0.00 cm, Y = 0.00 cm`. Stepper motors can lose
   steps over a long session; periodically re-park the carriage
-  against the orientation-appropriate mechanical-limit corner
-  (upper-left in landscape, bottom-left in portrait) by hand and
+  against the upper-left mechanical limit by hand (origin is the
+  upper-left mechanical limit regardless of plate orientation) and
   click Return to Origin to recalibrate. A fresh app launch also reads
   `(0.00, 0.00)` — the seating wiggle that initializes lead-screw
   backlash is tared immediately after.
@@ -262,17 +262,17 @@ those live in Automated mode.
   entries are normalized on focus-out (`12.6` → `12.60`).
 
 Soft travel limits are enforced on every jog: the X axis is bounded
-`[0, 20]` cm and the Y axis `[-15, 0]` cm. With this Y range, pressing
-**▼ Y−** from origin moves the needle into the plate-side travel
-range; pressing **▲ Y+** from origin is refused with a status-bar
-message. The Y readout shows a **negative** value as the needle moves
-away from origin. Which compass direction the +Y / −Y buttons
-correspond to physically depends on plate orientation: in
-**landscape** orientation +Y points UP (toward the upper-left
-origin); in **portrait** orientation the carriage motor's reverse
-flag inverts, so +Y points the opposite way relative to the chosen
-origin corner. Hover the Y+ / Y− buttons in Manual mode for the
-orientation-specific direction text.
+`[0, 20]` cm and the Y axis `[-15, 0]` cm. The Manual jog buttons
+(X+/X−/Y+/Y−) drive the motors in fixed physical directions
+regardless of plate orientation. The origin `(0, 0)` is always the
+upper-left mechanical limit of the drive screws. Plate orientation
+only affects the Starting Well Position (where on the table the
+operator places well A1) and the well-to-XY mapping (how plate
+row/column indices map to motor coordinates). Pressing **▼ Y−**
+from origin moves the carriage into the plate-side travel range;
+pressing **▲ Y+** from origin is refused with a status-bar message.
+The Y readout shows a **negative** value as the carriage moves away
+from origin.
 
 **Pump Controls.** Two pump buttons:
 
@@ -414,18 +414,23 @@ through shared profiles). All apply across launches.
 - **Plate orientation** (default *Portrait* on fresh installs) —
   radio group selecting how the plate sits on the XY table:
 
-  - *Portrait* — plate rows on the X-axis, columns on the Y-axis;
-    A1 at the **bottom-left** mechanical corner; +Y physically goes
-    UP. Recommended for this XY table's sizing.
-  - *Landscape* — columns on X, rows on Y; A1 at the **upper-left**
-    mechanical corner; +Y physically goes DOWN.
+  - *Portrait* — plate rows on the X-axis, columns on the Y-axis.
+    Recommended for this XY table's sizing.
+  - *Landscape* — plate columns on the X-axis, rows on the Y-axis.
 
-  Switching orientations changes the origin corner and the snake
-  pattern; *recalibrate Starting Well and Waste Bin positions* using
-  Manual mode's Position Calibration Tool afterwards. Existing
-  saved coordinates are kept but reference the old origin until
-  re-derived. The Preferences dialog pops an explicit confirmation
-  on every orientation switch as a reminder.
+  The origin `(0, 0)` is always the upper-left mechanical limit and
+  the Manual jog buttons always drive the motors in fixed physical
+  directions — orientation does NOT invert any motor or move the
+  origin. Switching orientation only changes which plate axis maps
+  to which motor axis when the operator calibrates the Starting Well
+  Position. The LOGICAL snake order is identical between
+  orientations: A1, B1, …, (last row)1, then (last row)2, …, B2, A2,
+  then A3, B3, … — column-by-column with row direction alternating.
+  *Recalibrate Starting Well and Waste Bin positions* using Manual
+  mode's Position Calibration Tool after switching. Existing saved
+  coordinates are kept but reference the old well-to-XY mapping
+  until re-derived. The Preferences dialog pops an explicit
+  confirmation on every orientation switch as a reminder.
 
 - **Motor speed mode** (default *Slow speed*) — controls the per-
   microstep delay applied to motor moves:
@@ -445,16 +450,12 @@ through shared profiles). All apply across launches.
   after each bump, because too high a factor causes missed steps
   and drift.
 
-- **Notifications** — supplementary push and audible alerts that
-  fire **in addition to** the on-screen dialog at every manual-
-  intervention point. The on-screen dialog remains the source of
-  truth; notifications exist so the operator can step away from the
-  bench and be called back. Two channels:
+- **Notifications** — supplementary push alerts that fire **in
+  addition to** the on-screen dialog at every manual-intervention
+  point. The on-screen dialog remains the source of truth;
+  notifications exist so the operator can step away from the bench
+  and be called back. Single channel:
 
-  - *Audible alert* (default off) — local-only; plays a short beep
-    via `aplay alert.wav` if both are available, otherwise emits
-    terminal bells. Urgent events (waste-bin 80% / 100%) produce a
-    triple beep.
   - *ntfy push notifications* (default off) — POSTs to a
     `https://{server}/{topic}` URL (server defaults to `ntfy.sh`).
     Subscribe to the topic on the [ntfy phone app](https://ntfy.sh)
@@ -464,8 +465,8 @@ through shared profiles). All apply across launches.
     which is `.gitignore`d so the file never lands in version
     control.
 
-  A **Send Test Notification** button fires both channels using the
-  live entry values and shows an inline result (✓ "Test sent" / ✗
+  A **Send Test Notification** button fires the push using the live
+  entry values and shows an inline result (✓ "Test sent" / ✗
   "Test failed — HTTP 401" / etc.). Network failures are logged and
   swallowed; a failed push never blocks a run.
 
@@ -493,13 +494,11 @@ well A1 and to the waste container.
 
 ![Figure: Manual mode jog controls and Position readout](figures/calibration.png)
 
-1. **Park the carriage at the origin mechanical-limit corner.** With
+1. **Park the carriage at the upper-left mechanical limit.** With
    the autoSIP powered off, gently slide the carriage by hand until it
-   rests against the lead-screw stops on both axes. In **portrait**
-   (Tools → Preferences default) the origin corner is the
-   **bottom-left**; in **landscape** it is the **upper-left**. This
-   physical position becomes origin `(0, 0)` once you launch the
-   software.
+   rests against the lead-screw stops on both axes. This physical
+   position becomes origin `(0, 0)` once you launch the software,
+   regardless of plate orientation.
 
 2. **Power on and launch autoSIP.**
 
@@ -553,9 +552,9 @@ well A1 and to the waste container.
 
 **Drift over a long session.** autoSIP does not automatically detect
 lost stepper steps. Periodically re-park the carriage against the
-orientation-appropriate mechanical-limit corner (upper-left in
-landscape, bottom-left in portrait) by hand and click **Home** in
-Manual mode to re-zero the counters.
+upper-left mechanical limit by hand and click **Home** in Manual
+mode to re-zero the counters. The origin is the upper-left
+mechanical limit regardless of plate orientation.
 
 ### 6.3.2 Fractionating multiple samples on a single plate
 
@@ -974,9 +973,9 @@ run, they append to that run's existing `log.csv` instead.
 Stepper motors occasionally miss steps, so the software's tracked
 position can drift away from the true physical position over a long
 run. autoSIP supports a mid-run recalibration that re-zeros the
-counters against the origin mechanical-limit corner without aborting
-the run. The origin corner depends on plate orientation (upper-left
-in landscape, bottom-left in portrait).
+counters against the upper-left mechanical limit (which is always
+the origin, regardless of plate orientation) without aborting the
+run.
 
 1. **Notice the drift.** The dispensed drop lands slightly off-well,
    or the snake path looks visibly shifted. Click **Pause**.
@@ -985,29 +984,21 @@ in landscape, bottom-left in portrait).
    and the software's tracked counters are tared. The current motor
    position at the moment of the click is captured so the matching
    Resume can drive the needle back to it. Status bar:
-   *"Returned to origin. Manually re-park the carriage against the
-   {origin} limit, then click Resume."* — where `{origin}` is
-   `upper-left` in landscape or `bottom-left` in portrait.
+   *"Returned to origin. Origin Calibration dialog open."*
 
-3. **Manually re-park the carriage** against the
-   orientation-appropriate mechanical-limit stops. The software's
-   `(0, 0)` now matches the physical origin corner — drift is
-   corrected.
+3. **Manually re-park the carriage** against the upper-left
+   mechanical-limit stops. The software's `(0, 0)` now matches the
+   physical upper-left mechanical limit — drift is corrected.
 
-4. **Click Resume.** The application drives the needle from the
-   freshly-calibrated origin to the position captured in step 2,
-   then opens an **Origin Calibration** modal showing the captured
-   coordinates and asking you to verify the needle is correctly
-   positioned over the expected well.
+4. **Click Resume in the Origin Calibration dialog.** The
+   application drives the needle from the freshly-calibrated origin
+   to the position captured in step 2, then the state machine
+   continues from where it was paused (mid-pump, mid-wait, or
+   between wells).
 
-5. **Inspect, then click Confirm.** Fractionation resumes from the
-   exact state-machine point where it was paused (mid-pump, mid-wait,
-   or between wells).
-
-If the calibration looks wrong, click **Cancel** in the confirm
-dialog instead. The run stays paused; the needle stays at the
-captured position. You can click Return to Origin again to retry,
-or End Run to abandon.
+If the dialog's re-park check looks wrong, click **Cancel**
+instead. The run stays paused; the needle stays at `(0, 0)`. You
+can click Return to Origin again to retry, or End Run to abandon.
 
 Multiple Return-to-Origin clicks during the same pause are safe —
 only the FIRST click captures the reference position. Subsequent
