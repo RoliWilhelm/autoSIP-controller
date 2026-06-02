@@ -1778,7 +1778,14 @@ class AutomatedFrame(tk.Frame):
 				tm = self.app.table_motor
 				cm = self.app.carriage_motor
 				x_cm = tm.get_angle() * tm.cm_per_deg
-				y_cm = cm.get_angle() * cm.cm_per_deg
+				# Motor Y reading is signed: it goes NEGATIVE as the
+				# carriage moves south of origin (Y range [-15, 0]).
+				# The canvas and every stored cm field (Starting Well,
+				# Waste Bin) treat south as a positive distance from
+				# the upper-left origin (range [0, 15]). Take abs() so
+				# the crosshair tracks south-of-origin travel downward
+				# on the canvas instead of flying off the top edge.
+				y_cm = abs(cm.get_angle() * cm.cm_per_deg)
 				self.table_view.update_position(x_cm, y_cm)
 		except Exception as exc:
 			# Defensive: motor backends might transiently raise during
