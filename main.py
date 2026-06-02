@@ -2137,15 +2137,24 @@ class ManualFrame(tk.Frame):
 	# Soft travel limits (matches validation.TABLE_POS_MAX / CARRIAGE_POS_MAX
 	# but enforced here on the jog path rather than at submit time).
 	#
-	# Y range is [-15, 0] (not [0, 15]) so from home (motor=0) the
-	# direction that moves the needle into valid travel matches the
-	# motor's reverse=True wiring. Origin (0, 0) is always the
-	# upper-left mechanical limit; +X moves east, +Y moves south,
-	# regardless of plate orientation. The numeric range is
-	# orientation-independent — only the Starting Well Position the
-	# operator calibrates differs between orientations.
+	# X axis: signed range [0, 20] cm from origin (upper-left
+	# mechanical limit). Y axis: ±15 cm of physical travel from
+	# origin — kept as a magnitude rather than a signed range
+	# because motor.angle for the carriage can sit in either of two
+	# valid representations of the same physical position:
+	#   * Manual jogs accumulate negative deltas → motor.angle in
+	#     [-15, 0] (south as negative).
+	#   * Absolute moves via ``move_to_positions`` (Return to Start
+	#     Well, move-to-waste-bin, snake-step's outer carriage
+	#     advance, ``s.carriage_start_cm`` runs) drive the motor
+	#     with the operator-stored positive magnitude → motor.angle
+	#     in [0, 15] (south as positive).
+	# Both produce the same physical motor position; the soft-limit
+	# check in ``_jog`` therefore compares ``abs(target_cm)`` against
+	# ``_Y_TRAVEL_MAX`` so jogs work regardless of which sign
+	# convention the motor currently sits in.
 	_X_MIN, _X_MAX = 0.0, 20.0
-	_Y_MIN, _Y_MAX = -15.0, 0.0
+	_Y_TRAVEL_MAX = 15.0
 
 	def __init__(self, master, app):
 		super().__init__(master)
@@ -2548,19 +2557,31 @@ class ManualFrame(tk.Frame):
 		step_cm = self.step_var.get() * sign
 		if axis == "x":
 			motor = self.app.table_motor
-			lo, hi, label = self._X_MIN, self._X_MAX, "X-axis"
+			current_cm = motor.get_angle() * motor.cm_per_deg
+			target_cm = current_cm + step_cm
+			if target_cm < self._X_MIN:
+				self.app.set_status(
+					f"X-axis at soft limit: {self._X_MIN:.1f} cm")
+				return
+			if target_cm > self._X_MAX:
+				self.app.set_status(
+					f"X-axis at soft limit: {self._X_MAX:.1f} cm")
+				return
 		else:
+			# Y soft limit compares the magnitude against the 15 cm of
+			# physical travel — see the class-level comment on
+			# ``_Y_TRAVEL_MAX``. Both signed conventions for motor.angle
+			# are tolerated because both represent the same physical
+			# position; only the magnitude matters for "can we still
+			# move this far without overshooting the lead-screw."
 			motor = self.app.carriage_motor
-			lo, hi, label = self._Y_MIN, self._Y_MAX, "Y-axis"
-
-		current_cm = motor.get_angle() * motor.cm_per_deg
-		target_cm = current_cm + step_cm
-		if target_cm < lo:
-			self.app.set_status(f"{label} at soft limit: {lo:.1f} cm")
-			return
-		if target_cm > hi:
-			self.app.set_status(f"{label} at soft limit: {hi:.1f} cm")
-			return
+			current_cm = motor.get_angle() * motor.cm_per_deg
+			target_cm = current_cm + step_cm
+			if abs(target_cm) > self._Y_TRAVEL_MAX:
+				self.app.set_status(
+					f"Y-axis at soft limit: "
+					f"{self._Y_TRAVEL_MAX:.1f} cm")
+				return
 
 		# Manual jogs are transit moves — operator is positioning the
 		# needle, not dispensing fluid mid-pump. Variable speed mode
