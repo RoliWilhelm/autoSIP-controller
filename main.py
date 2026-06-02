@@ -2164,9 +2164,12 @@ class ManualFrame(tk.Frame):
 		# columns; the two calibration LabelFrames stack vertically in
 		# col 0 (Position Calibration Tool above Prime Time Calibration),
 		# and the XY-table view occupies col 1 spanning their rows so
-		# the operator can watch the crosshair while jogging.
-		self.grid_columnconfigure(0, weight=1)
-		self.grid_columnconfigure(1, weight=1)
+		# the operator can watch the crosshair while jogging. The
+		# ``uniform="manual"`` group forces a strict 50/50 split — same
+		# pattern AutomatedFrame uses on its own 2-column layout — so
+		# the table view renders at identical size in both modes.
+		self.grid_columnconfigure(0, weight=1, uniform="manual")
+		self.grid_columnconfigure(1, weight=1, uniform="manual")
 
 		# Run-active banner: gridded only while an Automated run is in
 		# flight (managed by set_run_active_lock). Amber background so
