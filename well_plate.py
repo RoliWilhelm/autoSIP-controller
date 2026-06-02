@@ -296,6 +296,20 @@ class TableView(tk.Frame):
 		self.waste_y_cm = 0.0
 		self._has_waste = False
 
+		# Live crosshair (Phase 3) — driven by App's 100 ms polling of
+		# the motor positions. ``_crosshair_h`` / ``_crosshair_v`` are
+		# Tk canvas item IDs for the horizontal and vertical lines so
+		# ``update_position`` can move them in place via
+		# ``canvas.coords()`` without rebuilding the entire canvas
+		# (which would flicker visibly at 10 Hz). They are recreated
+		# on every full ``_redraw`` since ``delete("all")`` would have
+		# nuked them.
+		self._position_x_cm = 0.0
+		self._position_y_cm = 0.0
+		self._has_position = False
+		self._crosshair_h = None
+		self._crosshair_v = None
+
 		# Resize redraws — Phase 4 makes this responsive; for Phase 1
 		# the bind exists so the first ``<Configure>`` after pack()
 		# triggers a draw at the real geometry.
@@ -337,6 +351,48 @@ class TableView(tk.Frame):
 		invalid). The origin marker and table outline stay visible."""
 		self._has_waste = False
 		self._redraw()
+
+	def update_position(self, x_cm, y_cm):
+		"""Move the live crosshair to ``(x_cm, y_cm)`` in motor cm.
+		Called by the App's polling loop at ~10 Hz; uses
+		``canvas.coords()`` in-place when possible so the table
+		outline / plate / markers don't flicker. If the items have
+		been nuked by a prior ``_redraw`` (resize, param change), this
+		falls back to creating them fresh.
+		"""
+		self._position_x_cm = float(x_cm)
+		self._position_y_cm = float(y_cm)
+		self._has_position = True
+		# Fast path: shift the existing crosshair items.
+		if (self._crosshair_h is not None
+				and self._crosshair_v is not None):
+			try:
+				geom = self._scale()
+				self._place_crosshair(geom)
+				return
+			except tk.TclError:
+				# Items got destroyed under us (e.g., widget tear-down).
+				self._crosshair_h = None
+				self._crosshair_v = None
+		# Slow path: create them. Skip if canvas isn't laid out yet.
+		w = self.canvas.winfo_width()
+		h = self.canvas.winfo_height()
+		if w < 30 or h < 30:
+			return
+		geom = self._scale()
+		self._draw_crosshair(geom)
+
+	def clear_position(self):
+		"""Hide the crosshair. Idempotent."""
+		self._has_position = False
+		for attr in ("_crosshair_h", "_crosshair_v"):
+			item = getattr(self, attr)
+			if item is not None:
+				try:
+					self.canvas.delete(item)
+				except tk.TclError:
+					pass
+				setattr(self, attr, None)
 
 	# -- Geometry -------------------------------------------------------
 
@@ -436,9 +492,17 @@ class TableView(tk.Frame):
 
 		if not self._has_plate or self.rows <= 0 or self.cols <= 0:
 			self._draw_markers(geom)
+			self._crosshair_h = None
+			self._crosshair_v = None
+			if self._has_position:
+				self._draw_crosshair(geom)
 			return
 		if self.well_size_cm <= 0:
 			self._draw_markers(geom)
+			self._crosshair_h = None
+			self._crosshair_v = None
+			if self._has_position:
+				self._draw_crosshair(geom)
 			return
 
 		# Plate footprint is the SBS standard plastic perimeter
@@ -506,6 +570,14 @@ class TableView(tk.Frame):
 		# Origin + waste-bin markers sit on top of the static layout.
 		self._draw_markers(geom)
 
+		# Crosshair sits on top of everything. ``delete("all")`` at the
+		# top of this method nuked the prior items, so reset and
+		# re-create when a position is set.
+		self._crosshair_h = None
+		self._crosshair_v = None
+		if self._has_position:
+			self._draw_crosshair(geom)
+
 	# -- Static markers (Phase 2) ---------------------------------------
 
 	def _draw_markers(self, geom):
@@ -555,6 +627,50 @@ class TableView(tk.Frame):
 		self.canvas.create_text(
 			bx, by, text="Waste",
 			font=("TkDefaultFont", 8, "bold"), fill="#3a2a00",
+		)
+
+	# -- Live crosshair (Phase 3) ---------------------------------------
+
+	_CROSSHAIR_ARM_MM = 5.0  # 10 mm extent total
+	_CROSSHAIR_COLOUR = "#cc0000"  # bright red — stands out vs the
+	# white plate / amber bin / gray table / dark origin marker.
+
+	def _crosshair_coords(self, geom):
+		"""Return ``(cx, cy, arm_px)`` in canvas pixels for the
+		current crosshair position."""
+		pxmm, x_off, y_off, _t_w, _t_h = geom
+		cx = x_off + self._position_x_cm * 10.0 * pxmm
+		cy = y_off + self._position_y_cm * 10.0 * pxmm
+		arm_px = self._CROSSHAIR_ARM_MM * pxmm
+		return cx, cy, arm_px
+
+	def _draw_crosshair(self, geom):
+		"""Create the crosshair items. Called at the end of
+		``_redraw`` (after the full repaint nuked the canvas) and by
+		``update_position`` when no existing items can be moved."""
+		cx, cy, arm_px = self._crosshair_coords(geom)
+		self._crosshair_h = self.canvas.create_line(
+			cx - arm_px, cy, cx + arm_px, cy,
+			fill=self._CROSSHAIR_COLOUR, width=2,
+		)
+		self._crosshair_v = self.canvas.create_line(
+			cx, cy - arm_px, cx, cy + arm_px,
+			fill=self._CROSSHAIR_COLOUR, width=2,
+		)
+
+	def _place_crosshair(self, geom):
+		"""Move the existing crosshair items via ``canvas.coords()``.
+		Raises ``tk.TclError`` if the items have been destroyed —
+		``update_position`` handles that by falling back to a fresh
+		``_draw_crosshair``."""
+		cx, cy, arm_px = self._crosshair_coords(geom)
+		self.canvas.coords(
+			self._crosshair_h,
+			cx - arm_px, cy, cx + arm_px, cy,
+		)
+		self.canvas.coords(
+			self._crosshair_v,
+			cx, cy - arm_px, cx, cy + arm_px,
 		)
 
 

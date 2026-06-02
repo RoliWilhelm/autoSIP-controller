@@ -1545,6 +1545,12 @@ class AutomatedFrame(tk.Frame):
 		# prefs have had a chance to populate the entries.
 		self.after_idle(self._refresh_plate_preview)
 		self.after_idle(self._refresh_table_view)
+		# Phase 3: poll the motor positions every 100 ms and move the
+		# table-view crosshair to match. ``update_position`` shifts
+		# the existing crosshair items in place when possible, so the
+		# 10 Hz tick doesn't flicker the rest of the canvas.
+		self._table_view_poll_ms = 100
+		self.after(self._table_view_poll_ms, self._poll_dispenser_position)
 
 		# Persist field values to ~/.autosip/config.json on every focus-out
 		# so the next launch can repopulate. Bound on each entry widget --
@@ -1734,12 +1740,13 @@ class AutomatedFrame(tk.Frame):
 	def _refresh_table_view(self, *_):
 		"""Re-render the RIGHT whole-table view from the current
 		Plate Parameters AND Waste Bin Position entries. The table
-		view is static reference info (no live wells-filling animation
-		yet), so this refresh runs UNCONDITIONALLY — including during
-		a run — so the operator can rely on the table outline, ghost
-		guides, plate footprint, origin marker, and waste-bin marker
-		as positional context whenever the canvas is visible. The
-		Phase 3 crosshair will overlay on top.
+		view is static reference info, so this refresh runs
+		UNCONDITIONALLY — including during a run — so the operator
+		can rely on the table outline, ghost guides, plate footprint,
+		origin marker, and waste-bin marker as positional context
+		whenever the canvas is visible. The Phase 3 crosshair sits on
+		top of all that, driven independently by
+		``_poll_dispenser_position``.
 		"""
 		plate = self._plate_parameters_valid()
 		if plate is None:
@@ -1756,6 +1763,32 @@ class AutomatedFrame(tk.Frame):
 			self.table_view.clear_waste_bin()
 		else:
 			self.table_view.set_waste_bin(*waste)
+
+	def _poll_dispenser_position(self):
+		"""Read the current motor positions and push them into the
+		table-view crosshair. Reschedules itself every
+		``_table_view_poll_ms`` (100 ms by default). Skips updating
+		when the canvas isn't viewable (mode switched away) so the
+		hidden frame isn't burning paint cycles, but keeps the timer
+		running so the crosshair resumes immediately on the next
+		switch back to Automated mode.
+		"""
+		try:
+			if self.winfo_viewable():
+				tm = self.app.table_motor
+				cm = self.app.carriage_motor
+				x_cm = tm.get_angle() * tm.cm_per_deg
+				y_cm = cm.get_angle() * cm.cm_per_deg
+				self.table_view.update_position(x_cm, y_cm)
+		except Exception as exc:
+			# Defensive: motor backends might transiently raise during
+			# tear-down or re-init. Swallow + log so a transient
+			# failure doesn't kill the polling loop.
+			logger.debug(
+				"crosshair poll skipped: %s", exc)
+		# Re-schedule even on error so a transient blip recovers.
+		self.after(self._table_view_poll_ms,
+			self._poll_dispenser_position)
 
 	def _on_project_focus_out(self, _event=None):
 		"""If the Project changed mid-run, prompt for confirmation; revert
