@@ -604,9 +604,12 @@ class TableView(tk.Frame):
 			ox, oy - arm_px, ox, oy + arm_px,
 			fill="#333333", width=2,
 		)
+		# Caption sits in the canvas's upper-left corner (outside the
+		# table outline) so it can't be confused with the plate's
+		# starting well — placing it next to the cross used to drop the
+		# text inside the white plate footprint in landscape configs.
 		self.canvas.create_text(
-			ox + arm_px + 3, oy + arm_px + 1,
-			text="Origin", anchor="nw",
+			4, 4, text="Origin", anchor="nw",
 			font=("TkDefaultFont", 8), fill="#333333",
 		)
 
