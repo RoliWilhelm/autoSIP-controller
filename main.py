@@ -1522,21 +1522,29 @@ class AutomatedFrame(tk.Frame):
 		self.plate_id_te.var.trace_add("write", lambda *_: self._on_plate_id_text_changed())
 		self.project_te.entry.bind("<FocusOut>", self._on_project_focus_out, add="+")
 
-		# Plate preview: render an empty plate visualization whenever
-		# all five Plate Parameters validate, so the operator can use
-		# the canvas as a placement guide before clicking Begin
-		# Fractionation. ``_refresh_plate_preview`` is a no-op once a
-		# run is active. Trace the five parameter vars; programmatic
-		# ``.set()`` from the labware loader or a profile fires these
-		# the same as keyboard edits.
+		# Plate preview + table view: render whenever the underlying
+		# parameters validate, so the operator can use the canvases
+		# as a placement guide before clicking Begin Fractionation.
+		# ``_refresh_plate_preview`` (LEFT canvas) gates on the idle
+		# state so it doesn't clobber a live run. ``_refresh_table_view``
+		# (RIGHT canvas) is unconditional — its content is static
+		# reference info (table outline, plate footprint, origin
+		# marker, waste-bin marker) that's useful at any time. Tracing
+		# the parameter vars catches both keyboard edits and
+		# programmatic ``.set()`` from the labware loader / profiles.
 		for _te in (self.rows_text_entry, self.cols_text_entry,
 				self.ws_text_entry, self.table_te, self.carriage_te):
 			_te.var.trace_add("write",
-				lambda *_a: self._refresh_plate_preview())
+				lambda *_a: (self._refresh_plate_preview(),
+					self._refresh_table_view()))
+		for _te in (self.waste_table_te, self.waste_carriage_te):
+			_te.var.trace_add("write",
+				lambda *_a: self._refresh_table_view())
 		# Initial render once the frame is fully constructed and the
 		# App has finished init — defer one event loop tick so loaded
 		# prefs have had a chance to populate the entries.
 		self.after_idle(self._refresh_plate_preview)
+		self.after_idle(self._refresh_table_view)
 
 		# Persist field values to ~/.autosip/config.json on every focus-out
 		# so the next launch can repopulate. Bound on each entry widget --
@@ -1693,30 +1701,61 @@ class AutomatedFrame(tk.Frame):
 		return tuple(parsed)
 
 	def _refresh_plate_preview(self, *_):
-		"""Re-render the empty plate preview AND the table view from
-		the current Plate Parameters entries. Fires on every parameter
-		edit (via ``trace_add``), on initial frame construction
-		(deferred via ``after_idle``), and on plate-orientation
-		switches in Preferences. No-op while a run is in flight — the
-		live visualization owns the canvas then.
+		"""Re-render the LEFT plate-only preview from the current
+		Plate Parameters entries. Fires on every parameter edit (via
+		``trace_add``), on initial frame construction (deferred via
+		``after_idle``), and on plate-orientation switches in
+		Preferences. No-op while a run is in flight — the live
+		visualization owns that canvas then.
 		"""
 		if self.app.state.state != "idle":
 			return
 		params = self._plate_parameters_valid()
 		if params is None:
 			self.progress.clear_preview()
-			self.table_view.clear()
 			return
-		rows_v, cols_v, ws_v, tx_v, ty_v = params
+		rows_v, cols_v, _ws, _tx, _ty = params
 		self.progress.show_preview(
 			cols=cols_v, rows=rows_v,
 			orientation=self.app.plate_orientation,
 		)
-		self.table_view.set_plate(
-			rows=rows_v, cols=cols_v, well_size_cm=ws_v,
-			table_start_cm=tx_v, carriage_start_cm=ty_v,
-			orientation=self.app.plate_orientation,
-		)
+
+	def _waste_bin_valid(self):
+		"""Return ``(waste_table_cm, waste_carriage_cm)`` if both
+		Waste Bin Position entries validate, otherwise ``None``."""
+		ok_x, vx = validation.table_pos(self.waste_table_te.get())
+		if not ok_x:
+			return None
+		ok_y, vy = validation.carriage_pos(self.waste_carriage_te.get())
+		if not ok_y:
+			return None
+		return (vx, vy)
+
+	def _refresh_table_view(self, *_):
+		"""Re-render the RIGHT whole-table view from the current
+		Plate Parameters AND Waste Bin Position entries. The table
+		view is static reference info (no live wells-filling animation
+		yet), so this refresh runs UNCONDITIONALLY — including during
+		a run — so the operator can rely on the table outline, ghost
+		guides, plate footprint, origin marker, and waste-bin marker
+		as positional context whenever the canvas is visible. The
+		Phase 3 crosshair will overlay on top.
+		"""
+		plate = self._plate_parameters_valid()
+		if plate is None:
+			self.table_view.clear()
+		else:
+			rows_v, cols_v, ws_v, tx_v, ty_v = plate
+			self.table_view.set_plate(
+				rows=rows_v, cols=cols_v, well_size_cm=ws_v,
+				table_start_cm=tx_v, carriage_start_cm=ty_v,
+				orientation=self.app.plate_orientation,
+			)
+		waste = self._waste_bin_valid()
+		if waste is None:
+			self.table_view.clear_waste_bin()
+		else:
+			self.table_view.set_waste_bin(*waste)
 
 	def _on_project_focus_out(self, _event=None):
 		"""If the Project changed mid-run, prompt for confirmation; revert
@@ -3750,10 +3789,13 @@ class App(tk.Tk):
 				progress = getattr(af, "progress", None)
 				if progress is not None and hasattr(progress, "set_orientation"):
 					progress.set_orientation(new_orientation)
-				# Refresh the empty-plate preview so the A1 anchor and
-				# layout match the new orientation immediately.
+				# Refresh both canvases so the A1 anchor and the
+				# table-view plate footprint match the new
+				# orientation immediately.
 				if af is not None and hasattr(af, "_refresh_plate_preview"):
 					af._refresh_plate_preview()
+				if af is not None and hasattr(af, "_refresh_table_view"):
+					af._refresh_table_view()
 				logger.info("Plate orientation switched to %s", new_orientation)
 			# Motor speed: apply if either the mode or the factor
 			# changed. The motor methods consult the active values
@@ -6956,6 +6998,7 @@ class App(tk.Tk):
 		# "Plate: {id}" header set above, which is the right behavior
 		# for the pre-run state.
 		af._refresh_plate_preview()
+		af._refresh_table_view()
 		self._update_run_control_buttons()
 		if save:
 			self.set_status(f"Run ended ({final_status}). Logs saved.")

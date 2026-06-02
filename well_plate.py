@@ -290,6 +290,12 @@ class TableView(tk.Frame):
 		self.orientation = "landscape"
 		self._has_plate = False
 
+		# Waste-bin marker — set by ``set_waste_bin``; ``False`` until
+		# the operator enters valid Waste Bin Position fields.
+		self.waste_x_cm = 0.0
+		self.waste_y_cm = 0.0
+		self._has_waste = False
+
 		# Resize redraws — Phase 4 makes this responsive; for Phase 1
 		# the bind exists so the first ``<Configure>`` after pack()
 		# triggers a draw at the real geometry.
@@ -315,6 +321,21 @@ class TableView(tk.Frame):
 		invalid). Table outline still draws so the operator sees the
 		canvas is alive — it's the plate that hides."""
 		self._has_plate = False
+		self._redraw()
+
+	def set_waste_bin(self, waste_x_cm, waste_y_cm):
+		"""Show the waste-bin marker at the operator-calibrated
+		position (motor cm). Marker is a labelled 20 × 20 mm square
+		centred on those coordinates."""
+		self.waste_x_cm = float(waste_x_cm)
+		self.waste_y_cm = float(waste_y_cm)
+		self._has_waste = True
+		self._redraw()
+
+	def clear_waste_bin(self):
+		"""Hide the waste-bin marker (Waste Bin Position became
+		invalid). The origin marker and table outline stay visible."""
+		self._has_waste = False
 		self._redraw()
 
 	# -- Geometry -------------------------------------------------------
@@ -414,8 +435,10 @@ class TableView(tk.Frame):
 			)
 
 		if not self._has_plate or self.rows <= 0 or self.cols <= 0:
+			self._draw_markers(geom)
 			return
 		if self.well_size_cm <= 0:
+			self._draw_markers(geom)
 			return
 
 		# Plate footprint is the SBS standard plastic perimeter
@@ -479,6 +502,60 @@ class TableView(tk.Frame):
 					cx + well_r_px, cy + well_r_px,
 					fill="", outline="#999999", width=1,
 				)
+
+		# Origin + waste-bin markers sit on top of the static layout.
+		self._draw_markers(geom)
+
+	# -- Static markers (Phase 2) ---------------------------------------
+
+	def _draw_markers(self, geom):
+		"""Origin marker (always) + waste-bin marker (when set).
+		Drawn after the plate/wells so they sit on top of the static
+		layout. The crosshair (Phase 3) will sit on top of these.
+		"""
+		pxmm, x_off, y_off, _t_w, _t_h = geom
+
+		# Origin marker — a small "+" cross at canvas (0, 0) mm.
+		# Arm length 6 mm; thicker line so it reads against the table
+		# fill. Stays in fixed dark grey so the operator can use it
+		# as a stable spatial anchor.
+		arm_mm = 6.0
+		arm_px = arm_mm * pxmm
+		ox = x_off
+		oy = y_off
+		self.canvas.create_line(
+			ox - arm_px, oy, ox + arm_px, oy,
+			fill="#333333", width=2,
+		)
+		self.canvas.create_line(
+			ox, oy - arm_px, ox, oy + arm_px,
+			fill="#333333", width=2,
+		)
+		self.canvas.create_text(
+			ox + arm_px + 3, oy + arm_px + 1,
+			text="Origin", anchor="nw",
+			font=("TkDefaultFont", 8), fill="#333333",
+		)
+
+		# Waste-bin marker — labelled 20 × 20 mm square centred on
+		# the configured Waste Bin Position. Amber fill so it reads
+		# distinct from the white plate footprint.
+		if not self._has_waste:
+			return
+		bin_mm = 20.0
+		half_mm = bin_mm / 2.0
+		half_px = half_mm * pxmm
+		bx = x_off + self.waste_x_cm * 10.0 * pxmm
+		by = y_off + self.waste_y_cm * 10.0 * pxmm
+		self.canvas.create_rectangle(
+			bx - half_px, by - half_px,
+			bx + half_px, by + half_px,
+			fill="#f0c060", outline="#8a6a00", width=1,
+		)
+		self.canvas.create_text(
+			bx, by, text="Waste",
+			font=("TkDefaultFont", 8, "bold"), fill="#3a2a00",
+		)
 
 
 class WellPlateProgress(tk.Frame):
