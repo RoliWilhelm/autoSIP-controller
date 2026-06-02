@@ -2436,9 +2436,16 @@ class ManualFrame(tk.Frame):
 		# in Plate Parameters / Waste Bin Position / motor position
 		# repaints both canvases together.
 		self.table_view = TableView(self, min_width=360, min_height=240)
-		self.table_view.grid(row=3, column=1, rowspan=2, sticky="nsew",
+		# The left column has two calibration panels (rows 3, 4) anchored
+		# top (sticky="new") so they stack flush. Vertical slack lives
+		# in a weighted spacer row (row 5) BELOW them — not between
+		# them. The table view spans rows 3–5 on the right so it still
+		# fills the full column height while col 0 keeps a tight stack.
+		self.table_view.grid(row=3, column=1, rowspan=3, sticky="nsew",
 			padx=(2, 4), pady=(0, 4))
-		self.grid_rowconfigure(3, weight=1)
+		self.grid_rowconfigure(3, weight=0)
+		self.grid_rowconfigure(4, weight=0)
+		self.grid_rowconfigure(5, weight=1)
 		# Initial paint from the latest state so the canvas isn't empty
 		# the first time the user switches to Manual mode. Deferred so
 		# the canvas has been laid out before the redraw fires.
