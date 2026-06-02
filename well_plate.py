@@ -433,26 +433,33 @@ class TableView(tk.Frame):
 
 	def _redraw(self):
 		"""Repaint the table outline, the SBS labware footprint (if
-		Plate Parameters are set), and the empty well grid centered
-		inside the footprint.
+		Plate Parameters are set), and the empty well grid inside the
+		footprint with the operator's orientation-aware A1 corner.
 
 		Coordinate convention:
 		  * ``(table_start_cm, carriage_start_cm)`` is the position
-		    the operator would jog Manual mode to when seating the
-		    labware — A1's well-cell upper-left in motor cm. A1's
-		    centre then sits at ``(start_x + ws/2, start_y + ws/2)``.
-		  * The drawn plate rectangle is the SBS standard footprint
-		    (127.76 × 85.48 mm in landscape, transposed in portrait),
+		    the operator JOGGED THE NEEDLE TO when calibrating — i.e.,
+		    A1's CENTRE in motor cm.
+		  * Plate orientation determines which corner of the well grid
+		    A1 occupies. This matches ``WellPlateProgress`` (the
+		    standalone plate preview) so the two views agree on A1's
+		    location.
+		      LANDSCAPE — A1 at the TOP-LEFT of the grid. Cols extend
+		        right (+X = east); rows extend down (+Y = south).
+		        Footprint is 127.76 × 85.48 mm.
+		      PORTRAIT  — A1 at the BOTTOM-LEFT of the grid. Rows
+		        extend right (+X); cols extend up (−Y = north).
+		        Footprint is 85.48 × 127.76 mm.
+		  * The drawn plate rectangle is the SBS standard footprint,
 		    not the bare well-grid extent. Same footprint for every
-		    SBS-standard plate; the well grid sits centered inside it,
-		    so a 12-well Corning, a 96-well, and a 384-well plate all
-		    render at the same plate outline with different grid
-		    densities.
+		    SBS-standard plate regardless of well count; the well grid
+		    sits centred inside it via the ``margin_x/y`` insets.
 		  * All drawing uses a single ``px_per_mm`` scale derived from
-		    the physical table dimensions, so plate, wells, and any
-		    future markers share the table-outline coordinate system.
+		    the physical table dimensions so the plate, wells, and
+		    markers share the table-outline coordinate system.
 
-		Markers and crosshair are added in later phases.
+		Markers and crosshair sit on top of all this via
+		``_draw_markers`` and ``_draw_crosshair``.
 		"""
 		self.canvas.delete("all")
 		w = self.canvas.winfo_width()
@@ -506,44 +513,48 @@ class TableView(tk.Frame):
 				self._draw_crosshair(geom)
 			return
 
-		# Plate footprint is the SBS standard plastic perimeter
-		# (127.76 × 85.48 mm, transposed in portrait). Same footprint
-		# for every SBS-standard plate regardless of well count — the
-		# well grid sits centered inside it, with a per-orientation
-		# margin between the grid edge and the footprint edge.
-		#
-		#   landscape — cols on X, rows on Y; footprint long on X
-		#   portrait  — rows on X, cols on Y; footprint long on Y
-		ws_mm = self.well_size_cm * 10.0
-		if self.orientation == "landscape":
-			x_wells, y_wells = self.cols, self.rows
-			footprint_w_mm = SBS_FOOTPRINT_LONG_MM
-			footprint_h_mm = SBS_FOOTPRINT_SHORT_MM
-		else:
-			x_wells, y_wells = self.rows, self.cols
-			footprint_w_mm = SBS_FOOTPRINT_SHORT_MM
-			footprint_h_mm = SBS_FOOTPRINT_LONG_MM
-		grid_w_mm = x_wells * ws_mm
-		grid_h_mm = y_wells * ws_mm
-		# Margin between the SBS footprint edge and the well grid
-		# edge. Standard plates have positive margins; if the operator
-		# enters extreme parameters that produce a grid larger than
-		# the SBS footprint, the margins go negative and the rectangle
-		# will visibly clip the wells — appropriate feedback that the
-		# input is non-SBS.
-		margin_x_mm = (footprint_w_mm - grid_w_mm) / 2.0
-		margin_y_mm = (footprint_h_mm - grid_h_mm) / 2.0
-
-		# Starting Well Position = A1's well-cell upper-left in motor
-		# cm. The SBS footprint's upper-left is therefore offset by
-		# (margin, margin) above-and-left of A1.
+		# Starting Well Position = A1's CENTRE in motor cm (positive
+		# magnitudes east + south of origin).
 		a1_x_mm = self.table_start_cm * 10.0
 		a1_y_mm = self.carriage_start_cm * 10.0
-		footprint_x_mm = a1_x_mm - margin_x_mm
-		footprint_y_mm = a1_y_mm - margin_y_mm
+		ws_mm = self.well_size_cm * 10.0
+		half_ws = ws_mm / 2.0
 
-		fp_x1 = x_off + footprint_x_mm * pxmm
-		fp_y1 = y_off + footprint_y_mm * pxmm
+		# Footprint dimensions transpose with orientation; the well
+		# grid extents and A1's corner of the grid swap accordingly.
+		# See ``_redraw`` docstring for the convention.
+		if self.orientation == "landscape":
+			footprint_w_mm = SBS_FOOTPRINT_LONG_MM
+			footprint_h_mm = SBS_FOOTPRINT_SHORT_MM
+			grid_w_mm = self.cols * ws_mm
+			grid_h_mm = self.rows * ws_mm
+			# A1 at TOP-LEFT of grid → grid's UL corner is one
+			# half-well NW of A1's centre.
+			grid_left_mm = a1_x_mm - half_ws
+			grid_top_mm  = a1_y_mm - half_ws
+		else:
+			footprint_w_mm = SBS_FOOTPRINT_SHORT_MM
+			footprint_h_mm = SBS_FOOTPRINT_LONG_MM
+			grid_w_mm = self.rows * ws_mm
+			grid_h_mm = self.cols * ws_mm
+			# A1 at BOTTOM-LEFT of grid → grid's UL corner is one
+			# half-well west of A1 and (cols·ws − half_ws) NORTH of
+			# A1's centre.
+			grid_left_mm = a1_x_mm - half_ws
+			grid_top_mm  = a1_y_mm + half_ws - grid_h_mm
+
+		# SBS footprint centres the well grid via per-orientation
+		# margins. Standard plates have positive margins; extreme
+		# operator inputs that produce a grid larger than the SBS
+		# footprint give negative margins and let the rectangle clip
+		# the wells — appropriate feedback that the input is non-SBS.
+		margin_x_mm = (footprint_w_mm - grid_w_mm) / 2.0
+		margin_y_mm = (footprint_h_mm - grid_h_mm) / 2.0
+		fp_left_mm = grid_left_mm - margin_x_mm
+		fp_top_mm  = grid_top_mm  - margin_y_mm
+
+		fp_x1 = x_off + fp_left_mm * pxmm
+		fp_y1 = y_off + fp_top_mm  * pxmm
 		fp_x2 = fp_x1 + footprint_w_mm * pxmm
 		fp_y2 = fp_y1 + footprint_h_mm * pxmm
 		self.canvas.create_rectangle(
@@ -551,17 +562,22 @@ class TableView(tk.Frame):
 			fill="#ffffff", outline="#444444", width=1,
 		)
 
-		# Wells — centered inside their ws_mm × ws_mm cell, with A1's
-		# centre at (a1 + ws_mm/2). The well grid lands centered in
-		# the SBS footprint automatically because A1's well-UL = the
-		# operator-calibrated Starting Well Position.
-		grid_x1 = x_off + a1_x_mm * pxmm
-		grid_y1 = y_off + a1_y_mm * pxmm
-		well_r_px = (ws_mm / 2.0) * pxmm * 0.85
-		for ix in range(x_wells):
-			for iy in range(y_wells):
-				cx = grid_x1 + (ix + 0.5) * ws_mm * pxmm
-				cy = grid_y1 + (iy + 0.5) * ws_mm * pxmm
+		# Wells — orientation-aware. Each well's centre is anchored to
+		# A1's centre (= Starting Well Position) so the crosshair
+		# lands directly on the well labelled "A1" after calibration.
+		# Landscape: cols extend east (+X), rows extend south (+Y).
+		# Portrait:  rows extend east (+X), cols extend north (−Y).
+		well_r_px = half_ws * pxmm * 0.85
+		for col_idx in range(self.cols):
+			for row_idx in range(self.rows):
+				if self.orientation == "landscape":
+					cx_mm = a1_x_mm + col_idx * ws_mm
+					cy_mm = a1_y_mm + row_idx * ws_mm
+				else:
+					cx_mm = a1_x_mm + row_idx * ws_mm
+					cy_mm = a1_y_mm - col_idx * ws_mm
+				cx = x_off + cx_mm * pxmm
+				cy = y_off + cy_mm * pxmm
 				self.canvas.create_oval(
 					cx - well_r_px, cy - well_r_px,
 					cx + well_r_px, cy + well_r_px,
