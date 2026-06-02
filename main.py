@@ -1738,55 +1738,55 @@ class AutomatedFrame(tk.Frame):
 		return (vx, vy)
 
 	def _refresh_table_view(self, *_):
-		"""Re-render the RIGHT whole-table view from the current
-		Plate Parameters AND Waste Bin Position entries. The table
-		view is static reference info, so this refresh runs
-		UNCONDITIONALLY — including during a run — so the operator
-		can rely on the table outline, ghost guides, plate footprint,
-		origin marker, and waste-bin marker as positional context
-		whenever the canvas is visible. The Phase 3 crosshair sits on
-		top of all that, driven independently by
+		"""Re-render every whole-table view (Automated mode's
+		bottom-right canvas AND Manual mode's bottom-right canvas)
+		from the current Plate Parameters and Waste Bin Position
+		entries. Each view is static reference info, so this refresh
+		runs UNCONDITIONALLY — including during a run — and walks
+		every ``TableView`` instance the App knows about. The Phase 3
+		crosshair sits on top of all that, driven independently by
 		``_poll_dispenser_position``.
 		"""
 		plate = self._plate_parameters_valid()
-		if plate is None:
-			self.table_view.clear()
-		else:
-			rows_v, cols_v, ws_v, tx_v, ty_v = plate
-			self.table_view.set_plate(
-				rows=rows_v, cols=cols_v, well_size_cm=ws_v,
-				table_start_cm=tx_v, carriage_start_cm=ty_v,
-				orientation=self.app.plate_orientation,
-			)
 		waste = self._waste_bin_valid()
-		if waste is None:
-			self.table_view.clear_waste_bin()
-		else:
-			self.table_view.set_waste_bin(*waste)
+		for tv in self.app.iter_table_views():
+			if plate is None:
+				tv.clear()
+			else:
+				rows_v, cols_v, ws_v, tx_v, ty_v = plate
+				tv.set_plate(
+					rows=rows_v, cols=cols_v, well_size_cm=ws_v,
+					table_start_cm=tx_v, carriage_start_cm=ty_v,
+					orientation=self.app.plate_orientation,
+				)
+			if waste is None:
+				tv.clear_waste_bin()
+			else:
+				tv.set_waste_bin(*waste)
 
 	def _poll_dispenser_position(self):
-		"""Read the current motor positions and push them into the
+		"""Read the current motor positions and push them into every
 		table-view crosshair. Reschedules itself every
-		``_table_view_poll_ms`` (100 ms by default). Skips updating
-		when the canvas isn't viewable (mode switched away) so the
-		hidden frame isn't burning paint cycles, but keeps the timer
-		running so the crosshair resumes immediately on the next
-		switch back to Automated mode.
+		``_table_view_poll_ms`` (100 ms by default). Updates run
+		regardless of which mode tab is currently visible — Tk's
+		``canvas.coords()`` is cheap on a hidden widget, and a single
+		shared poll keeps Manual mode's canvas in sync with Automated's
+		without a second timer fighting the first.
 		"""
 		try:
-			if self.winfo_viewable():
-				tm = self.app.table_motor
-				cm = self.app.carriage_motor
-				x_cm = tm.get_angle() * tm.cm_per_deg
-				# Motor Y reading is signed: it goes NEGATIVE as the
-				# carriage moves south of origin (Y range [-15, 0]).
-				# The canvas and every stored cm field (Starting Well,
-				# Waste Bin) treat south as a positive distance from
-				# the upper-left origin (range [0, 15]). Take abs() so
-				# the crosshair tracks south-of-origin travel downward
-				# on the canvas instead of flying off the top edge.
-				y_cm = abs(cm.get_angle() * cm.cm_per_deg)
-				self.table_view.update_position(x_cm, y_cm)
+			tm = self.app.table_motor
+			cm = self.app.carriage_motor
+			x_cm = tm.get_angle() * tm.cm_per_deg
+			# Motor Y reading is signed: it goes NEGATIVE as the
+			# carriage moves south of origin (Y range [-15, 0]).
+			# The canvas and every stored cm field (Starting Well,
+			# Waste Bin) treat south as a positive distance from
+			# the upper-left origin (range [0, 15]). Take abs() so
+			# the crosshair tracks south-of-origin travel downward
+			# on the canvas instead of flying off the top edge.
+			y_cm = abs(cm.get_angle() * cm.cm_per_deg)
+			for tv in self.app.iter_table_views():
+				tv.update_position(x_cm, y_cm)
 		except Exception as exc:
 			# Defensive: motor backends might transiently raise during
 			# tear-down or re-init. Swallow + log so a transient
@@ -2161,9 +2161,10 @@ class ManualFrame(tk.Frame):
 		self.app = app
 
 		# Two-column grid: top sections (banner / Jog / Pump) span both
-		# columns; the two calibration LabelFrames sit side-by-side at
-		# the bottom (Position Calibration Tool col 0, Prime Time
-		# Calibration Tool col 1).
+		# columns; the two calibration LabelFrames stack vertically in
+		# col 0 (Position Calibration Tool above Prime Time Calibration),
+		# and the XY-table view occupies col 1 spanning their rows so
+		# the operator can watch the crosshair while jogging.
 		self.grid_columnconfigure(0, weight=1)
 		self.grid_columnconfigure(1, weight=1)
 
@@ -2319,7 +2320,7 @@ class ManualFrame(tk.Frame):
 		# entries share variables with Automated's so the waste-bin
 		# save propagates to both modes.
 		cal = tk.LabelFrame(self, text="Position Calibration Tool", padx=8, pady=8)
-		# Row 3 col 0 -- Prime Time Calibration Tool sits next to it at col 1.
+		# Row 3 col 0 — Prime Time Calibration stacks below it at row 4.
 		cal.grid(row=3, column=0, sticky="new", padx=(4, 2), pady=(0, 4))
 		cal.grid_columnconfigure(0, weight=1)
 
@@ -2371,8 +2372,9 @@ class ManualFrame(tk.Frame):
 		# Automated mode's Prime time field picks it up immediately.
 		prime_cal = tk.LabelFrame(self, text="Prime Time Calibration",
 			padx=8, pady=8)
-		# Row 3 col 1 -- side-by-side with Position Calibration Tool.
-		prime_cal.grid(row=3, column=1, sticky="new", padx=(2, 4), pady=(0, 4))
+		# Row 4 col 0 — stacks directly below Position Calibration Tool;
+		# col 1 is given over to the table view below.
+		prime_cal.grid(row=4, column=0, sticky="new", padx=(4, 2), pady=(0, 4))
 		prime_cal.grid_columnconfigure(0, weight=1)
 
 		prime_cal_desc = tk.Label(prime_cal, anchor="w", justify="left",
@@ -2421,6 +2423,25 @@ class ManualFrame(tk.Frame):
 		self._prime_cal_measured_s = 0.0
 		self._prime_cal_tick_after = None
 		self._prime_cal_set_buttons_idle()
+
+		# ---- XY-table view ---------------------------------------------
+		# Same widget class as Automated mode's bottom-right canvas, so
+		# the operator can see the dispenser's position relative to the
+		# table and plate while jogging in Manual mode. Driven by the
+		# same trace_add + polling pipeline AutomatedFrame uses — its
+		# refresh methods walk ``app.iter_table_views()`` so any change
+		# in Plate Parameters / Waste Bin Position / motor position
+		# repaints both canvases together.
+		self.table_view = TableView(self, min_width=360, min_height=240)
+		self.table_view.grid(row=3, column=1, rowspan=2, sticky="nsew",
+			padx=(2, 4), pady=(0, 4))
+		self.grid_rowconfigure(3, weight=1)
+		# Initial paint from the latest state so the canvas isn't empty
+		# the first time the user switches to Manual mode. Deferred so
+		# the canvas has been laid out before the redraw fires.
+		af = getattr(self.app, "automated_frame", None)
+		if af is not None and hasattr(af, "_refresh_table_view"):
+			self.after_idle(af._refresh_table_view)
 
 	# -- Prime Time Calibration helpers ----------------------------------
 
@@ -4799,6 +4820,20 @@ class App(tk.Tk):
 		cf = getattr(self, "cleaning_frame", None)
 		if cf is not None and hasattr(cf, "set_run_active_lock"):
 			cf.set_run_active_lock(active)
+
+	def iter_table_views(self):
+		"""Yield every constructed ``TableView`` instance so the
+		refresh + polling paths can update them together. Automated
+		mode's canvas is always first; Manual mode's canvas joins
+		once that frame finishes its own ``__init__``. Defensive
+		``getattr`` lets this be called during the windowed init
+		before all frames exist.
+		"""
+		for attr in ("automated_frame", "manual_frame"):
+			frame = getattr(self, attr, None)
+			tv = getattr(frame, "table_view", None) if frame is not None else None
+			if tv is not None:
+				yield tv
 
 	def set_status(self, text):
 		"""Route status text. The plate-area canvas header carries the
