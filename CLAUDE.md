@@ -17,7 +17,7 @@ labware). Manuscript in preparation (Laud et al., 2024, for HardwareX).
   copied into `~/.autosip/profiles/` on first launch.
 - `logs/` — per-run output, one subdirectory per fractionation run, layout
   `logs/{project}/{timestamp}_{sample_id_at_start}/` containing
-  `metadata.json`, `log.csv`, `end.json`, `summary.md`. Visible in a file
+  `system.start.state.json`, `log.csv`, `end.json`, `summary.md`. Visible in a file
   manager (no dotfile location); ignored by git.
 - `~/.autosip/` — user preferences (`config.json` for `last_used` field
   values; `profiles/` for saved profile bundles). Per-user, not per-repo.

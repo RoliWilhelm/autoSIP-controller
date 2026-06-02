@@ -19,7 +19,7 @@ Every run gets its own folder under the repository's `logs/` tree:
 logs/
   {project}/
     {timestamp_start}_{sample_id_at_start}/
-      metadata.json
+      system.start.state.json
       log.csv
       end_{end_timestamp}.json
       summary_{end_timestamp}.md
@@ -61,7 +61,7 @@ process crashes mid-run, both survive on disk with whatever was written
 up to the failure point — no data is held in memory waiting for a final
 commit.
 
-### 2.1 `metadata.json` — written once at run start
+### 2.1 `system.start.state.json` — written once at run start
 
 Created by `RunLogger.start(metadata)` the moment the operator
 successfully clicks Begin Fractionation. Pretty-printed JSON with two
@@ -287,8 +287,8 @@ Sections:
 
 To make the during-run vs End-Run split unambiguous:
 
-| Action                                     | `metadata.json` | `log.csv`                      | `end_*.json` | `summary_*.md` | `summary_{plate_id}_*.md` |
-| ------------------------------------------ | --------------- | ------------------------------ | ------------ | -------------- | ------------------------- |
+| Action                                     | `system.start.state.json` | `log.csv`                      | `end_*.json` | `summary_*.md` | `summary_{plate_id}_*.md` |
+| ------------------------------------------ | ------------------------- | ------------------------------ | ------------ | -------------- | ------------------------- |
 | Begin Fractionation succeeds               | created         | created on first row           | —            | —              | —                         |
 | Every dispense / purge / waste / breadcrumb | —              | one row appended per event     | —            | —              | —                         |
 | **End Run → Save and End**                 | already on disk | closed                         | **written**  | **written**    | **written (one per plate)** |

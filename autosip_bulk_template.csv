@@ -1,0 +1,14 @@
+# autoSIP Bulk Sample Submission Template
+# Required column: sample_id
+# Optional columns: plate_id, number_of_fractions, discard_fractions,
+#   volume_per_well_ml, notes
+# Blank optional values inherit the current Run Parameters values
+# from the GUI at the moment of import. Comment lines (starting with #)
+# and empty lines are skipped during import.
+# Add one row per sample, in the order they will be fractionated.
+sample_id,plate_id,number_of_fractions,discard_fractions,volume_per_well_ml,notes
+Tube-A01,Plate-1,20,2,0.22,Example: first gradient
+Tube-A02,Plate-1,20,2,0.22,
+Tube-A03,Plate-1,20,2,0.22,
+Tube-B01,Plate-2,20,2,0.22,Example: plate swap before this sample
+Tube-B02,Plate-2,20,2,0.22,

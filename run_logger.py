@@ -4,7 +4,7 @@ A ``RunLogger`` instance owns one run's directory under
 ``<repo_root>/logs/{project}/{timestamp}_{sample_id_at_start}/`` and writes
 four artifacts:
 
-  - ``metadata.json``  -- written at run start
+  - ``system.start.state.json``  -- written at run start
   - ``log.csv``        -- one row per well + pause/resume breadcrumbs
   - ``end.json``       -- run termination snapshot
   - ``summary.md``     -- human-readable lab-notebook summary at run end
@@ -209,7 +209,7 @@ class RunLogger:
 	# -- Lifecycle ------------------------------------------------------
 
 	def start(self, metadata):
-		"""Create the run directory and write ``metadata.json``.
+		"""Create the run directory and write ``system.start.state.json``.
 
 		Layout: ``base_dir/{project}/{timestamp}_{sample_id_at_start}/``
 		The Project subdirectory is reused across runs of the same project;
@@ -225,7 +225,7 @@ class RunLogger:
 		self.run_dir = self.base_dir / project / leaf
 		self.run_dir.mkdir(parents=True, exist_ok=True)
 		self._metadata = dict(metadata)
-		with open(self.run_dir / "metadata.json", "w") as f:
+		with open(self.run_dir / "system.start.state.json", "w") as f:
 			json.dump(self._metadata, f, indent=2, default=str)
 		return self.run_dir
 
@@ -478,8 +478,9 @@ class RunLogger:
 		"""Close the CSV file without writing end.json / summary.md.
 
 		Used when the operator chooses Discard on End Run -- the
-		metadata.json and log.csv that were written during the run remain
-		on disk for forensic review, but no finalization files are produced.
+		system.start.state.json and log.csv that were written during the
+		run remain on disk for forensic review, but no finalization files
+		are produced.
 		Idempotent: safe to call after the file is already closed.
 		"""
 		if self._csv_file is not None:

@@ -278,7 +278,7 @@ needle to origin on exit*.
   "Plate full". Opens the plate-swap dialog.
 - **End Run** — finalizes the run. Prompts to save the run logs;
   on Yes, writes the end/summary files. On No, the run terminates
-  without finalization (the metadata.json and log.csv written
+  without finalization (the system.start.state.json and log.csv written
   during the run remain on disk).
 
 **Begin Fractionation** — the large primary action button at the
@@ -511,7 +511,7 @@ cover halt needs:
 - **Pause** — reversible. Pump off, motors hold position, claim
   stays held. Click again to resume from the same cycle phase.
 - **End Run** — one-way. Three-button dialog: Cancel stays in the
-  run; **Don't Save** leaves only the raw `metadata.json` +
+  run; **Don't Save** leaves only the raw `system.start.state.json` +
   `log.csv` on disk; **Save and End** also writes `end_*.json` +
   `summary_*.md`. Use **Don't Save** for the planned-interruption
   halt path.
@@ -530,14 +530,14 @@ Each run writes a directory under `logs/` in the working directory:
 logs/
 └── {project}/
     └── {timestamp_start}_{sample_id_at_start}/
-        ├── metadata.json
+        ├── system.start.state.json
         ├── log.csv
         ├── end_{end_timestamp}.json
         ├── summary_{end_timestamp}.md
         └── summary_{plate_id}_{end_timestamp}.md
 ```
 
-- **`metadata.json`** — captured at run start: project, sample ID,
+- **`system.start.state.json`** — captured at run start: project, sample ID,
   plate ID, parameters block (rows, cols, well width, pump rate,
   drip wait time, volume per well, waste-bin coords, plate-start
   coords, number of fractions, discard fractions), labware file
@@ -579,10 +579,10 @@ logs/
   used. Filtered slice of the run summary suitable for attaching
   to the physical plate during downstream processing.
 
-`metadata.json` and `log.csv` are written **continuously during the
+`system.start.state.json` and `log.csv` are written **continuously during the
 run**; the three `_{end_timestamp}` files are written **only when
 End Run is confirmed with "Yes, save"**. If you choose "No,
-discard," the metadata.json and log.csv remain on disk but no
+discard," the system.start.state.json and log.csv remain on disk but no
 end/summary files are produced — useful when the run was a test or
 calibration you do not want to archive.
 

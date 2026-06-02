@@ -1057,8 +1057,8 @@ class AutomatedFrame(tk.Frame):
 
 		# Cached info from the most recent successful load_json() so the
 		# RunLogger can include the labware path + inline contents in
-		# metadata.json. Both None means the operator entered values
-		# manually without loading a file.
+		# system.start.state.json. Both None means the operator entered
+		# values manually without loading a file.
 		self._loaded_labware_path = None
 		self._loaded_labware_data = None
 
@@ -1951,7 +1951,7 @@ class AutomatedFrame(tk.Frame):
 		self.carriage_te.set(f"{0.1 * (y_dim - a1_y) - 0.5:.2f}")
 
 		# Remember what was loaded so the RunLogger can include the file
-		# path + inline JSON contents in metadata.json.
+		# path + inline JSON contents in system.start.state.json.
 		self._loaded_labware_path = path
 		self._loaded_labware_data = data
 
@@ -6931,15 +6931,16 @@ class App(tk.Tk):
 		"""Handle the End Run button click.
 
 		Asks the operator to choose Save (finalize with timestamped files)
-		or Discard (skip finalization; leave metadata.json + log.csv on disk
-		untouched). Either way the run transitions to idle: motors released,
-		pump claim cleared, visuals reset, FractionatorState run counters
-		zeroed so a fresh Begin Fractionation starts from a clean slate.
+		or Discard (skip finalization; leave system.start.state.json +
+		log.csv on disk untouched). Either way the run transitions to
+		idle: motors released, pump claim cleared, visuals reset,
+		FractionatorState run counters zeroed so a fresh Begin
+		Fractionation starts from a clean slate.
 
 		The confirmation dialog has three buttons: Save and End writes
-		end_*.json + summary*.md; Don't Save leaves metadata.json + the
-		raw log.csv on disk without finalization; Cancel returns out of
-		end_run without changing run state.
+		end_*.json + summary*.md; Don't Save leaves system.start.state.json
+		+ the raw log.csv on disk without finalization; Cancel returns
+		out of end_run without changing run state.
 		"""
 		s = self.state
 		# Nothing to end if no run is active.
@@ -6998,7 +6999,8 @@ class App(tk.Tk):
 		# Close out the run logger. On Save: finalize with a timestamped
 		# suffix so multiple End Runs in one session don't overwrite each
 		# other. On Discard: drop the logger reference without writing
-		# end/summary; the run dir keeps metadata.json + log.csv as-is.
+		# end/summary; the run dir keeps system.start.state.json +
+		# log.csv as-is.
 		discarded_run_dir = None
 		if self.run_logger is not None:
 			# If we ended mid-dispense/wait of a plate well or discard, commit

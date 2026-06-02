@@ -792,7 +792,7 @@ two discard fractions each, total 100 dispense cycles = 90 collected
     confirmation appears (*"Save the logs for project '…' / sample
     '…'?"*): **Save and End** writes `end_*.json`, `summary_*.md`,
     and `summary_Plate-1_*.md` to the run directory; **Don't Save**
-    leaves only the raw `metadata.json` + `log.csv` on disk; **Cancel**
+    leaves only the raw `system.start.state.json` + `log.csv` on disk; **Cancel**
     returns to the run without changing state. Enter activates
     Save and End by default; Escape activates Cancel.
 
@@ -927,7 +927,7 @@ When to use each:
 Pause is reversible and silent; Continue advances the run; End Run
 finishes cleanly and writes the appropriate finalization files for
 either choice (Save and End writes end/summary; Don't Save leaves
-only the raw `metadata.json` + `log.csv`).
+only the raw `system.start.state.json` + `log.csv`).
 
 ### 6.3.5 Cleaning between sample types
 
@@ -1118,7 +1118,7 @@ tubes are being processed in a session.
 The `summary.md` for a bulk run includes a `## Bulk submission`
 section listing the source spreadsheet path, total samples, and the
 as-run Sample ID sequence (with `b` markers for any IDs edited in
-the transition dialog). The `metadata.json` at run start records
+the transition dialog). The `system.start.state.json` at run start records
 the full spreadsheet contents so the planned vs. actual sequence is
 recoverable later.
 
@@ -1130,7 +1130,7 @@ Each run writes a directory under `logs/` in the working directory:
 logs/
 └── {project}/
     └── {timestamp_start}_{sample_id_at_start}/
-        ├── metadata.json
+        ├── system.start.state.json
         ├── log.csv
         ├── end_{end_timestamp}.json
         ├── summary_{end_timestamp}.md
@@ -1142,7 +1142,7 @@ with colons replaced by hyphens (e.g., `2026-05-19T14-22-01`) so the
 filenames are portable across operating systems and multiple End Runs
 in the same session never overwrite each other.
 
-**metadata.json** — captured at run start. Contains the project name,
+**system.start.state.json** — captured at run start. Contains the project name,
 Sample ID at start, Plate ID at start, the parameters block (rows,
 cols, well width, pump rate, drip wait time, volume per well,
 waste-bin coordinates, plate-start coordinates, number of fractions,
@@ -1208,10 +1208,10 @@ run touched. Filtered slice of the run summary, suitable for printing
 and attaching to the physical plate as it goes to downstream
 processing.
 
-`metadata.json` and `log.csv` are written **continuously during the
+`system.start.state.json` and `log.csv` are written **continuously during the
 run**; the three `_{end_timestamp}` files are written **only when End
 Run is confirmed with Save and End**. If you choose **Don't Save**,
-the metadata.json and log.csv remain on disk but no end/summary files
+the system.start.state.json and log.csv remain on disk but no end/summary files
 are produced — useful when the run was a test or calibration you do
 not want to archive.
 
