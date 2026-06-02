@@ -227,7 +227,44 @@ each well's state during the run:
   samples cycle back to the start of the palette.
 
 Hovering over a filled well surfaces a tooltip with the Sample ID and
-the fraction's sequence within that sample.
+the fraction's sequence within that sample. While the run is idle and
+all five Plate Parameters validate, the plate canvas shows an empty
+preview of the labware with a green accent ring around well A1 so the
+operator can use it as a placement guide before clicking Begin
+Fractionation.
+
+**Table view.** A second canvas to the right of the plate progress
+display shows the entire XY table to scale (170.96 mm wide × 127.76 mm
+tall — sized for two SBS microplates side-by-side in portrait). The
+table view stays visible at all times in Automated mode and gives the
+operator a single, spatially-accurate picture of where the dispenser is
+relative to the table layout. Elements:
+
+- **Origin marker** — a small dark "+" cross labelled *Origin* at the
+  upper-left corner of the table (motor coordinates `(0, 0)`). It is
+  fixed and always visible, regardless of Plate Parameters.
+- **Plate footprint** — when all five Plate Parameters validate, a
+  white SBS-standard rectangle (127.76 × 85.48 mm, transposed in
+  portrait) at the calibrated Starting Well Position. The well grid
+  sits centered inside the footprint, so a 12-well Corning, a 96-well,
+  and a 384-well plate all render at the same plastic perimeter with
+  different grid densities inside.
+- **Waste-bin marker** — when the Waste Bin Position fields validate,
+  a 20 × 20 mm amber square labelled *Waste* at the configured motor
+  coordinates.
+- **Live crosshair** — a small red "+" tracks the dispenser's real
+  position. Updated at 10 Hz by polling the motor angles, so the
+  crosshair traces the snake across the plate during fractionation,
+  jumps to the waste bin during discards and inter-sample purges, and
+  returns to the upper-left on Return to Origin. Polling pauses while
+  Automated mode is hidden (Manual or Cleaning tab active) and resumes
+  on switch-back.
+
+All elements share a single millimetre-to-pixel scale derived from the
+physical table dimensions, so distances on the canvas are proportional
+to physical distances on the table — a useful visual check that the
+operator's Starting Well Position calibration places the plate where
+they expect it.
 
 ### 6.2.2 Manual Mode
 

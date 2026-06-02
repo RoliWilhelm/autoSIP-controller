@@ -265,11 +265,12 @@ class TableView(tk.Frame):
 	_INNER_PAD_PX = 10
 
 	# Diagnostic: draw two ghost SBS-plate rectangles tiling the
-	# entire table (left half + right half in portrait-SBS). If the
-	# table-dimension constants are right, they should exactly cover
-	# the table with no gaps and no overhang. Flip to ``False`` after
-	# the user confirms visually.
-	_DEBUG_GHOST_PLATES = True
+	# entire table (left half + right half in portrait-SBS). Kept as
+	# a togglable diagnostic — flip to ``True`` to re-check the
+	# table-dimension constants against the two-SBS-portrait layout
+	# they were sized for (the rectangles should EXACTLY cover the
+	# table with no gaps and no overhang).
+	_DEBUG_GHOST_PLATES = False
 
 	def __init__(self, parent, min_width=360, min_height=240):
 		super().__init__(parent)
