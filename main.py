@@ -1507,7 +1507,7 @@ class AutomatedFrame(tk.Frame):
 		# position. Phase 1 scope: static table outline + plate + empty
 		# wells. Markers, crosshair, resize handling, and polish land
 		# in phases 2-5.
-		self.table_view = TableView(self, min_width=240, min_height=360)
+		self.table_view = TableView(self, min_width=360, min_height=240)
 		self.table_view.grid(row=5, column=1, sticky="nsew", padx=(4, 0))
 		self.grid_rowconfigure(5, weight=1)
 

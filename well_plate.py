@@ -220,12 +220,26 @@ def format_snapshot_log(snap):
 	return "\n".join(lines)
 
 
-# XY table physical dimensions in millimetres. X (table screw, +X east)
-# spans the shorter axis; Y (carriage screw, +Y south) spans the taller
-# axis. Used by ``TableView`` to scale motor coordinates into canvas
-# pixels.
+# XY table physical dimensions in millimetres. The table was sized for
+# a 1×2 grid of SBS microplates in portrait — two plates side-by-side
+# along X, one plate tall along Y. So:
+#   X (table-screw axis)     = 2 × 85.48 = 170.96 mm
+#   Y (carriage-screw axis)  = 1 × 127.76 = 127.76 mm
+# Aspect ratio 170.96 / 127.76 ≈ 1.34 — slightly wider than tall.
+#
+# An earlier draft used Y = 255.52 mm, but that turns out to be the
+# lead-screw length / structural extent rather than the usable plate
+# area. The visualization scales to the usable plate area.
 TABLE_WIDTH_MM = 170.96   # X (table-screw axis)
-TABLE_HEIGHT_MM = 255.52  # Y (carriage-screw axis)
+TABLE_HEIGHT_MM = 127.76  # Y (carriage-screw axis)
+
+# SBS standard microplate footprint in millimetres. Same plastic
+# perimeter for every SBS-standard plate regardless of well count; the
+# well grid sits centered inside it. Used by ``TableView`` so a 12-well
+# Corning plate, a 96-well plate, and a 384-well plate all render at
+# their real physical footprint (the well grids inside them differ).
+SBS_FOOTPRINT_LONG_MM = 127.76
+SBS_FOOTPRINT_SHORT_MM = 85.48
 
 
 class TableView(tk.Frame):
@@ -250,7 +264,14 @@ class TableView(tk.Frame):
 	# leaves room for axis labels in later phases.
 	_INNER_PAD_PX = 10
 
-	def __init__(self, parent, min_width=220, min_height=320):
+	# Diagnostic: draw two ghost SBS-plate rectangles tiling the
+	# entire table (left half + right half in portrait-SBS). If the
+	# table-dimension constants are right, they should exactly cover
+	# the table with no gaps and no overhang. Flip to ``False`` after
+	# the user confirms visually.
+	_DEBUG_GHOST_PLATES = True
+
+	def __init__(self, parent, min_width=360, min_height=240):
 		super().__init__(parent)
 		self.canvas = tk.Canvas(
 			self, bg="#f4f4f4", bd=0, highlightthickness=1,
@@ -333,9 +354,27 @@ class TableView(tk.Frame):
 	# -- Drawing --------------------------------------------------------
 
 	def _redraw(self):
-		"""Repaint the table outline, the plate (if parameters are
-		set), and the empty well grid inside the plate. Markers and
-		crosshair are added in later phases.
+		"""Repaint the table outline, the SBS labware footprint (if
+		Plate Parameters are set), and the empty well grid centered
+		inside the footprint.
+
+		Coordinate convention:
+		  * ``(table_start_cm, carriage_start_cm)`` is the position
+		    the operator would jog Manual mode to when seating the
+		    labware — A1's well-cell upper-left in motor cm. A1's
+		    centre then sits at ``(start_x + ws/2, start_y + ws/2)``.
+		  * The drawn plate rectangle is the SBS standard footprint
+		    (127.76 × 85.48 mm in landscape, transposed in portrait),
+		    not the bare well-grid extent. Same footprint for every
+		    SBS-standard plate; the well grid sits centered inside it,
+		    so a 12-well Corning, a 96-well, and a 384-well plate all
+		    render at the same plate outline with different grid
+		    densities.
+		  * All drawing uses a single ``px_per_mm`` scale derived from
+		    the physical table dimensions, so plate, wells, and any
+		    future markers share the table-outline coordinate system.
+
+		Markers and crosshair are added in later phases.
 		"""
 		self.canvas.delete("all")
 		w = self.canvas.winfo_width()
@@ -343,7 +382,7 @@ class TableView(tk.Frame):
 		if w < 30 or h < 30:
 			return
 		geom = self._scale()
-		_pxmm, x_off, y_off, t_w, t_h = geom
+		pxmm, x_off, y_off, t_w, t_h = geom
 
 		# Table outline — solid rectangle covering the scaled extent
 		# of the physical table. Fill is a slightly lighter shade so
@@ -353,50 +392,88 @@ class TableView(tk.Frame):
 			fill="#fafafa", outline="#555555", width=1,
 		)
 
+		# Diagnostic ghost plates: two SBS-portrait footprints tiling
+		# the table side-by-side (left half + right half along X).
+		# If TABLE_WIDTH_MM and TABLE_HEIGHT_MM are correct, these
+		# rectangles cover the table EXACTLY with no gaps or overhang.
+		# Dashed outline so they read as a sanity-check overlay rather
+		# than as labware. Remove by flipping ``_DEBUG_GHOST_PLATES``
+		# to ``False`` once the user has confirmed the layout.
+		if self._DEBUG_GHOST_PLATES:
+			g_w = SBS_FOOTPRINT_SHORT_MM * pxmm  # 85.48 mm in portrait
+			g_h = SBS_FOOTPRINT_LONG_MM * pxmm   # 127.76 mm in portrait
+			# Left ghost: (0, 0) to (85.48, 127.76) mm
+			self.canvas.create_rectangle(
+				x_off, y_off, x_off + g_w, y_off + g_h,
+				outline="#cc8844", width=1, dash=(4, 3),
+			)
+			# Right ghost: (85.48, 0) to (170.96, 127.76) mm
+			self.canvas.create_rectangle(
+				x_off + g_w, y_off, x_off + 2 * g_w, y_off + g_h,
+				outline="#cc8844", width=1, dash=(4, 3),
+			)
+
 		if not self._has_plate or self.rows <= 0 or self.cols <= 0:
 			return
 		if self.well_size_cm <= 0:
 			return
 
-		# Plate bounding box. Each well is rendered as an empty circle
-		# at its motor-cm position. The plate's outline rectangle
-		# tightly bounds the well centers ± half well_size_cm.
-		ws = self.well_size_cm
-		half = ws / 2.0
+		# Plate footprint is the SBS standard plastic perimeter
+		# (127.76 × 85.48 mm, transposed in portrait). Same footprint
+		# for every SBS-standard plate regardless of well count — the
+		# well grid sits centered inside it, with a per-orientation
+		# margin between the grid edge and the footprint edge.
+		#
+		#   landscape — cols on X, rows on Y; footprint long on X
+		#   portrait  — rows on X, cols on Y; footprint long on Y
+		ws_mm = self.well_size_cm * 10.0
 		if self.orientation == "landscape":
-			# cols on X (table), rows on Y (carriage)
-			plate_x_min = self.table_start_cm - half
-			plate_x_max = (self.table_start_cm
-				+ (self.cols - 1) * ws + half)
-			plate_y_min = self.carriage_start_cm - half
-			plate_y_max = (self.carriage_start_cm
-				+ (self.rows - 1) * ws + half)
+			x_wells, y_wells = self.cols, self.rows
+			footprint_w_mm = SBS_FOOTPRINT_LONG_MM
+			footprint_h_mm = SBS_FOOTPRINT_SHORT_MM
 		else:
-			# portrait: rows on X (table), cols on Y (carriage)
-			plate_x_min = self.table_start_cm - half
-			plate_x_max = (self.table_start_cm
-				+ (self.rows - 1) * ws + half)
-			plate_y_min = self.carriage_start_cm - half
-			plate_y_max = (self.carriage_start_cm
-				+ (self.cols - 1) * ws + half)
+			x_wells, y_wells = self.rows, self.cols
+			footprint_w_mm = SBS_FOOTPRINT_SHORT_MM
+			footprint_h_mm = SBS_FOOTPRINT_LONG_MM
+		grid_w_mm = x_wells * ws_mm
+		grid_h_mm = y_wells * ws_mm
+		# Margin between the SBS footprint edge and the well grid
+		# edge. Standard plates have positive margins; if the operator
+		# enters extreme parameters that produce a grid larger than
+		# the SBS footprint, the margins go negative and the rectangle
+		# will visibly clip the wells — appropriate feedback that the
+		# input is non-SBS.
+		margin_x_mm = (footprint_w_mm - grid_w_mm) / 2.0
+		margin_y_mm = (footprint_h_mm - grid_h_mm) / 2.0
 
-		px1, py1 = self._cm_to_px(plate_x_min, plate_y_min, geom)
-		px2, py2 = self._cm_to_px(plate_x_max, plate_y_max, geom)
+		# Starting Well Position = A1's well-cell upper-left in motor
+		# cm. The SBS footprint's upper-left is therefore offset by
+		# (margin, margin) above-and-left of A1.
+		a1_x_mm = self.table_start_cm * 10.0
+		a1_y_mm = self.carriage_start_cm * 10.0
+		footprint_x_mm = a1_x_mm - margin_x_mm
+		footprint_y_mm = a1_y_mm - margin_y_mm
+
+		fp_x1 = x_off + footprint_x_mm * pxmm
+		fp_y1 = y_off + footprint_y_mm * pxmm
+		fp_x2 = fp_x1 + footprint_w_mm * pxmm
+		fp_y2 = fp_y1 + footprint_h_mm * pxmm
 		self.canvas.create_rectangle(
-			px1, py1, px2, py2,
+			fp_x1, fp_y1, fp_x2, fp_y2,
 			fill="#ffffff", outline="#444444", width=1,
 		)
 
-		# Wells — empty outlined circles at scaled motor positions.
-		well_r_px = (ws / 2.0) * 10.0 * geom[0] * 0.85
-		for col_idx in range(self.cols):
-			for row_idx in range(self.rows):
-				x_cm, y_cm = well_id_to_cm(
-					f"{chr(ord('A') + row_idx)}{col_idx + 1}",
-					self.table_start_cm, self.carriage_start_cm,
-					ws, orientation=self.orientation,
-				)
-				cx, cy = self._cm_to_px(x_cm, y_cm, geom)
+		# Wells — centered inside their ws_mm × ws_mm cell, with A1's
+		# centre at (a1 + ws_mm/2). The well grid lands centered in
+		# the SBS footprint automatically because A1's well-UL = the
+		# operator-calibrated Starting Well Position.
+		grid_x1 = x_off + a1_x_mm * pxmm
+		grid_y1 = y_off + a1_y_mm * pxmm
+		well_r_px = (ws_mm / 2.0) * pxmm * 0.85
+		for ix in range(x_wells):
+			for iy in range(y_wells):
+				cx = grid_x1 + (ix + 0.5) * ws_mm * pxmm
+				cy = grid_y1 + (iy + 0.5) * ws_mm * pxmm
 				self.canvas.create_oval(
 					cx - well_r_px, cy - well_r_px,
 					cx + well_r_px, cy + well_r_px,
