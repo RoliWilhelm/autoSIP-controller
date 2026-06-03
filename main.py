@@ -6719,7 +6719,19 @@ class App(tk.Tk):
 	def _begin_first_phase(self):
 		"""Fire the run's first dispense phase. Called by the priming
 		workflow's Begin Run, by which time the needle is parked at
-		the first-dispense target."""
+		the first-dispense target.
+
+		The trailing ``_update_run_control_buttons`` mirrors the same
+		call at the end of ``_commit_new_series`` (the sample 2+
+		entry point). ``start_run`` ALSO calls
+		``_update_run_control_buttons`` before this method fires, but
+		that call lands while ``s.state`` is still ``"idle"`` (the
+		priming dialog returns before any phase transition) — so
+		without this trailing call, the run-control row stays in its
+		idle defaults until sample 2 begins, leaving Pause / End Run
+		disabled and Return-to-Origin / Return-to-Start-Well enabled
+		during all of sample 1's fractionation.
+		"""
 		s = self.state
 		if s.discards_at_series_start > 0:
 			self._set_phase("discard")
@@ -6734,6 +6746,7 @@ class App(tk.Tk):
 			self._set_phase("collect")
 			self.set_status("Fractionation in progress...")
 			self.pump_liquid()
+		self._update_run_control_buttons()
 
 	def pump_liquid(self):
 		"""Pump-on phase. Behavior depends on s.phase (discard vs collect)."""
