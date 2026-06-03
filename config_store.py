@@ -39,7 +39,54 @@ FIELDS = (
 	"labware_file",
 )
 
+# Current waste-bin anchor convention. v1 = upper-left corner of the
+# bin rectangle (pre-2026-06 builds). v2 = center of the bin rectangle.
+# Stored next to ``last_used`` and inside each profile as
+# ``waste_anchor_version`` so the loader knows whether to migrate.
+WASTE_ANCHOR_VERSION = 2
+
 _CONFIG_DIR = Path.home() / ".autosip"
+
+
+# ---- waste-bin anchor migration -------------------------------------
+
+def _migrate_waste_anchor(payload):
+	"""Silently bring a loaded ``last_used`` / profile dict up to the
+	current waste-bin anchor convention.
+
+	v1 stored the bin's upper-left corner; v2 stores its center. When
+	the payload predates v2 and both extents are non-zero, shift the
+	stored ``waste_bin_table`` / ``waste_bin_carriage`` by +extent/2 so
+	the previously-corner-anchored value lands on the new center.
+	Payloads with zero extents are left untouched (no safe shift) but
+	still receive the version stamp so subsequent loads short-circuit.
+	"""
+	try:
+		version = int(payload.get("waste_anchor_version", 1) or 1)
+	except (TypeError, ValueError):
+		version = 1
+	if version >= WASTE_ANCHOR_VERSION:
+		return
+
+	def _coerce(key):
+		raw = payload.get(key, "")
+		if raw in (None, ""):
+			return None
+		try:
+			return float(raw)
+		except (TypeError, ValueError):
+			return None
+
+	wx = _coerce("waste_bin_table")
+	wy = _coerce("waste_bin_carriage")
+	ext_x = _coerce("waste_bin_x_extent") or 0.0
+	ext_y = _coerce("waste_bin_y_extent") or 0.0
+
+	if wx is not None and ext_x > 0:
+		payload["waste_bin_table"] = f"{wx + ext_x / 2.0:.2f}"
+	if wy is not None and ext_y > 0:
+		payload["waste_bin_carriage"] = f"{wy + ext_y / 2.0:.2f}"
+	payload["waste_anchor_version"] = WASTE_ANCHOR_VERSION
 
 
 def get_config_dir():
@@ -76,6 +123,25 @@ def load_last_used():
 		logger.warning("Failed to read %s: %s", path, exc)
 		return {}
 
+	# Waste-anchor (corner → center) migration. Carry the version key
+	# inside ``last`` so ``_migrate_waste_anchor`` can read it; persist
+	# the migrated payload back to disk so future launches no-op.
+	if "waste_anchor_version" not in last:
+		# Inherit the version sentinel that lives next to ``last_used``
+		# in older builds, if present; default to v1 so legacy configs
+		# get migrated.
+		last["waste_anchor_version"] = data.get("waste_anchor_version", 1)
+	try:
+		_pre_version = int(last.get("waste_anchor_version", 1) or 1)
+	except (TypeError, ValueError):
+		_pre_version = 1
+	_migrate_waste_anchor(last)
+	if _pre_version < WASTE_ANCHOR_VERSION:
+		try:
+			save_last_used(last)
+		except OSError:
+			pass
+
 	# Volume-bound migration. Local import keeps validation/config_store
 	# free of a circular dependency at module load time.
 	try:
@@ -107,7 +173,9 @@ def save_last_used(values):
 	"""Write the ``last_used`` block to config.json, preserving other keys.
 
 	Filters ``values`` to the known FIELDS so a misbehaving caller can't
-	pollute the config with arbitrary keys.
+	pollute the config with arbitrary keys. Stamps the current
+	``waste_anchor_version`` next to ``last_used`` so the corner→center
+	migration runs at most once per machine.
 	"""
 	path = get_config_path()
 	path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +192,7 @@ def save_last_used(values):
 		existing = {}
 
 	existing["last_used"] = {k: values.get(k, "") for k in FIELDS}
+	existing["waste_anchor_version"] = WASTE_ANCHOR_VERSION
 	with open(path, "w") as f:
 		json.dump(existing, f, indent=2)
 
@@ -146,20 +215,48 @@ def _profile_path(name):
 
 
 def load_profile(name):
-	"""Return the profile's values as a dict (only FIELDS keys)."""
+	"""Return the profile's values as a dict (only FIELDS keys).
+
+	Applies the waste-anchor (corner → center) migration if the
+	profile predates v2. Persists the migrated payload back to the
+	profile file so subsequent loads are no-ops.
+	"""
 	path = _profile_path(name)
 	with open(path) as f:
 		data = json.load(f)
 	if not isinstance(data, dict):
 		raise ValueError(f"Profile {name!r} is not a JSON object")
+
+	# Migration uses the on-disk dict directly so the version stamp
+	# lands inside the profile file. Persist unconditionally whenever
+	# the on-disk version was below current — covers both the
+	# coords-shifted path and the extent-0 "stamp only" path.
+	try:
+		on_disk_version = int(data.get("waste_anchor_version", 1) or 1)
+	except (TypeError, ValueError):
+		on_disk_version = 1
+	_migrate_waste_anchor(data)
+	if on_disk_version < WASTE_ANCHOR_VERSION:
+		try:
+			path.parent.mkdir(parents=True, exist_ok=True)
+			with open(path, "w") as f:
+				json.dump(data, f, indent=2)
+		except OSError:
+			pass
+
 	return {k: data.get(k, "") for k in FIELDS}
 
 
 def save_profile(name, values):
-	"""Write ``values`` (filtered to FIELDS) to ``profiles/{name}.json``."""
+	"""Write ``values`` (filtered to FIELDS) to ``profiles/{name}.json``.
+
+	Stamps the current ``waste_anchor_version`` next to the FIELDS so
+	the corner→center migration knows the file is current.
+	"""
 	path = _profile_path(name)
 	path.parent.mkdir(parents=True, exist_ok=True)
 	payload = {k: values.get(k, "") for k in FIELDS}
+	payload["waste_anchor_version"] = WASTE_ANCHOR_VERSION
 	with open(path, "w") as f:
 		json.dump(payload, f, indent=2)
 
