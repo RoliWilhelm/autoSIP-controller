@@ -4910,12 +4910,27 @@ class App(tk.Tk):
 		approach, return to origin, plate swaps, jogs). Defaults to
 		False so well-to-well dispense moves stay on the slow
 		fractionation cadence.
+
+		Carriage-axis convention bridge: every state-machine value
+		(Starting Well Position, Waste Bin Position, ``s.carriage_*``)
+		is a POSITIVE magnitude representing south distance from
+		origin. The carriage motor's ``angle`` accumulator uses the
+		opposite convention: NEGATIVE for south positions (matching
+		Manual jog where Y− click drives the value more negative).
+		Negate ``carriage_dist`` here so the motor's signed counter
+		stays consistently in [−15, 0] regardless of whether the
+		operator got there via Manual jog or an automated absolute
+		move. This is what lets ``abs(motor.angle)`` in the crosshair
+		poll always correspond to the same physical south distance —
+		without it, the post-automated motor.angle ends up positive
+		and the next Manual Y− click decreases its magnitude, sending
+		the crosshair UP instead of DOWN.
 		"""
 		if table_dist is not None:
 			self.table_motor.move_dist_absolute(table_dist,
 				is_transit=is_transit)
 		if carriage_dist is not None:
-			self.carriage_motor.move_dist_absolute(carriage_dist,
+			self.carriage_motor.move_dist_absolute(-carriage_dist,
 				is_transit=is_transit)
 
 	def _apply_motor_speed_to_motors(self):
@@ -9469,40 +9484,54 @@ class App(tk.Tk):
 		"""
 		s = self.state
 		# Pick the physical motors that drive "row" (inner sweep) and
-		# "column" (outer step) for this orientation. Logical
-		# iteration is column-wise either way. ``col_advance_cm`` is
-		# the SIGNED per-step delta the col motor takes on each column
-		# wrap — landscape cols extend east (+X table) so +ws, portrait
-		# cols extend NORTH (−Y carriage) so −ws. The sign lives in
-		# the argument, not in any mutable direction state, so the
-		# call site can't drift out of sync with the absolute-position
-		# computations in ``_snake_step_absolute`` and
-		# ``well_id_to_cm``.
+		# "column" (outer step) for this orientation. Logical iteration
+		# is column-wise in both orientations.
+		#
+		# CARRIAGE-MOTOR SIGN CONVENTION (must match ``move_to_positions``
+		# and Manual jog): south distance = NEGATIVE motor.angle. So
+		# every carriage-axis delta passed to ``move_dist_relative`` is
+		# negated relative to the state-machine "south = +ws" frame.
+		# ``row_sign`` and ``col_sign`` apply that flip only when the
+		# motor driving that axis is the carriage motor; table-axis
+		# deltas stay in the +X = east convention. This keeps the
+		# motor's signed counter in ``[−15, 0]`` for the whole run so
+		# ``abs(motor.angle)`` in the crosshair poll always corresponds
+		# to the same physical south distance — regardless of whether
+		# the operator reached the current position via Manual jog or
+		# an automated absolute move.
 		if self.plate_orientation == "portrait":
 			row_motor = self.table_motor
 			col_motor = self.carriage_motor
-			col_advance_cm = -s.well_size
+			# Row inner sweep on table (east-positive): no flip.
+			row_sign = +1
+			# Col outer step on carriage going NORTH (toward origin):
+			# motor.angle INCREASES from negative toward 0 → +ws.
+			col_sign = +1
 		else:
 			row_motor = self.carriage_motor
 			col_motor = self.table_motor
-			col_advance_cm = s.well_size
+			# Row inner sweep on carriage going SOUTH: motor.angle
+			# DECREASES (more negative) → −ws.
+			row_sign = -1
+			# Col outer step on table (east-positive): no flip.
+			col_sign = +1
 
 		if s.carriage_forwards:
 			s.y = s.y + 1
 			if s.y < s.ROWS:
-				row_motor.move_dist_relative(s.well_size)
+				row_motor.move_dist_relative(row_sign * s.well_size)
 			else:
 				s.y = s.ROWS - 1
-				col_motor.move_dist_relative(col_advance_cm)
+				col_motor.move_dist_relative(col_sign * s.well_size)
 				s.x = s.x + 1
 				s.carriage_forwards = False
 		else:
 			s.y = s.y - 1
 			if s.y >= 0:
-				row_motor.move_dist_relative(-s.well_size)
+				row_motor.move_dist_relative(-row_sign * s.well_size)
 			else:
 				s.y = 0
-				col_motor.move_dist_relative(col_advance_cm)
+				col_motor.move_dist_relative(col_sign * s.well_size)
 				s.x = s.x + 1
 				s.carriage_forwards = True
 		return s.x < s.COLS
