@@ -421,12 +421,25 @@ setup operation, not a fractionation event.
 Cleaning mode focuses on between-sample / between-session line
 maintenance:
 
-- **Waste bin position (x-axis)** and **Waste bin position
-  (y-axis)** — the same two values that appear in Automated
-  mode's Plate Parameters → Waste bin section. Edits propagate
-  in both directions automatically.
-- **Move to Waste Bin** — jogs the needle to the waste-bin
-  coordinates.
+- **Waste bin position (x-axis, center)** and **Waste bin position
+  (y-axis, center)** — the bin's geometric CENTER in motor cm.
+  Mirrored from Tools → Cleaning Parameters… and Manual mode's
+  Waste Bin panel via shared App-level StringVars; edits in any
+  surface propagate everywhere and trigger a live repaint of the
+  XY-table view.
+- **Bin size: X [__] cm  Y [__] cm** — compact extents row right
+  under the position entries. Full width and height of the bin
+  rectangle; the rectangle spans `± extent/2` around the center
+  on each axis. Bound to the same shared StringVars as the
+  matching X-extent / Y-extent fields in Tools → Cleaning
+  Parameters. Default `0` keeps the legacy point-target
+  behaviour; non-zero values turn on shortest-path routing into
+  the bin interior on every move-to-waste event.
+- **Move to Waste Bin** — jogs the needle to a point inside the
+  bin. When both extents are 0 the target is the saved center;
+  otherwise the shortest-path helper picks the closest entry
+  point inside the bin's interior (rectangle shrunk by a 5 mm
+  rim margin on each side) to the current needle XY.
 - **Purge** — toggles the relay (same semantics as Manual mode's
   Purge button; same confirmation dialog).
 - **System Clean** — a four-phase decontamination routine

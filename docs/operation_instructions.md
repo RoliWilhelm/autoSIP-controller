@@ -353,10 +353,14 @@ inside name fields). The most-recently-used pump persists across
 application restarts in `~/.autosip/config.json`.
 
 **Position Calibration Tool.** A sub-panel that captures the carriage's
-current cm position into either *Starting well position* or *Waste bin
-position* with one click — the same fields documented in Automated
-mode's Plate Parameters. The full step-by-step calibration walkthrough
-lives in §6.3.1.
+current cm position into either *Starting well position* (Automated
+mode's Plate Parameters) or *Waste bin position* (Tools → Cleaning
+Parameters…, also mirrored in this Manual frame's Waste Bin panel) with
+one click. The full step-by-step calibration walkthrough lives in
+§6.3.1. The Waste bin row prompts the operator to jog the needle over
+the bin's CENTER before saving; the rectangle's full width and height
+are entered separately as the X / Y extents in Tools → Cleaning
+Parameters or in Cleaning Mode's Waste Bin panel.
 
 **Prime Time Calibration Tool.** A stopwatch tool that measures Prime
 time empirically for your tubing geometry:
@@ -379,6 +383,15 @@ time empirically for your tubing geometry:
 calibration measurement is *not* written to `log.csv` — it is a setup
 operation, not a fractionation event.
 
+**Table view.** Bottom-right of Manual mode — the same canvas
+documented under §6.2.1 (origin marker, plate footprint, waste-bin
+rectangle, live crosshair) is rendered here too, sharing state via
+the App-level plate and waste-bin StringVars. While the operator
+jogs to dial in a calibration coordinate, the crosshair traces the
+move in real time against the plate footprint and waste rectangle,
+making it visually obvious whether the needle is heading to the
+right element before any field is saved.
+
 ### 6.2.3 Cleaning Mode
 
 Cleaning mode strips Automated mode down to two inputs and two actions
@@ -386,11 +399,33 @@ for flushing the fluid path between sample types.
 
 ![Figure: Cleaning mode panel](figures/cleaning_mode.png)
 
-- **Waste bin position (x-axis)** and **Waste bin position (y-axis)**
-  — the same two values that appear in Automated mode's Plate
-  Parameters → Waste bin section. Edits in either mode propagate
-  automatically via shared App-level variables.
-- **Move to Waste Bin** — jogs the needle to the waste-bin coordinates.
+- **Waste bin position (x-axis, center)** and **Waste bin position
+  (y-axis, center)** — the X / Y coordinates of the bin's geometric
+  CENTER in motor cm. The same two App-level StringVars back the
+  matching fields in Tools → Cleaning Parameters… and in Manual mode's
+  Waste Bin panel, so an edit in any of the three places propagates
+  instantly to the others and triggers a live repaint of the XY table
+  view.
+- **Bin size: X [__] cm   Y [__] cm** — compact row below the position
+  entries. Full width (X) and height (Y) of the bin rectangle; the
+  rectangle spans `± extent/2` around the center on each axis. Bound
+  to the same shared StringVars as the matching X-extent / Y-extent
+  fields in Tools → Cleaning Parameters. Default `0` keeps the legacy
+  point-target behaviour (the needle aims at the saved center on every
+  move-to-waste). Non-zero values turn on shortest-path routing — see
+  §6.2.5.
+- **Inline validation.** Each of the four bin fields runs its
+  validator on every keystroke (or programmatic update). Invalid
+  values — negative extent, unparseable coordinate, or a rectangle
+  whose edges would overhang the physical table — surface an inline
+  red error indicator next to whichever entry is currently invalid.
+  The same indicator appears in Tools → Cleaning Parameters if it is
+  open. File → Save current as profile… refuses to write while the
+  bin geometry is invalid.
+- **Move to Waste Bin** — jogs the needle to a point inside the bin.
+  When both extents are 0 the target is the saved center; otherwise
+  the shortest-path helper (§6.2.5) picks the closest entry point
+  inside the bin's interior to the current needle XY.
 - **Purge** — toggles the relay (same semantics as Manual mode's Purge
   button; same confirmation dialog on first activation).
 - **System Clean** — runs an on-demand four-phase decontamination
@@ -537,6 +572,56 @@ through shared profiles). All apply across launches.
 
 OK saves all six preferences and applies the new values immediately
 (no app restart needed); Cancel discards.
+
+### 6.2.5 Move-to-Waste Bin Routing
+
+Every time the application drives the needle to the waste container —
+the Automated-mode discard phase, the inter-sample purge phases,
+the pre-fractionation prime when `D > 0`, the System Clean phases,
+and the Manual / Cleaning **Move to Waste Bin** button — it computes
+a target point inside the bin rectangle rather than always aiming
+at the saved center. The choice depends on whether the operator
+has supplied non-zero Bin size extents.
+
+**Legacy point-target (both extents = 0).** The needle moves to
+`(waste_bin_table, waste_bin_carriage)` exactly — the bin's saved
+center. This matches the pre-rectangle behaviour and is the safe
+default for a small, point-shaped catch container.
+
+**Shortest-path routing (both extents > 0).** The bin is modelled
+as the rectangle
+`[center_x ± extent_x/2] × [center_y ± extent_y/2]`. The routing
+helper shrinks that rectangle by a fixed **5 mm rim margin** on every
+side (so the dispenser tip cannot drip on the bin's lip), then
+clamps the current needle position to the resulting interior:
+
+- If the current XY is already inside the interior, the target is
+  the current XY (no move).
+- Otherwise the target is the closest interior point — a standard
+  point-to-rectangle clamp on each axis independently.
+- If an extent is smaller than `2 × 5 mm = 10 mm`, the interior
+  collapses on that axis and the helper falls back to the bin's
+  center on that axis (so the needle still targets the middle of
+  whatever sliver is left).
+
+The visible payoff is two-fold:
+
+1. **Less motor travel between adjacent waste-bin visits.** When
+   the previous discard finished near the bin's east edge and the
+   next discard arrives from the same approach, the second move
+   stays at the east edge instead of crossing the bin to the saved
+   center.
+2. **More even wear on the bin.** Successive discards land at
+   different interior points instead of stacking on the same drop
+   site, so a tall narrow bin fills uniformly rather than spilling
+   from a single overflowing center.
+
+The XY-table view (§6.2.1) renders the bin rectangle at its full
+extents so the operator can visually confirm where the routing is
+allowed to land. `log.csv` records the actual target point used for
+every move-to-waste event in its `plate_x` / `plate_y` columns — not
+the saved center — so per-event provenance reflects where the fluid
+physically went, even when the rectangle is large.
 
 ## 6.3 Common Workflows
 
@@ -970,11 +1055,11 @@ deuterated one, to clear residual buffer or DNA from the tubing.
 
 2. **Switch the autoSIP GUI to the Cleaning tab.**
 
-3. **Confirm the waste-bin coordinates** in the Cleaning panel. These
-   are the same two values shown in Automated mode's Plate Parameters
-   → Waste bin section — editing either set updates the other. If you
-   have already calibrated the waste-bin position via §6.3.1, no
-   further input is needed here.
+3. **Confirm the waste-bin coordinates** in the Cleaning panel. The
+   X / Y center and the X / Y extents are the same App-level state
+   that Tools → Cleaning Parameters… and Manual mode's Waste Bin
+   panel edit — set them once via §6.3.1 and they persist across all
+   three surfaces.
 
 4. **Click Move to Waste Bin.** The needle moves to the waste-bin
    coordinates.
