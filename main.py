@@ -2586,6 +2586,19 @@ class ManualFrame(tk.Frame):
 		even if the position label ever drifts from the motor state.
 		"""
 		step_cm = self.step_var.get() * sign
+		# Diagnostic: log the direction state on every Y jog so a
+		# regression of the post-run Y-inversion bug is observable in
+		# --debug output. The motor's actual rotation direction comes
+		# from sign(step_cm) + motor.reverse, NOT from motor.forwards
+		# — but logging both makes it easy to spot if anyone ever
+		# re-introduces a dependency.
+		logger.debug(
+			"_jog axis=%s sign=%+d step_cm=%+.4f  "
+			"carriage_motor.forwards=%s carriage_motor.reverse=%s",
+			axis, sign, step_cm,
+			self.app.carriage_motor.forwards,
+			self.app.carriage_motor.reverse,
+		)
 		if axis == "x":
 			motor = self.app.table_motor
 			current_cm = motor.get_angle() * motor.cm_per_deg
@@ -4261,6 +4274,11 @@ class App(tk.Tk):
 		self.status_bar.set_mode(name)
 		self.status_bar.set_terminate_visible(name == "Automated")
 		frame.refresh()
+		if name == "Manual":
+			# Defensive: clear the snake's last-direction memory
+			# before the operator starts jogging. See
+			# ``_reset_motor_direction_state`` for the rationale.
+			self._reset_motor_direction_state()
 		if name == "Automated":
 			logger.debug(
 				"mode-switch ENTER Automated: well_records=%d phase=%s state=%s",
@@ -4830,6 +4848,24 @@ class App(tk.Tk):
 		cf = getattr(self, "cleaning_frame", None)
 		if cf is not None and hasattr(cf, "set_run_active_lock"):
 			cf.set_run_active_lock(active)
+
+	def _reset_motor_direction_state(self):
+		"""Reset both stepper motors' ``forwards`` backlash-tracking
+		flags to their default (True). The motor's actual rotation
+		direction is determined per-call by the SIGN of the delta
+		passed to ``move_dist_relative`` / ``move_dist_absolute``
+		combined with the fixed ``reverse`` flag; ``forwards`` only
+		controls backlash compensation timing. Resetting here is a
+		defensive belt-and-suspenders measure against a reported
+		Y-axis inversion seen on real hardware after an automated
+		run completes — even though simulation can't reproduce the
+		inversion, dropping the snake's last-direction memory before
+		the next Manual jog removes one source of inter-mode state
+		coupling. Called from ``end_run`` finalize and from
+		``set_mode`` on entry to Manual mode.
+		"""
+		self.table_motor.forwards = True
+		self.carriage_motor.forwards = True
 
 	def iter_table_views(self):
 		"""Yield every constructed ``TableView`` instance so the
@@ -7130,6 +7166,10 @@ class App(tk.Tk):
 		# for the pre-run state.
 		af._refresh_plate_preview()
 		af._refresh_table_view()
+		# Drop the snake's last-direction memory so subsequent Manual
+		# jogs start from a clean backlash-tracking baseline. See
+		# ``_reset_motor_direction_state``.
+		self._reset_motor_direction_state()
 		self._update_run_control_buttons()
 		if save:
 			self.set_status(f"Run ended ({final_status}). Logs saved.")
