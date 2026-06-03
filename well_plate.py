@@ -117,23 +117,27 @@ def well_id_to_cm(well_id, start_x_cm, start_y_cm, well_width_cm,
 	    ``x = start_x + col_idx × well_width``
 	    ``y = start_y + row_idx × well_width``
 
-	  * ``"portrait"`` — rows on X, columns on Y.
+	  * ``"portrait"`` — rows on X (east-positive), columns on Y
+	    (north-NEGATIVE relative to A1, since col 2, 3, ... extend
+	    UP from A1 in the LEFT-anchored portrait convention).
 	    ``x = start_x + row_idx × well_width``
-	    ``y = start_y + col_idx × well_width``
+	    ``y = start_y − col_idx × well_width``
 
 	``start_x_cm`` / ``start_y_cm`` are the operator-calibrated A1
 	coordinates for the current orientation; they're the sole input
 	that differs between orientations.
 
-	The mechanical state machine does NOT yet call this function — it
-	uses relative moves in ``_snake_step`` instead — but it's exported
-	here for future absolute-targeting callers (jump-to-well, post-
-	pause re-positioning, future labware tools).
+	The mechanical state machine uses relative moves in ``_snake_step``
+	for within-sample steps, but cross-sample handoffs and the
+	pre-fractionation prime call this through ``_snake_step_absolute``
+	and ``_prime_phase`` respectively, so any sign error here surfaces
+	as a needle that lands off the plate after the first post-purge
+	move.
 	"""
 	col_idx, row_idx = parse_well_id(well_id)
 	if orientation == "portrait":
 		x_cm = start_x_cm + row_idx * well_width_cm
-		y_cm = start_y_cm + col_idx * well_width_cm
+		y_cm = start_y_cm - col_idx * well_width_cm
 	else:
 		x_cm = start_x_cm + col_idx * well_width_cm
 		y_cm = start_y_cm + row_idx * well_width_cm

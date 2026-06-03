@@ -7968,9 +7968,11 @@ class App(tk.Tk):
 			else:
 				current_well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
 				if self.plate_orientation == "portrait":
+					# Portrait: rows east (+X), cols NORTH (-Y).
 					dest_x_cm = s.table_start_cm + s.y * s.well_size
-					dest_y_cm = s.carriage_start_cm + s.x * s.well_size
+					dest_y_cm = s.carriage_start_cm - s.x * s.well_size
 				else:
+					# Landscape: cols east (+X), rows south (+Y).
 					dest_x_cm = s.table_start_cm + s.x * s.well_size
 					dest_y_cm = s.carriage_start_cm + s.y * s.well_size
 				# Physically return the needle from the waste bin to
@@ -9354,10 +9356,11 @@ class App(tk.Tk):
 		# Absolute target. Same orientation-aware mapping as
 		# ``well_id_to_cm`` (and ``_prime_phase``'s current-well
 		# lookup) so this move agrees with every other state-machine
-		# absolute-position computation.
+		# absolute-position computation. Portrait cols extend NORTH
+		# (−Y) from A1 per the LEFT-anchored convention.
 		if self.plate_orientation == "portrait":
 			target_x_cm = s.table_start_cm + s.y * s.well_size
-			target_y_cm = s.carriage_start_cm + s.x * s.well_size
+			target_y_cm = s.carriage_start_cm - s.x * s.well_size
 		else:
 			target_x_cm = s.table_start_cm + s.x * s.well_size
 			target_y_cm = s.carriage_start_cm + s.y * s.well_size
@@ -9413,14 +9416,23 @@ class App(tk.Tk):
 		"""
 		s = self.state
 		# Pick the physical motors that drive "row" (inner sweep) and
-		# "column" (outer step) for this orientation. Logical iteration
-		# is column-wise either way.
+		# "column" (outer step) for this orientation. Logical
+		# iteration is column-wise either way. ``col_advance_cm`` is
+		# the SIGNED per-step delta the col motor takes on each column
+		# wrap — landscape cols extend east (+X table) so +ws, portrait
+		# cols extend NORTH (−Y carriage) so −ws. The sign lives in
+		# the argument, not in any mutable direction state, so the
+		# call site can't drift out of sync with the absolute-position
+		# computations in ``_snake_step_absolute`` and
+		# ``well_id_to_cm``.
 		if self.plate_orientation == "portrait":
 			row_motor = self.table_motor
 			col_motor = self.carriage_motor
+			col_advance_cm = -s.well_size
 		else:
 			row_motor = self.carriage_motor
 			col_motor = self.table_motor
+			col_advance_cm = s.well_size
 
 		if s.carriage_forwards:
 			s.y = s.y + 1
@@ -9428,7 +9440,7 @@ class App(tk.Tk):
 				row_motor.move_dist_relative(s.well_size)
 			else:
 				s.y = s.ROWS - 1
-				col_motor.move_dist_relative(s.well_size)
+				col_motor.move_dist_relative(col_advance_cm)
 				s.x = s.x + 1
 				s.carriage_forwards = False
 		else:
@@ -9437,7 +9449,7 @@ class App(tk.Tk):
 				row_motor.move_dist_relative(-s.well_size)
 			else:
 				s.y = 0
-				col_motor.move_dist_relative(s.well_size)
+				col_motor.move_dist_relative(col_advance_cm)
 				s.x = s.x + 1
 				s.carriage_forwards = True
 		return s.x < s.COLS
