@@ -6,5 +6,6 @@
   "volume_per_well": "0.1",
   "table_start": "0",
   "carriage_start": "0",
-  "labware_file": ""
+  "labware_file": "",
+  "waste_anchor_version": 2
 }
