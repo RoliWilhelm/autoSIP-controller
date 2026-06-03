@@ -6813,9 +6813,19 @@ class App(tk.Tk):
 						is_transit=True,
 					)
 				else:
-					# Subsequent series: snake-step from the last collected
-					# well to the next available one.
-					if not self._snake_step():
+					# Subsequent series: ABSOLUTE move from the waste
+					# bin to the next snake well. ``_snake_step`` here
+					# would issue a RELATIVE move of one well-size on
+					# the assumption that the carriage is parked at the
+					# previous well, but the discards just finished at
+					# the waste bin — so a relative step would offset
+					# from the waste bin and silently dispense into
+					# empty table area for the rest of the sample (the
+					# software would still believe it's tracking the
+					# plate). ``_snake_step_absolute`` advances the
+					# snake state and drives the motors absolutely to
+					# the well's coordinates.
+					if not self._snake_step_absolute():
 						self._auto_pause_total_reached()
 						return
 				self.set_status("Fractionation in progress...")
@@ -9299,6 +9309,79 @@ class App(tk.Tk):
 			self.set_status(f"Resuming on plate {new_plate_id}...")
 			self.pump_liquid()
 			self._update_run_control_buttons()
+
+	def _snake_step_absolute(self):
+		"""Variant of ``_snake_step`` for the cross-sample handoff
+		where the needle is at the WASTE BIN (post-discard), not at
+		the previous collected well.
+
+		``_snake_step`` issues a RELATIVE motor move of one well-size
+		on the assumption that the carriage is currently parked at
+		the previous well. When called after the inter-sample
+		discards have just dispensed at the waste bin, that relative
+		move offsets from the waste-bin position by one well-size
+		and lands somewhere off the plate — the state machine then
+		runs the rest of the sample at a phantom position while the
+		software believes it's tracking the plate. This helper
+		advances the snake state the same way ``_snake_step`` does
+		AND issues an ABSOLUTE move to the new well's motor
+		coordinates so the carriage ends up exactly where the
+		software expects.
+
+		Returns True if the new position is on the plate, False if
+		the snake walked off — same contract as ``_snake_step``.
+		"""
+		s = self.state
+		# Mirror ``_snake_step``'s state-advance logic exactly
+		# (column-wise iteration in BOTH orientations: inner sweep on
+		# s.y, outer step on s.x; off-plate at s.x >= s.COLS), but
+		# without firing any per-axis relative motor move.
+		if s.carriage_forwards:
+			s.y = s.y + 1
+			if s.y >= s.ROWS:
+				s.y = s.ROWS - 1
+				s.x = s.x + 1
+				s.carriage_forwards = False
+		else:
+			s.y = s.y - 1
+			if s.y < 0:
+				s.y = 0
+				s.x = s.x + 1
+				s.carriage_forwards = True
+		if s.x >= s.COLS:
+			return False
+
+		# Absolute target. Same orientation-aware mapping as
+		# ``well_id_to_cm`` (and ``_prime_phase``'s current-well
+		# lookup) so this move agrees with every other state-machine
+		# absolute-position computation.
+		if self.plate_orientation == "portrait":
+			target_x_cm = s.table_start_cm + s.y * s.well_size
+			target_y_cm = s.carriage_start_cm + s.x * s.well_size
+		else:
+			target_x_cm = s.table_start_cm + s.x * s.well_size
+			target_y_cm = s.carriage_start_cm + s.y * s.well_size
+
+		well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+		self.set_status(
+			f"Moving to first collected well of series "
+			f"{s.series_index}: {well_id}…"
+		)
+		self.move_to_positions(
+			table_dist=target_x_cm,
+			carriage_dist=target_y_cm,
+			is_transit=True,
+		)
+		if self.run_logger is not None:
+			try:
+				self.run_logger.sample_start_move(
+					s.series_index, s.x, s.y,
+					target_x_cm, target_y_cm,
+				)
+			except Exception as exc:
+				logger.warning(
+					"Failed to log sample_start_move: %s", exc)
+		return True
 
 	def _snake_step(self):
 		"""Advance s.x/s.y one snake-step AND fire the corresponding motor

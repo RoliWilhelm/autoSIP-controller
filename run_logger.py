@@ -474,6 +474,31 @@ class RunLogger:
 			now, now, "0.000", "resume",
 		])
 
+	def sample_start_move(self, series_index, next_x, next_y,
+			target_table_cm, target_carriage_cm):
+		"""Append a ``status="sample_start_move"`` row marking the
+		ABSOLUTE move from the waste bin to the first collected well
+		of a new sample (post-discard, series ≥ 2). The next dispense
+		row will land on the same well, so this breadcrumb makes the
+		move/no-move boundary visible for forensic review — if it's
+		absent in the CSV but the next dispense's well_id changed,
+		that's the signature of the silent-data-loss bug returning.
+		``target_table_cm`` / ``target_carriage_cm`` are the absolute
+		motor coordinates of the destination well, written into the
+		plate_x / plate_y columns so a CSV reader can verify the
+		move target without joining against the labware spec.
+		"""
+		if self.run_dir is None:
+			return
+		now = _now_iso()
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""), rid.get("plate_id", ""),
+			_well_id(next_x, next_y),
+			_fmt_coord(target_table_cm), _fmt_coord(target_carriage_cm),
+			now, now, "0.000", "sample_start_move",
+		])
+
 	def close_without_summary(self):
 		"""Close the CSV file without writing end.json / summary.md.
 
