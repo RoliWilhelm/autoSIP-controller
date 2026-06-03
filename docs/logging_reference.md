@@ -33,8 +33,8 @@ Reader-relevant behaviours:
   defaults to the literal string `default`.
 - **`{timestamp_start}` is the ISO 8601 wall-clock time at the moment
   Begin Fractionation succeeds**, with millisecond precision and with
-  `:` characters replaced by `-` so the path is filesystem-safe on
-  Windows / macOS / Linux. Example: `2026-05-29T08-14-22.413`.
+  `:` characters replaced by `-` so the path is filesystem-safe.
+  Example: `2026-05-29T08-14-22.413`.
 - **`{sample_id_at_start}` is fixed at run start.** It is the operator's
   Sample ID field as committed when Begin Fractionation succeeded. If
   the operator later swaps to a new sample (multi-sample run), the

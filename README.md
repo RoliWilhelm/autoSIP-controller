@@ -32,12 +32,6 @@ Create and activate a virtual environment:
 python -m venv .venv && source .venv/bin/activate
 ```
 
-On Windows, activate with:
-
-```cmd
-.venv\Scripts\activate
-```
-
 Install dependencies (Pi-only hardware deps; on a non-Pi system, simulation mode
 will be enabled automatically once it lands in the next commit):
 
