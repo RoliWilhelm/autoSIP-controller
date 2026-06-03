@@ -55,8 +55,6 @@ walkthroughs of common workflows, see the
 [Operation Instructions — Common Workflows](docs/operation_instructions.md#63-common-workflows)
 (Section 6.3 of the manuscript supplement).
 
-![Figure: autoSIP main window, Automated mode](docs/figures/main_window.png)
-
 ### Coordinate system and the origin
 
 Two stepper motors drive the dispensing needle: one for the X-axis
