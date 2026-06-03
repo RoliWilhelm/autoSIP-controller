@@ -2041,12 +2041,12 @@ class AutomatedFrame(tk.Frame):
 			lines = []
 			if pump_blank:
 				lines.append(
-					"Tools → Pump Parameters…\n  • "
+					"Settings → Fractionation Parameters…\n  • "
 					+ "\n  • ".join(pump_blank)
 				)
 			if clean_blank:
 				lines.append(
-					"Tools → Cleaning Parameters…\n  • "
+					"Settings → Cleaning Parameters…\n  • "
 					+ "\n  • ".join(clean_blank)
 				)
 			messagebox.showerror(
@@ -3847,18 +3847,6 @@ class App(tk.Tk):
 		# config.json (last_used == {}) still gets the banner.
 		self.automated_frame._refresh_config_banner()
 
-		# One-time INFO breadcrumb if the old ~/.autosip/runs/ tree exists
-		# from earlier versions. We do NOT auto-migrate -- moving the
-		# operator's files would surprise them.
-		old_runs = Path.home() / ".autosip" / "runs"
-		if old_runs.exists():
-			import run_logger as _rl
-			logger.info(
-				"Older run logs found at %s. New runs will be written to %s. "
-				"Move the old data manually if you want it alongside.",
-				old_runs, _rl.DEFAULT_LOGS_DIR,
-			)
-
 		# Intercept window-close so a run in progress is recorded as
 		# "manual_abort" rather than just orphaned on disk.
 		self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -3911,13 +3899,13 @@ class App(tk.Tk):
 		tools = tk.Menu(menubar, tearoff=False)
 		tools.add_command(label="Preferences…", command=self._show_preferences_dialog)
 		tools.add_separator()
-		tools.add_command(label="Pump Parameters…",
+		tools.add_command(label="Fractionation Parameters…",
 			command=self._show_pump_parameters_dialog)
 		tools.add_command(label="Cleaning Parameters…",
 			command=self._show_cleaning_parameters_dialog)
 		tools.add_separator()
 		tools.add_command(label="Open last run folder", command=self._open_last_run)
-		menubar.add_cascade(label="Tools", menu=tools)
+		menubar.add_cascade(label="Settings", menu=tools)
 
 		help_menu = tk.Menu(menubar, tearoff=False)
 		help_menu.add_command(label="About", command=self._show_about_dialog)
@@ -4330,7 +4318,7 @@ class App(tk.Tk):
 		citation_box.pack(fill=tk.X, pady=(4, 12))
 		tk.Label(citation_box,
 			text="If you use autoSIP, please cite\n"
-			     "Laud et al. 2026 (in preparation, HardwareX).",
+			     "Elango et al. 2026 (in preparation, HardwareX).",
 			font=FONTS["body"], bg=PALETTE["bg_frame"],
 			fg=PALETTE["fg_text"], justify="left",
 		).pack(anchor="w")
@@ -4467,7 +4455,7 @@ class App(tk.Tk):
 		picks up the new values.
 		"""
 		dlg = self._modal_param_dialog(
-			title="Pump Parameters",
+			title="Fractionation Parameters",
 			sections=[
 				("Pump", [
 					("Pump rate (mL/hr — see your syringe pump spec):",

@@ -6,7 +6,7 @@ isopycnic gradient fractionation for stable isotope probing (SIP) molecular biol
 experiments. Two NEMA-17 stepper motors on lead screws drive an XY carriage with a
 dispensing needle, and a relay-switched pump extracts liquid from an ultracentrifuge
 tube and dispenses measured fractions into a 96-well plate (or other Opentrons-format
-labware). Manuscript in preparation (Laud et al., 2024, for HardwareX).
+labware). Manuscript in preparation (Elango et al., 2026, for HardwareX).
 
 ## Codebase orientation
 - `main.py` — entire application: the `StepperMotor` hardware class, the `TextEntry`

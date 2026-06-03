@@ -404,7 +404,7 @@ messagebox) containing:
 - A short product description.
 - A **clickable GitHub link** (`https://github.com/RoliWilhelm/autoSIP-controller`).
 - A **Citation reminder** sub-frame with the exact text:
-  *"If you use autoSIP, please cite Laud et al. 2026 (in preparation,
+  *"If you use autoSIP, please cite Elango et al. 2026 (in preparation,
   HardwareX)."*
 
 Worth a one-line mention so reviewers find it.

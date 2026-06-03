@@ -2,7 +2,7 @@
 
 A Python/Tkinter graphical interface controlling a low-cost, 3D-printable,
 Raspberry Pi-based isopycnic gradient fractionating robot for DNA/RNA stable
-isotope probing (SIP) experiments. Accompanies Laud et al. 2024 (in preparation,
+isotope probing (SIP) experiments. Accompanies Elango et al. 2026 (in preparation,
 HardwareX).
 
 ## Status
@@ -653,4 +653,4 @@ For step-by-step walkthroughs of common workflows, see
 GPL-3.0 — see LICENSE.
 
 ## Citation
-If you use autoSIP, please cite Laud et al. 2024 (in preparation, HardwareX).
+If you use autoSIP, please cite Elango et al. 2026 (in preparation, HardwareX).
