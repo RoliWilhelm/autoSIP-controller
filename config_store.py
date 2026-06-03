@@ -35,6 +35,7 @@ FIELDS = (
 	"volume_per_well",
 	"table_start", "carriage_start",
 	"waste_bin_table", "waste_bin_carriage",
+	"waste_bin_x_extent", "waste_bin_y_extent",
 	"labware_file",
 )
 

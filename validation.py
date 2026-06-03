@@ -217,6 +217,30 @@ def table_pos(text, *, allow_empty=False):
 	)
 
 
+# Waste-bin rectangle extents (cm). The bin's UL anchor lives in the
+# existing ``waste_bin_table`` / ``waste_bin_carriage`` validators
+# (``table_pos`` / ``carriage_pos``); the extents extend the rectangle
+# south and east from there. Both extents default to 0 (legacy
+# point-target behaviour) and must keep anchor + extent within the
+# table's physical bounds — checked at the call site once the anchor
+# is known, since this scalar validator can only enforce the bare
+# ``≥ 0`` lower bound.
+WASTE_BIN_EXTENT_MIN, WASTE_BIN_EXTENT_MAX = 0.0, max(TABLE_POS_MAX, CARRIAGE_POS_MAX)
+
+
+def waste_bin_extent(text, *, allow_empty=False):
+	"""Validate a waste-bin axis extent (cm): float in
+	``[WASTE_BIN_EXTENT_MIN, WASTE_BIN_EXTENT_MAX]``. The full
+	"anchor + extent inside table" rectangle check happens at the
+	call site (``AutomatedFrame._validate_waste_bin_rect``), where
+	both the anchor and the physical table dimensions are in scope.
+	"""
+	return _parse_float(
+		text, "Waste bin extent", WASTE_BIN_EXTENT_MIN, WASTE_BIN_EXTENT_MAX,
+		allow_empty=allow_empty,
+	)
+
+
 def _parse_identifier(text, label):
 	text = (text or "").strip()
 	if text == "":

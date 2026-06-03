@@ -245,6 +245,53 @@ TABLE_HEIGHT_MM = 127.76  # Y (carriage-screw axis)
 SBS_FOOTPRINT_LONG_MM = 127.76
 SBS_FOOTPRINT_SHORT_MM = 85.48
 
+# Waste bin "interior margin" — how far inside the bin's outer
+# rectangle the needle must be to count as a valid dispense entry
+# point. Prevents the dispenser from dripping on the bin rim. Used by
+# ``shortest_point_in_waste_bin`` to shrink the rectangle on all
+# sides before the point-to-rectangle clamp.
+WASTE_BIN_INTERIOR_MARGIN_MM = 5.0
+
+
+def shortest_point_in_waste_bin(
+		current_x_mm, current_y_mm,
+		bin_anchor_x_mm, bin_anchor_y_mm,
+		bin_extent_x_mm, bin_extent_y_mm,
+		margin_mm=WASTE_BIN_INTERIOR_MARGIN_MM):
+	"""Return ``(target_x_mm, target_y_mm)`` — the closest point inside
+	the waste-bin interior to the current XY position. Classic
+	point-to-rectangle clamp with a margin inset on all sides so the
+	dispenser doesn't drop fluid on the bin rim.
+
+	The "interior" is the bin rectangle shrunk by ``margin_mm`` on every
+	side. If the interior collapses on an axis (extent < 2 × margin),
+	fall back to the bin centre on that axis so the dispenser still
+	targets the middle of whatever ledge remains rather than the
+	out-of-bounds clamp.
+
+	Backward compatibility: callers should short-circuit when both
+	extents are zero (legacy point-target behaviour). This helper
+	collapses extent==0 to "bin centre" via the same code path, but
+	callers avoid the function call entirely so the legacy code path
+	stays identical.
+	"""
+	def axis_target(current, anchor, extent):
+		interior_min = anchor + margin_mm
+		interior_max = anchor + extent - margin_mm
+		if interior_min > interior_max:
+			# Extent too small to admit the margin — fall back to bin
+			# centre on this axis.
+			return anchor + extent / 2.0
+		if current < interior_min:
+			return interior_min
+		if current > interior_max:
+			return interior_max
+		return current
+	return (
+		axis_target(current_x_mm, bin_anchor_x_mm, bin_extent_x_mm),
+		axis_target(current_y_mm, bin_anchor_y_mm, bin_extent_y_mm),
+	)
+
 
 class TableView(tk.Frame):
 	"""Whole-XY-table visualization showing the plate, fixed reference
@@ -297,8 +344,15 @@ class TableView(tk.Frame):
 
 		# Waste-bin marker — set by ``set_waste_bin``; ``False`` until
 		# the operator enters valid Waste Bin Position fields.
+		# Waste-bin rectangle (anchor + extents). ``waste_x_cm`` /
+		# ``waste_y_cm`` are the UPPER-LEFT anchor in motor cm;
+		# extents extend the rectangle south (carriage) and east
+		# (table). Default extents = 0 falls back to a small point
+		# marker at the anchor.
 		self.waste_x_cm = 0.0
 		self.waste_y_cm = 0.0
+		self.waste_x_extent_cm = 0.0
+		self.waste_y_extent_cm = 0.0
 		self._has_waste = False
 
 		# Live crosshair (Phase 3) — driven by App's 100 ms polling of
@@ -342,12 +396,19 @@ class TableView(tk.Frame):
 		self._has_plate = False
 		self._redraw()
 
-	def set_waste_bin(self, waste_x_cm, waste_y_cm):
-		"""Show the waste-bin marker at the operator-calibrated
-		position (motor cm). Marker is a labelled 20 × 20 mm square
-		centred on those coordinates."""
+	def set_waste_bin(self, waste_x_cm, waste_y_cm,
+			x_extent_cm=0.0, y_extent_cm=0.0):
+		"""Show the waste-bin marker.
+
+		``waste_x_cm`` / ``waste_y_cm`` are the UPPER-LEFT anchor of
+		the bin rectangle (motor cm). ``x_extent_cm`` / ``y_extent_cm``
+		extend the rectangle south + east from the anchor. When both
+		extents are 0 (legacy default) the marker falls back to a
+		small labelled point at the anchor."""
 		self.waste_x_cm = float(waste_x_cm)
 		self.waste_y_cm = float(waste_y_cm)
+		self.waste_x_extent_cm = max(0.0, float(x_extent_cm))
+		self.waste_y_extent_cm = max(0.0, float(y_extent_cm))
 		self._has_waste = True
 		self._redraw()
 
@@ -633,25 +694,53 @@ class TableView(tk.Frame):
 			font=("TkDefaultFont", 8), fill="#333333",
 		)
 
-		# Waste-bin marker — labelled 20 × 20 mm square centred on
-		# the configured Waste Bin Position. Amber fill so it reads
-		# distinct from the white plate footprint.
+		# Waste-bin marker. Two render modes:
+		#   * Both extents > 0  — render the bin as a semi-transparent
+		#     amber rectangle from (anchor) to (anchor + extent). Tk
+		#     canvas has no true alpha; the stippled fill gives an
+		#     approximate ~30% visual weight. Label "Waste Bin"
+		#     centred inside if there's room (>= 30 px on the short
+		#     side).
+		#   * Either extent == 0 — fall back to a small 4 mm circle
+		#     at the anchor so the marker is still visible in the
+		#     pre-configuration state.
 		if not self._has_waste:
 			return
-		bin_mm = 20.0
-		half_mm = bin_mm / 2.0
-		half_px = half_mm * pxmm
-		bx = x_off + self.waste_x_cm * 10.0 * pxmm
-		by = y_off + self.waste_y_cm * 10.0 * pxmm
-		self.canvas.create_rectangle(
-			bx - half_px, by - half_px,
-			bx + half_px, by + half_px,
-			fill="#f0c060", outline="#8a6a00", width=1,
-		)
-		self.canvas.create_text(
-			bx, by, text="Waste",
-			font=("TkDefaultFont", 8, "bold"), fill="#3a2a00",
-		)
+		ax = x_off + self.waste_x_cm * 10.0 * pxmm
+		ay = y_off + self.waste_y_cm * 10.0 * pxmm
+		if self.waste_x_extent_cm > 0 and self.waste_y_extent_cm > 0:
+			bx2 = ax + self.waste_x_extent_cm * 10.0 * pxmm
+			by2 = ay + self.waste_y_extent_cm * 10.0 * pxmm
+			self.canvas.create_rectangle(
+				ax, ay, bx2, by2,
+				fill="#f0c060",
+				stipple="gray25",
+				outline="#8a6a00", width=1,
+			)
+			# Label only if the rectangle is big enough to fit it.
+			if min(bx2 - ax, by2 - ay) >= 30:
+				self.canvas.create_text(
+					(ax + bx2) / 2, (ay + by2) / 2,
+					text="Waste Bin",
+					font=("TkDefaultFont", 8, "bold"),
+					fill="#3a2a00",
+				)
+		else:
+			# Pre-configuration fallback: 4 mm circle at the anchor.
+			r_px = 2.0 * pxmm
+			self.canvas.create_oval(
+				ax - r_px, ay - r_px,
+				ax + r_px, ay + r_px,
+				fill="#f0c060", outline="#8a6a00", width=1,
+			)
+			# Small caption to the right of the dot.
+			self.canvas.create_text(
+				ax + r_px + 3, ay,
+				text="Waste",
+				anchor="w",
+				font=("TkDefaultFont", 8),
+				fill="#3a2a00",
+			)
 
 	# -- Live crosshair (Phase 3) ---------------------------------------
 

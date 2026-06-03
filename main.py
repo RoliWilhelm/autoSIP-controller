@@ -744,8 +744,24 @@ class FractionatorState:
 	discards_at_series_start: int = 0
 	discards_done: int = 0                # 0..discards_at_series_start counter
 	wells_collected: int = 0              # 0..(N-D_this_series) counter
-	waste_bin_table: float = 0.0          # cm, waste-bin target table position
-	waste_bin_carriage: float = 0.0       # cm, waste-bin target carriage position
+	# Waste-bin rectangle. The table/carriage values are now the
+	# UPPER-LEFT ANCHOR of a rectangle, consistent with the plate's
+	# Starting Well Position convention. The two ``*_extent`` fields
+	# extend the rectangle south (carriage) and east (table) from the
+	# anchor. Default extent 0 → legacy point-target behaviour (every
+	# move-to-waste goes to the anchor itself, no shortest-path
+	# routing). Non-zero extents enable shortest-path routing via
+	# ``App._waste_entry_for_current_position``.
+	waste_bin_table: float = 0.0          # cm, bin UL anchor X (table axis)
+	waste_bin_carriage: float = 0.0       # cm, bin UL anchor Y (carriage axis)
+	waste_bin_x_extent: float = 0.0       # cm, bin extent along X (≥ 0)
+	waste_bin_y_extent: float = 0.0       # cm, bin extent along Y (≥ 0)
+	# Latest entry point used for a move-to-waste — populated by every
+	# call site so the per-event log row records WHERE in the bin the
+	# fluid actually went (not just the bin anchor). Defaults to the
+	# anchor so legacy log rows still make sense before the first move.
+	last_waste_entry_x: float = 0.0
+	last_waste_entry_y: float = 0.0
 	table_start_cm: float = 0.0           # cm, plate-start table position
 	carriage_start_cm: float = 0.0        # cm, plate-start carriage position
 
@@ -1451,6 +1467,51 @@ class AutomatedFrame(tk.Frame):
 			"not a real measurement.",
 		)
 
+		# Waste-bin RECTANGLE size. The two existing Waste bin position
+		# fields (in Plate Parameters) are the rectangle's upper-left
+		# anchor; these extents say how far south + east it stretches.
+		# When both > 0, every move-to-waste routes to the closest
+		# entry point on the bin interior (clamped point-to-rectangle
+		# via ``well_plate.shortest_point_in_waste_bin``). When both
+		# are 0 (legacy default) every move targets the anchor itself.
+		bin_size_lbl = tk.Label(cleaning_params, anchor="w",
+			text="Waste bin size (X × Y, cm):")
+		bin_size_lbl.grid(row=3, column=0, sticky="we", pady=(6, 0))
+		bin_size_row = tk.Frame(cleaning_params)
+		bin_size_row.grid(row=4, column=0, sticky="we", padx=(16, 0))
+		bin_size_row.grid_columnconfigure(1, weight=0)
+		bin_size_row.grid_columnconfigure(3, weight=0)
+		tk.Label(bin_size_row, text="X:", anchor="e").grid(
+			row=0, column=0, padx=(0, 4))
+		self.waste_x_extent_te = TextEntry(
+			bin_size_row, "", textvariable=app.waste_bin_x_extent_var,
+		)
+		self.waste_x_extent_te.label.grid_remove()
+		self.waste_x_extent_te.entry.configure(width=8)
+		self.waste_x_extent_te.grid(row=0, column=1, sticky="w",
+			padx=(0, 12))
+		tk.Label(bin_size_row, text="Y:", anchor="e").grid(
+			row=0, column=2, padx=(0, 4))
+		self.waste_y_extent_te = TextEntry(
+			bin_size_row, "", textvariable=app.waste_bin_y_extent_var,
+		)
+		self.waste_y_extent_te.label.grid_remove()
+		self.waste_y_extent_te.entry.configure(width=8)
+		self.waste_y_extent_te.grid(row=0, column=3, sticky="w")
+		Tooltip(
+			self.waste_x_extent_te.entry,
+			"Width of the waste bin rectangle (cm). Default 0 keeps the "
+			"legacy point-target behaviour. Non-zero values enable "
+			"shortest-path routing — every move-to-waste targets the "
+			"closest entry point inside the bin instead of the anchor.",
+		)
+		Tooltip(
+			self.waste_y_extent_te.entry,
+			"Height of the waste bin rectangle (cm). Default 0 keeps the "
+			"legacy point-target behaviour. The bin extends south from "
+			"the Waste bin position by this distance.",
+		)
+
 		# Begin Fractionation -- the run-launch button. (The previous
 		# "Move (jog to Plate-start coords)" button was removed because the
 		# Return to Start Well button in the run-controls row already
@@ -1537,7 +1598,8 @@ class AutomatedFrame(tk.Frame):
 			_te.var.trace_add("write",
 				lambda *_a: (self._refresh_plate_preview(),
 					self._refresh_table_view()))
-		for _te in (self.waste_table_te, self.waste_carriage_te):
+		for _te in (self.waste_table_te, self.waste_carriage_te,
+				self.waste_x_extent_te, self.waste_y_extent_te):
 			_te.var.trace_add("write",
 				lambda *_a: self._refresh_table_view())
 		# Initial render once the frame is fully constructed and the
@@ -1584,6 +1646,8 @@ class AutomatedFrame(tk.Frame):
 			"carriage_start": self.carriage_te,
 			"waste_bin_table": self.waste_table_te,
 			"waste_bin_carriage": self.waste_carriage_te,
+			"waste_bin_x_extent": self.waste_x_extent_te,
+			"waste_bin_y_extent": self.waste_y_extent_te,
 		}.get(field)
 
 	def end_run_clicked(self):
@@ -1727,15 +1791,30 @@ class AutomatedFrame(tk.Frame):
 		)
 
 	def _waste_bin_valid(self):
-		"""Return ``(waste_table_cm, waste_carriage_cm)`` if both
-		Waste Bin Position entries validate, otherwise ``None``."""
+		"""Return ``(waste_table_cm, waste_carriage_cm, x_extent_cm,
+		y_extent_cm)`` if the anchor entries validate, otherwise
+		``None``. The extents default to ``0.0`` when blank or invalid
+		(legacy point-target behaviour). Anchor + extent overhang
+		against the table dimensions is checked separately at
+		Begin Fractionation time so the TableView can still re-render
+		mid-edit while the operator is still typing.
+		"""
 		ok_x, vx = validation.table_pos(self.waste_table_te.get())
 		if not ok_x:
 			return None
 		ok_y, vy = validation.carriage_pos(self.waste_carriage_te.get())
 		if not ok_y:
 			return None
-		return (vx, vy)
+		# Extents: blank or unparseable → 0 (legacy point target).
+		try:
+			ext_x = float(self.waste_x_extent_te.get())
+		except (TypeError, ValueError):
+			ext_x = 0.0
+		try:
+			ext_y = float(self.waste_y_extent_te.get())
+		except (TypeError, ValueError):
+			ext_y = 0.0
+		return (vx, vy, max(0.0, ext_x), max(0.0, ext_y))
 
 	def _refresh_table_view(self, *_):
 		"""Re-render every whole-table view (Automated mode's
@@ -1763,6 +1842,16 @@ class AutomatedFrame(tk.Frame):
 				tv.clear_waste_bin()
 			else:
 				tv.set_waste_bin(*waste)
+		# Stash the latest valid waste tuple on the App for the
+		# routing helper to read at every move-to-waste call site.
+		# ``_waste_entry_for_current_position`` short-circuits on
+		# extent==0 so legacy point-target behaviour is preserved.
+		if waste is not None:
+			anchor_x, anchor_y, ext_x, ext_y = waste
+			self.app.state.waste_bin_table = anchor_x
+			self.app.state.waste_bin_carriage = anchor_y
+			self.app.state.waste_bin_x_extent = ext_x
+			self.app.state.waste_bin_y_extent = ext_y
 
 	def _poll_dispenser_position(self):
 		"""Read the current motor positions and push them into every
@@ -2044,6 +2133,45 @@ class AutomatedFrame(tk.Frame):
 				waste_x = wx_val if wx_ok else None
 				waste_y = wy_val if wy_ok else None
 
+			# Waste-bin extents (cm). Blank → 0. Validate ≥ 0 and that
+			# anchor + extent fits inside the physical table (in cm:
+			# TABLE_WIDTH_MM/10 × TABLE_HEIGHT_MM/10).
+			wex_ok, wex_val = validation.waste_bin_extent(
+				self.waste_x_extent_te.get(), allow_empty=True)
+			wey_ok, wey_val = validation.waste_bin_extent(
+				self.waste_y_extent_te.get(), allow_empty=True)
+			if not wex_ok:
+				self.waste_x_extent_te.show_error(wex_val)
+				errors.append(wex_val)
+			if not wey_ok:
+				self.waste_y_extent_te.show_error(wey_val)
+				errors.append(wey_val)
+			waste_x_extent = wex_val if (wex_ok and wex_val is not None) else 0.0
+			waste_y_extent = wey_val if (wey_ok and wey_val is not None) else 0.0
+			# Rectangle bounds check (only if we have an anchor + at least
+			# one non-zero extent).
+			from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
+			table_x_max_cm = TABLE_WIDTH_MM / 10.0
+			table_y_max_cm = TABLE_HEIGHT_MM / 10.0
+			if (waste_x is not None and waste_x_extent > 0
+					and waste_x + waste_x_extent > table_x_max_cm + 1e-6):
+				msg = (
+					f"Waste bin X anchor ({waste_x:.2f} cm) + extent "
+					f"({waste_x_extent:.2f} cm) overhangs the table's "
+					f"{table_x_max_cm:.2f} cm X range."
+				)
+				self.waste_x_extent_te.show_error(msg)
+				errors.append(msg)
+			if (waste_y is not None and waste_y_extent > 0
+					and waste_y + waste_y_extent > table_y_max_cm + 1e-6):
+				msg = (
+					f"Waste bin Y anchor ({waste_y:.2f} cm) + extent "
+					f"({waste_y_extent:.2f} cm) overhangs the table's "
+					f"{table_y_max_cm:.2f} cm Y range."
+				)
+				self.waste_y_extent_te.show_error(msg)
+				errors.append(msg)
+
 		if errors:
 			messagebox.showerror(
 				"Cannot start fractionation",
@@ -2085,6 +2213,8 @@ class AutomatedFrame(tk.Frame):
 			number_of_fractions=n_v, discard_fractions=d_v,
 			waste_bin_table=waste_x if waste_x is not None else 0.0,
 			waste_bin_carriage=waste_y if waste_y is not None else 0.0,
+			waste_bin_x_extent=waste_x_extent,
+			waste_bin_y_extent=waste_y_extent,
 			table_start=table_v, carriage_start=carriage_v,
 			drip_wait_time=drip_v,
 			purge_time=purge_v,
@@ -3260,9 +3390,13 @@ class CleaningFrame(tk.Frame):
 		self.app._start_system_clean(launched_during_pause=paused)
 
 	def move_clicked(self):
-		"""Move the needle to the waste-bin position. Both coords are
-		validated; either being out-of-range surfaces inline + halts the move.
-		Empty fields are allowed (only the populated axis moves)."""
+		"""Move the needle to the closest entry point inside the waste
+		bin rectangle. Falls back to the bin anchor when extents are
+		zero (legacy point-target behaviour). Both anchor coords are
+		validated; either being out-of-range surfaces inline + halts
+		the move. Empty fields are allowed (only the populated axis
+		moves), and the routing only fires when BOTH anchor values
+		are present."""
 		t_ok, t_val = validation.table_pos(self.waste_table_te.get(), allow_empty=True)
 		c_ok, c_val = validation.carriage_pos(self.waste_carriage_te.get(), allow_empty=True)
 		(self.waste_table_te.clear_error if t_ok else lambda: self.waste_table_te.show_error(t_val))()
@@ -3271,6 +3405,18 @@ class CleaningFrame(tk.Frame):
 			return
 		if t_val is None and c_val is None:
 			return
+		if t_val is not None and c_val is not None:
+			# Both axes present — route through the shortest-path
+			# helper so the needle enters the bin at the closest point
+			# to its current XY (legacy point target if extents are 0).
+			entry_x, entry_y = self.app._waste_entry_for_current_position()
+			self.app.state.last_waste_entry_x = entry_x
+			self.app.state.last_waste_entry_y = entry_y
+			self.app.move_to_positions(table_dist=entry_x,
+				carriage_dist=entry_y, is_transit=True)
+			return
+		# Single-axis move: keep the original direct-target semantics
+		# since shortest-path is ill-defined with a missing coordinate.
 		self.app.move_to_positions(table_dist=t_val, carriage_dist=c_val,
 			is_transit=True)
 
@@ -3414,6 +3560,13 @@ class App(tk.Tk):
 		# them in its constructor.
 		self.waste_bin_table_var = tk.StringVar()
 		self.waste_bin_carriage_var = tk.StringVar()
+		# Waste-bin RECTANGLE extents (cm). The anchor lives in the two
+		# vars above; these two extend the bin south and east. Empty /
+		# missing values are treated as zero — preserving legacy
+		# point-target behaviour. Shared at App level for the same
+		# cross-mode reason as the anchor vars.
+		self.waste_bin_x_extent_var = tk.StringVar()
+		self.waste_bin_y_extent_var = tk.StringVar()
 		# Inter-sample purge time. Owned at App level so the Cleaning-mode
 		# Purge Time Calibration panel can write a measured value here and
 		# Automated mode's Purge time entry picks it up immediately.
@@ -4867,6 +5020,44 @@ class App(tk.Tk):
 		self.table_motor.forwards = True
 		self.carriage_motor.forwards = True
 
+	def _waste_entry_for_current_position(self):
+		"""Compute the actual ``(target_table_cm, target_carriage_cm)``
+		entry point for the NEXT move-to-waste, given the current
+		motor XY and the bin rectangle.
+
+		If both extents are zero (legacy default), return the bin
+		anchor directly — preserves the previous point-target
+		behaviour exactly. Otherwise route through
+		``shortest_point_in_waste_bin``: clamp the current motor
+		position to the bin's interior (anchor + extent shrunk by the
+		``WASTE_BIN_INTERIOR_MARGIN_MM`` rim margin on each side).
+
+		Returns (target_x_cm, target_y_cm) in motor cm. Y is the
+		state-machine positive-south-distance convention; the
+		``move_to_positions`` boundary negates it before reaching the
+		carriage motor.
+		"""
+		from well_plate import shortest_point_in_waste_bin
+		s = self.state
+		anchor_x = float(s.waste_bin_table)
+		anchor_y = float(s.waste_bin_carriage)
+		ext_x = float(s.waste_bin_x_extent)
+		ext_y = float(s.waste_bin_y_extent)
+		if ext_x <= 0.0 and ext_y <= 0.0:
+			# Legacy point-target — preserve the anchor exactly.
+			return anchor_x, anchor_y
+		# Current motor XY, converted to the state-machine positive-
+		# south-distance convention so it shares a frame with the bin.
+		cur_x_cm = self.table_motor.get_angle() * self.table_motor.cm_per_deg
+		cur_y_cm = abs(self.carriage_motor.get_angle() * self.carriage_motor.cm_per_deg)
+		# Helper takes mm; convert + back.
+		tx_mm, ty_mm = shortest_point_in_waste_bin(
+			cur_x_cm * 10.0, cur_y_cm * 10.0,
+			anchor_x * 10.0, anchor_y * 10.0,
+			ext_x * 10.0, ext_y * 10.0,
+		)
+		return tx_mm / 10.0, ty_mm / 10.0
+
 	def iter_table_views(self):
 		"""Yield every constructed ``TableView`` instance so the
 		refresh + polling paths can update them together. Automated
@@ -6115,7 +6306,8 @@ class App(tk.Tk):
 			waste_bin_table, waste_bin_carriage,
 			table_start, carriage_start, drip_wait_time,
 			purge_time, prime_time_s, skip_intersample_purge,
-			peristaltic_rate_ml_per_min, max_waste_volume_ml):
+			peristaltic_rate_ml_per_min, max_waste_volume_ml,
+			waste_bin_x_extent=0.0, waste_bin_y_extent=0.0):
 		"""Begin a fractionation run with already-validated, parsed inputs.
 
 		Cross-field rules (N ≤ rows·cols, D < N, waste-bin coords required
@@ -6277,6 +6469,8 @@ class App(tk.Tk):
 		s.wells_collected = 0
 		s.waste_bin_table = waste_bin_table
 		s.waste_bin_carriage = waste_bin_carriage
+		s.waste_bin_x_extent = max(0.0, float(waste_bin_x_extent))
+		s.waste_bin_y_extent = max(0.0, float(waste_bin_y_extent))
 		s.table_start_cm = table_start
 		s.carriage_start_cm = carriage_start
 
@@ -6433,7 +6627,9 @@ class App(tk.Tk):
 		"""
 		s = self.state
 		if s.discards_at_series_start > 0:
-			target_x, target_y = s.waste_bin_table, s.waste_bin_carriage
+			# Shortest-path routing into the bin rectangle. Falls back
+			# to the anchor when extents are zero (legacy point target).
+			target_x, target_y = self._waste_entry_for_current_position()
 			target_label = "waste bin"
 			target_is_waste = True
 		else:
@@ -6807,9 +7003,12 @@ class App(tk.Tk):
 		if s.phase == "discard":
 			idx = s.discards_done + 1
 			if self.run_logger is not None:
+				# Record the ACTUAL bin entry point (shortest-path
+				# target), not the bin anchor, so log.csv reflects
+				# where the fluid physically went.
 				self.run_logger.discard_dispense_start(
 					s.series_index, idx,
-					s.waste_bin_table, s.waste_bin_carriage)
+					s.last_waste_entry_x, s.last_waste_entry_y)
 			self.set_status(
 				f"Discard {idx} of {s.discards_at_series_start}: pumping to waste..."
 			)
@@ -7367,13 +7566,19 @@ class App(tk.Tk):
 
 		if s.discards_at_series_start > 0:
 			self._set_phase("discard")
-			# Transit to the waste bin — fluid hasn't started flowing
-			# yet for this series.
+			# Transit to the bin's closest interior entry point (with
+			# legacy point-target fallback if extents are zero) —
+			# fluid hasn't started flowing yet for this series.
+			entry_x, entry_y = self._waste_entry_for_current_position()
 			self.move_to_positions(
-				table_dist=s.waste_bin_table,
-				carriage_dist=s.waste_bin_carriage,
+				table_dist=entry_x,
+				carriage_dist=entry_y,
 				is_transit=True,
 			)
+			# Record the actual entry point on the state so the
+			# per-discard log rows can carry it.
+			s.last_waste_entry_x = entry_x
+			s.last_waste_entry_y = entry_y
 			self.automated_frame.progress.set_discard_status(0, s.discards_at_series_start)
 			self.pump_liquid()
 		else:
@@ -7417,14 +7622,19 @@ class App(tk.Tk):
 		"""
 		s = self.state
 
-		# Move to waste bin first. Synchronous via move_to_positions —
-		# transit cadence since no fluid is flowing yet.
+		# Move to the bin's closest interior entry point. Synchronous
+		# via move_to_positions — transit cadence since no fluid is
+		# flowing yet. Cache the entry XY on the state so the purge
+		# log rows below carry the actual point used.
 		self.set_status("Moving to waste bin for inter-sample purge…")
+		entry_x, entry_y = self._waste_entry_for_current_position()
 		self.move_to_positions(
-			table_dist=s.waste_bin_table,
-			carriage_dist=s.waste_bin_carriage,
+			table_dist=entry_x,
+			carriage_dist=entry_y,
 			is_transit=True,
 		)
+		s.last_waste_entry_x = entry_x
+		s.last_waste_entry_y = entry_y
 		self.set_status("Inter-sample purge: awaiting user.")
 
 		# The run normally holds a "fractionate" claim throughout.
@@ -7475,8 +7685,13 @@ class App(tk.Tk):
 				dest_x_cm = ctx["prime_dest_x_cm"]
 				dest_y_cm = ctx["prime_dest_y_cm"]
 			else:
-				dest_x_cm = s.waste_bin_table
-				dest_y_cm = s.waste_bin_carriage
+				# Non-prime purge phases dispense at the cached bin
+				# entry point (shortest-path target from the initial
+				# purge move). Falls back to the anchor when extents
+				# are zero — last_waste_entry_* gets seeded with the
+				# anchor in that case.
+				dest_x_cm = s.last_waste_entry_x
+				dest_y_cm = s.last_waste_entry_y
 			try:
 				self.run_logger.purge_committed(
 					phase=phase, series_index=next_series_index,
@@ -8025,8 +8240,10 @@ class App(tk.Tk):
 			#     in the well, not in waste — and so the operator's
 			#     visual position matches what the dialog promises.
 			if next_discards > 0:
-				dest_x_cm = s.waste_bin_table
-				dest_y_cm = s.waste_bin_carriage
+				# The needle is already at the bin entry point from
+				# the initial purge move; keep dispensing there.
+				dest_x_cm = s.last_waste_entry_x
+				dest_y_cm = s.last_waste_entry_y
 				dest_note = (
 					"Priming output will be dispensed into the waste "
 					"bin — discard fractions are configured for the "
@@ -8183,8 +8400,12 @@ class App(tk.Tk):
 		except (TypeError, ValueError):
 			purge_seconds = max(0.1, float(s.purge_time or 30.0))
 
-		waste_x = s.waste_bin_table
-		waste_y = s.waste_bin_carriage
+		# Shortest-path routing into the bin (point-target fallback if
+		# extents are zero). Cached on state so the sysclean log rows
+		# below carry the actual entry point.
+		waste_x, waste_y = self._waste_entry_for_current_position()
+		s.last_waste_entry_x = waste_x
+		s.last_waste_entry_y = waste_y
 
 		self.set_status("Moving to waste bin for System Clean…")
 		self.update_idletasks()
@@ -8236,6 +8457,10 @@ class App(tk.Tk):
 			elapsed = monotonic() - ctx["cycle_start_mono"]
 			end_iso = datetime.now().isoformat(timespec="milliseconds")
 			try:
+				# ``waste_x`` / ``waste_y`` already hold the
+				# shortest-path entry point (cached on state above);
+				# pass them through so the log carries the actual
+				# dispense location, not the bin anchor.
 				sysclean_logger.sysclean_committed(
 					phase=phase,
 					start_iso=ctx["cycle_start_iso"],

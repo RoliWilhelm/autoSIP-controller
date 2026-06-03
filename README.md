@@ -96,8 +96,27 @@ Two consequences follow from that convention:
 
 - **Waste bin position** (Plate Parameters → *Waste bin position
   (x-axis)* / *Waste bin position (y-axis)*) is the X, Y position of
-  the waste container. These same two values are mirrored in
-  Cleaning mode — editing them in either mode updates the other.
+  the **UPPER-LEFT CORNER (anchor)** of the waste bin rectangle —
+  consistent with the plate's Starting Well Position convention.
+  These same two values are mirrored in Cleaning mode — editing them
+  in either mode updates the other.
+
+- **Waste bin size** (Cleaning Parameters → *Waste bin size
+  (X × Y, cm)*) — two new optional extents that extend the bin
+  rectangle south (Y) and east (X) from the anchor. When both
+  extents are 0 (default), every move-to-waste targets the anchor
+  point itself (legacy point-target behaviour). When extents are
+  set, every move-to-waste — discards, inter-sample purge phases,
+  System Clean, pre-fractionation prime when `D > 0`, and the
+  Manual Move-to-Waste button — routes through a shortest-path
+  helper that clamps the current needle XY to the bin's interior
+  (anchor + extent shrunk by a 5 mm rim margin on each side). This
+  saves motor travel when the needle is far from the bin anchor
+  but already near a different bin edge. `log.csv` records the
+  actual entry point used, not the anchor, so per-event coordinates
+  reflect where the fluid physically went. The XY table view
+  renders the bin as a semi-transparent amber rectangle at scale;
+  the marker falls back to a small amber dot when extents are 0.
 
 Two button names cover the same action in different places:
 
