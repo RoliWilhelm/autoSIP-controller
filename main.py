@@ -428,6 +428,35 @@ class Tooltip:
 			self._toplevel = None
 
 
+class _StringVarHolder:
+	"""TextEntry-shaped adapter around a bare ``tk.StringVar``.
+
+	Used as a stand-in attribute on the AutomatedFrame for fields whose
+	on-screen widget has moved to a Tools-menu dialog. Persistence and
+	profile-load plumbing (``_entry_for``, ``get_values``, ``set_values``)
+	calls ``.get()`` / ``.set()`` / ``.clear_error()`` / ``.show_error()``
+	uniformly; this holder satisfies that contract without owning a
+	visible widget. ``.entry`` is ``None`` because no live widget exists
+	to receive focus or tooltip bindings; callers must guard accordingly.
+	"""
+
+	def __init__(self, stringvar):
+		self.var = stringvar
+		self.entry = None
+
+	def get(self):
+		return self.var.get()
+
+	def set(self, value):
+		self.var.set("" if value is None else str(value))
+
+	def clear_error(self):
+		return
+
+	def show_error(self, _msg):
+		return
+
+
 class TextEntry(tk.Frame):
 	"""Label + Entry pair with an inline red error label.
 
@@ -744,22 +773,23 @@ class FractionatorState:
 	discards_at_series_start: int = 0
 	discards_done: int = 0                # 0..discards_at_series_start counter
 	wells_collected: int = 0              # 0..(N-D_this_series) counter
-	# Waste-bin rectangle. The table/carriage values are now the
-	# UPPER-LEFT ANCHOR of a rectangle, consistent with the plate's
-	# Starting Well Position convention. The two ``*_extent`` fields
-	# extend the rectangle south (carriage) and east (table) from the
-	# anchor. Default extent 0 → legacy point-target behaviour (every
-	# move-to-waste goes to the anchor itself, no shortest-path
-	# routing). Non-zero extents enable shortest-path routing via
-	# ``App._waste_entry_for_current_position``.
-	waste_bin_table: float = 0.0          # cm, bin UL anchor X (table axis)
-	waste_bin_carriage: float = 0.0       # cm, bin UL anchor Y (carriage axis)
-	waste_bin_x_extent: float = 0.0       # cm, bin extent along X (≥ 0)
-	waste_bin_y_extent: float = 0.0       # cm, bin extent along Y (≥ 0)
+	# Waste-bin rectangle. ``waste_bin_table`` / ``waste_bin_carriage``
+	# are the bin's CENTER in motor cm (the geometric centroid of the
+	# rectangle the operator jogs the needle over during Manual-mode
+	# calibration). The ``*_extent`` fields are the bin's full width
+	# (X) and height (Y); the rectangle occupies [center − extent/2,
+	# center + extent/2] on each axis. Default extent 0 → legacy
+	# point-target behaviour (every move-to-waste goes to the center
+	# itself, no shortest-path routing). Non-zero extents enable
+	# shortest-path routing via ``App._waste_entry_for_current_position``.
+	waste_bin_table: float = 0.0          # cm, bin center X (table axis)
+	waste_bin_carriage: float = 0.0       # cm, bin center Y (carriage axis)
+	waste_bin_x_extent: float = 0.0       # cm, bin full width along X (≥ 0)
+	waste_bin_y_extent: float = 0.0       # cm, bin full height along Y (≥ 0)
 	# Latest entry point used for a move-to-waste — populated by every
 	# call site so the per-event log row records WHERE in the bin the
-	# fluid actually went (not just the bin anchor). Defaults to the
-	# anchor so legacy log rows still make sense before the first move.
+	# fluid actually went (not just the bin center). Defaults to the
+	# center so legacy log rows still make sense before the first move.
 	last_waste_entry_x: float = 0.0
 	last_waste_entry_y: float = 0.0
 	table_start_cm: float = 0.0           # cm, plate-start table position
@@ -1094,8 +1124,29 @@ class AutomatedFrame(tk.Frame):
 		# subframe centers horizontally in the row-0 cell (which spans
 		# both weighted columns), keeping the buttons balanced as the
 		# window resizes.
+		# ----- First-launch hint banner ---------------------------------
+		# Subtle italic muted reminder pointing operators at the new
+		# Tools-menu home of pump + cleaning parameters. Dismisses
+		# itself once the relocated required fields are populated;
+		# ``_refresh_config_banner`` toggles ``grid()`` / ``grid_remove()``.
+		# Created here so it occupies row 0 above the run-controls bar.
+		self.config_hint_banner = tk.Label(
+			self,
+			text=(
+				"Configure pump and cleaning parameters in the Tools menu "
+				"before starting a run."
+			),
+			anchor="w", justify="left",
+			fg=PALETTE.get("fg_muted", "#666666"),
+			font=("TkDefaultFont", 9, "italic"),
+			bg=PALETTE.get("bg", self.cget("bg")),
+		)
+		self.config_hint_banner.grid(row=0, column=0, columnspan=2,
+			sticky="we", padx=4, pady=(0, 4))
+		self.config_hint_banner.grid_remove()
+
 		ctrl = tk.Frame(self)
-		ctrl.grid(row=0, column=0, columnspan=2, pady=(0, 4))
+		ctrl.grid(row=1, column=0, columnspan=2, pady=(0, 4))
 		# Two distinct recovery buttons. "Return to Origin" matches Manual
 		# mode's Home (move motors to 0,0 and tare), and is the
 		# mid-pause recalibration entry point. "Return to Start Well"
@@ -1165,7 +1216,7 @@ class AutomatedFrame(tk.Frame):
 		# (right column) spans rows 1-2 so the right column matches the
 		# left column's combined height.
 		bulk = tk.LabelFrame(self, text="Bulk Sample Submission", padx=8, pady=2)
-		bulk.grid(row=1, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
+		bulk.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		bulk.grid_columnconfigure(0, weight=1)
 		self.bulk_status_var = tk.StringVar(
 			value="Status: No bulk submission active."
@@ -1230,7 +1281,7 @@ class AutomatedFrame(tk.Frame):
 		# Parameters (row 2) → Fractionation Pump Parameters (row 3).
 		# Plate Parameters spans rows 1-2 on the right so the right
 		# column matches the left column's combined height.
-		runp.grid(row=2, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
+		runp.grid(row=3, column=0, sticky="new", padx=(2, 4), pady=(0, 0))
 		runp.grid_columnconfigure(0, weight=1)
 		self.project_te = TextEntry(runp, "Project name:")
 		self.project_te.grid(row=0, column=0, sticky="we")
@@ -1290,7 +1341,7 @@ class AutomatedFrame(tk.Frame):
 		# Spans rows 1-2 on the right so the bulk panel can sit
 		# between Run Parameters and Fractionation Pump Parameters on
 		# the left without leaving a gap on this column.
-		platep.grid(row=1, column=1, rowspan=2, sticky="new",
+		platep.grid(row=2, column=1, rowspan=2, sticky="new",
 			padx=(4, 2), pady=(0, 2))
 		platep.grid_columnconfigure(0, weight=1)
 		# JSON loader -- first row of Plate Parameters because loading a
@@ -1349,25 +1400,20 @@ class AutomatedFrame(tk.Frame):
 			"Position Calibration Tool.",
 		)
 
-		# Waste bin entries -- the previous "Waste bin:" sub-header is gone
-		# because each entry's own label now reads "Waste bin position
-		# (x-axis):" / "(y-axis):" without the cm-range suffix. Validation
-		# still enforces the X [0, 20] / Y [0, 15] bounds.
-		self.waste_table_te = TextEntry(
-			platep, "Waste bin position (x-axis):",
-			textvariable=app.waste_bin_table_var,
-		)
-		self.waste_table_te.grid(row=6, column=0, sticky="we", pady=(6, 0))
-		self.waste_carriage_te = TextEntry(
-			platep, "Waste bin position (y-axis):",
-			textvariable=app.waste_bin_carriage_var,
-		)
-		self.waste_carriage_te.grid(row=7, column=0, sticky="we")
+		# Waste-bin position + extent fields have moved to
+		# ``Tools → Cleaning Parameters``. Plate Parameters is now
+		# pure plate geometry (rows, cols, well width, A1 X, A1 Y).
+		# The four App-level StringVars (waste_bin_table_var,
+		# waste_bin_carriage_var, waste_bin_x_extent_var,
+		# waste_bin_y_extent_var) still drive get_values / set_values
+		# via the StringVarHolder adapters in ``_entry_for``.
+		self.waste_table_te = _StringVarHolder(app.waste_bin_table_var)
+		self.waste_carriage_te = _StringVarHolder(app.waste_bin_carriage_var)
+		self.waste_x_extent_te = _StringVarHolder(app.waste_bin_x_extent_var)
+		self.waste_y_extent_te = _StringVarHolder(app.waste_bin_y_extent_var)
 
-		# Focus-out normalization: when the operator tabs away after
-		# typing a coordinate, reformat to 2 decimals so e.g. "13.6" or
-		# "13" become "13.60" / "13.00". Invalid input is left as-is so
-		# the existing inline validator can flag it on Begin.
+		# Focus-out normalization on the remaining Plate-area coords
+		# (Starting Well Position X / Y) — reformat to 2 decimals.
 		def _normalize_coord_entry(te):
 			def _on_focus_out(_e):
 				raw = te.get().strip()
@@ -1378,139 +1424,28 @@ class AutomatedFrame(tk.Frame):
 				except ValueError:
 					return
 			te.entry.bind("<FocusOut>", _on_focus_out, add="+")
-		for _coord_te in (self.table_te, self.carriage_te,
-				self.waste_table_te, self.waste_carriage_te):
+		for _coord_te in (self.table_te, self.carriage_te):
 			_normalize_coord_entry(_coord_te)
-		Tooltip(
-			self.waste_table_te.entry,
-			"Waste-bin position used during the discard phase. "
-			"Ignored when Discard fractions = 0.",
-		)
-		Tooltip(
-			self.waste_carriage_te.entry,
-			"Waste-bin position used during the discard phase. "
-			"Ignored when Discard fractions = 0.",
-		)
 
-		# ----- Fractionation Pump Parameters ----------------------------
-		# Column 0, row 3 — directly under Run Parameters so the
-		# fractionation-controlling stack reads top-down. The
-		# Skip-inter-sample-purge toggle moved to Tools → Preferences.
-		frac_pump = tk.LabelFrame(self, text="Fractionation Pump Parameters",
-			padx=8, pady=2)
-		frac_pump.grid(row=3, column=0, sticky="new", padx=(2, 4), pady=(0, 2))
-		frac_pump.grid_columnconfigure(0, weight=1)
-		self.pump_rate_text_entry = TextEntry(frac_pump,
-			"Pump rate (mL/hr — see your syringe pump spec):")
-		self.pump_rate_text_entry.grid(row=0, column=0, sticky="we")
-		self.drip_wait_te = TextEntry(frac_pump, "Drip wait time (s):")
-		self.drip_wait_te.grid(row=1, column=0, sticky="we")
-		self.drip_wait_te.set("1.0")
-		Tooltip(
-			self.drip_wait_te.entry,
-			"Wait time between pump-off and moving to the next well. "
-			"Longer waits improve volume consistency; shorter waits run faster.",
-		)
-		self.prime_time_te = TextEntry(frac_pump, "Prime time (s):",
-			textvariable=app.prime_time_var)
-		self.prime_time_te.grid(row=2, column=0, sticky="we")
-		Tooltip(
-			self.prime_time_te.entry,
-			"Time to automatically walk the sample fractionation "
-			"solution from the tube to approximately 5 cm below the "
-			"syringe dispenser. Set based on your tubing length.",
-		)
-
-		# ----- Cleaning Parameters --------------------------------------
-		# Column 1, row 3 — under Plate Parameters and opposite Syringe
-		# Pump. Groups everything related to the peristaltic pump used
-		# for inter-sample purges, manual purges, and Cleaning Purge.
-		cleaning_params = tk.LabelFrame(self, text="Cleaning Parameters", padx=8, pady=2)
-		cleaning_params.grid(row=3, column=1, sticky="new", padx=(4, 2), pady=(0, 2))
-		cleaning_params.grid_columnconfigure(0, weight=1)
-		self.purge_time_te = TextEntry(
-			cleaning_params, "Purge time (s):", textvariable=app.purge_time_var,
-		)
-		self.purge_time_te.grid(row=0, column=0, sticky="we")
-		Tooltip(
-			self.purge_time_te.entry,
-			"Per-phase duration of the inter-sample purge. Two pump phases "
-			"run between samples (wash then air-clear), each lasting this "
-			"many seconds. Use Cleaning mode's Purge Time Calibration to "
-			"measure the right value for your tubing.",
-		)
-		# Bleach soak time was removed from Cleaning Parameters and is
-		# now collected per invocation in the System Clean Phase 1
-		# dialog (each run defaults to 5 min, range 0-30, captured
-		# at click time and discarded after Phase 2 finishes).
-		self.peristaltic_rate_te = TextEntry(
-			cleaning_params, "Peristaltic pump rate (mL/min):",
-			textvariable=app.peristaltic_rate_var,
-		)
-		self.peristaltic_rate_te.grid(row=1, column=0, sticky="we")
-		Tooltip(
-			self.peristaltic_rate_te.entry,
-			"Flow rate of the peristaltic pump used for purges. Drives "
-			"the waste-bin estimate during purge operations (inter-sample "
-			"purges, Manual Purge, Cleaning Purge, Purge Time Calibration).",
-		)
-		self.max_waste_te = TextEntry(
-			cleaning_params, "Max waste bin volume (mL):",
-			textvariable=app.max_waste_volume_var,
-		)
-		self.max_waste_te.grid(row=2, column=0, sticky="we")
-		Tooltip(
-			self.max_waste_te.entry,
-			"Capacity of your waste container. autoSIP warns at 80% and "
-			"halts all pump activity at 100% to prevent overflow. The "
-			"estimate is based on configured pump rates × pump-on time, "
-			"not a real measurement.",
-		)
-
-		# Waste-bin RECTANGLE size. The two existing Waste bin position
-		# fields (in Plate Parameters) are the rectangle's upper-left
-		# anchor; these extents say how far south + east it stretches.
-		# When both > 0, every move-to-waste routes to the closest
-		# entry point on the bin interior (clamped point-to-rectangle
-		# via ``well_plate.shortest_point_in_waste_bin``). When both
-		# are 0 (legacy default) every move targets the anchor itself.
-		bin_size_lbl = tk.Label(cleaning_params, anchor="w",
-			text="Waste bin size (X × Y, cm):")
-		bin_size_lbl.grid(row=3, column=0, sticky="we", pady=(6, 0))
-		bin_size_row = tk.Frame(cleaning_params)
-		bin_size_row.grid(row=4, column=0, sticky="we", padx=(16, 0))
-		bin_size_row.grid_columnconfigure(1, weight=0)
-		bin_size_row.grid_columnconfigure(3, weight=0)
-		tk.Label(bin_size_row, text="X:", anchor="e").grid(
-			row=0, column=0, padx=(0, 4))
-		self.waste_x_extent_te = TextEntry(
-			bin_size_row, "", textvariable=app.waste_bin_x_extent_var,
-		)
-		self.waste_x_extent_te.label.grid_remove()
-		self.waste_x_extent_te.entry.configure(width=8)
-		self.waste_x_extent_te.grid(row=0, column=1, sticky="w",
-			padx=(0, 12))
-		tk.Label(bin_size_row, text="Y:", anchor="e").grid(
-			row=0, column=2, padx=(0, 4))
-		self.waste_y_extent_te = TextEntry(
-			bin_size_row, "", textvariable=app.waste_bin_y_extent_var,
-		)
-		self.waste_y_extent_te.label.grid_remove()
-		self.waste_y_extent_te.entry.configure(width=8)
-		self.waste_y_extent_te.grid(row=0, column=3, sticky="w")
-		Tooltip(
-			self.waste_x_extent_te.entry,
-			"Width of the waste bin rectangle (cm). Default 0 keeps the "
-			"legacy point-target behaviour. Non-zero values enable "
-			"shortest-path routing — every move-to-waste targets the "
-			"closest entry point inside the bin instead of the anchor.",
-		)
-		Tooltip(
-			self.waste_y_extent_te.entry,
-			"Height of the waste bin rectangle (cm). Default 0 keeps the "
-			"legacy point-target behaviour. The bin extends south from "
-			"the Waste bin position by this distance.",
-		)
+		# ----- Pump + Cleaning parameters (moved to Tools menu) ----------
+		# The previous "Fractionation Pump Parameters" and "Cleaning
+		# Parameters" LabelFrames have been removed from the Automated
+		# panel. Their fields now live in two modal dialogs under
+		# Tools → Pump Parameters… and Tools → Cleaning Parameters…
+		# (see ``_show_pump_parameters_dialog`` /
+		# ``_show_cleaning_parameters_dialog``).
+		#
+		# To keep the existing persistence pipeline working
+		# (``_entry_for`` / ``get_values`` / ``set_values`` / profile
+		# round-trip), we install ``_StringVarHolder`` stand-ins that
+		# expose the same .get/.set surface as TextEntry while wrapping
+		# the App-level StringVars the dialogs bind to.
+		self.pump_rate_text_entry = _StringVarHolder(app.pump_rate_var)
+		self.drip_wait_te = _StringVarHolder(app.drip_wait_time_var)
+		self.prime_time_te = _StringVarHolder(app.prime_time_var)
+		self.purge_time_te = _StringVarHolder(app.purge_time_var)
+		self.peristaltic_rate_te = _StringVarHolder(app.peristaltic_rate_var)
+		self.max_waste_te = _StringVarHolder(app.max_waste_volume_var)
 
 		# Begin Fractionation -- the run-launch button. (The previous
 		# "Move (jog to Plate-start coords)" button was removed because the
@@ -1713,14 +1648,48 @@ class AutomatedFrame(tk.Frame):
 				self.json_entry.bind("<FocusOut>", self._on_field_focus_out, add="+")
 			else:
 				w = self._entry_for(field)
-				if w is not None:
+				# Relocated fields use _StringVarHolder adapters with no
+				# live widget (w.entry is None) — their FocusOut-save is
+				# handled inside the Tools dialog's Save handler instead.
+				if w is not None and getattr(w, "entry", None) is not None:
 					w.entry.bind("<FocusOut>", self._on_field_focus_out, add="+")
 
 	def _on_field_focus_out(self, _event=None):
+		self._save_last_used()
+
+	def _save_last_used(self):
+		"""Persist the current field values to ``config.json``. Called from
+		``<FocusOut>`` on inline widgets and from the Tools-menu dialog
+		Save handlers, since the relocated fields no longer have inline
+		widgets to fire <FocusOut>."""
 		try:
 			config_store.save_last_used(self.get_values())
 		except OSError as exc:
 			logger.warning("Failed to save last_used config: %s", exc)
+
+	# Set of required-and-must-be-non-blank fields whose absence
+	# triggers the first-launch hint banner. Mirrors the pre-flight
+	# check in ``begin_clicked``.
+	_BANNER_REQUIRED_FIELDS = (
+		"pump_rate_text_entry", "drip_wait_te", "prime_time_te",
+		"purge_time_te", "peristaltic_rate_te", "max_waste_te",
+	)
+
+	def _refresh_config_banner(self):
+		"""Show/hide the Tools-menu hint banner based on whether the
+		relocated required fields are populated. Re-runs after profile
+		load, ``set_values``, and Tools-dialog Save."""
+		banner = getattr(self, "config_hint_banner", None)
+		if banner is None:
+			return
+		any_blank = any(
+			not getattr(self, attr).get().strip()
+			for attr in self._BANNER_REQUIRED_FIELDS
+		)
+		if any_blank:
+			banner.grid()
+		else:
+			banner.grid_remove()
 
 	# -- Project / Sample ID live mirroring ----------------------------
 
@@ -2048,6 +2017,45 @@ class AutomatedFrame(tk.Frame):
 		"""Validate every Begin-time input; show inline + summary errors on
 		failure; cross-check N/D and plate capacity; warn on waste/plate
 		overlap; then dispatch to ``app.start_run``."""
+		# Pre-flight: catch the common "operator launched without ever
+		# opening the Tools dialogs" case BEFORE the per-field
+		# validation pass, so the error message can route the operator
+		# to the right Tools dialog instead of just saying "X is empty".
+		# Required-and-blank fields are grouped by dialog so the
+		# operator sees a single targeted prompt.
+		pump_dialog_fields = [
+			("pump_rate_text_entry", "Pump rate"),
+			("drip_wait_te", "Drip wait time"),
+			("prime_time_te", "Prime time"),
+		]
+		cleaning_dialog_fields = [
+			("purge_time_te", "Purge time"),
+			("peristaltic_rate_te", "Peristaltic pump rate"),
+			("max_waste_te", "Max waste bin volume"),
+		]
+		pump_blank = [label for attr, label in pump_dialog_fields
+			if not getattr(self, attr).get().strip()]
+		clean_blank = [label for attr, label in cleaning_dialog_fields
+			if not getattr(self, attr).get().strip()]
+		if pump_blank or clean_blank:
+			lines = []
+			if pump_blank:
+				lines.append(
+					"Tools → Pump Parameters…\n  • "
+					+ "\n  • ".join(pump_blank)
+				)
+			if clean_blank:
+				lines.append(
+					"Tools → Cleaning Parameters…\n  • "
+					+ "\n  • ".join(clean_blank)
+				)
+			messagebox.showerror(
+				"Cannot start fractionation",
+				"Configure the following parameters before starting a "
+				"run:\n\n" + "\n\n".join(lines),
+				parent=self,
+			)
+			return
 		# Single-field validation. Order matches displayed order so the
 		# messagebox bullets read top-to-bottom.
 		fields = [
@@ -2148,29 +2156,36 @@ class AutomatedFrame(tk.Frame):
 				errors.append(wey_val)
 			waste_x_extent = wex_val if (wex_ok and wex_val is not None) else 0.0
 			waste_y_extent = wey_val if (wey_ok and wey_val is not None) else 0.0
-			# Rectangle bounds check (only if we have an anchor + at least
-			# one non-zero extent).
+			# Rectangle bounds check. The bin is center-anchored, so
+			# the rectangle occupies [center − extent/2, center + extent/2]
+			# on each axis. Both edges must lie within the physical
+			# table — overhang on either the low (north/west) side or
+			# the high (south/east) side rejects the configuration.
 			from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
 			table_x_max_cm = TABLE_WIDTH_MM / 10.0
 			table_y_max_cm = TABLE_HEIGHT_MM / 10.0
-			if (waste_x is not None and waste_x_extent > 0
-					and waste_x + waste_x_extent > table_x_max_cm + 1e-6):
-				msg = (
-					f"Waste bin X anchor ({waste_x:.2f} cm) + extent "
-					f"({waste_x_extent:.2f} cm) overhangs the table's "
-					f"{table_x_max_cm:.2f} cm X range."
-				)
-				self.waste_x_extent_te.show_error(msg)
-				errors.append(msg)
-			if (waste_y is not None and waste_y_extent > 0
-					and waste_y + waste_y_extent > table_y_max_cm + 1e-6):
-				msg = (
-					f"Waste bin Y anchor ({waste_y:.2f} cm) + extent "
-					f"({waste_y_extent:.2f} cm) overhangs the table's "
-					f"{table_y_max_cm:.2f} cm Y range."
-				)
-				self.waste_y_extent_te.show_error(msg)
-				errors.append(msg)
+			if waste_x is not None and waste_x_extent > 0:
+				lo = waste_x - waste_x_extent / 2.0
+				hi = waste_x + waste_x_extent / 2.0
+				if lo < -1e-6 or hi > table_x_max_cm + 1e-6:
+					msg = (
+						f"Waste bin X rectangle ({lo:.2f} → {hi:.2f} cm) "
+						f"overhangs the table's [0.00, {table_x_max_cm:.2f}] "
+						f"cm X range."
+					)
+					self.waste_x_extent_te.show_error(msg)
+					errors.append(msg)
+			if waste_y is not None and waste_y_extent > 0:
+				lo = waste_y - waste_y_extent / 2.0
+				hi = waste_y + waste_y_extent / 2.0
+				if lo < -1e-6 or hi > table_y_max_cm + 1e-6:
+					msg = (
+						f"Waste bin Y rectangle ({lo:.2f} → {hi:.2f} cm) "
+						f"overhangs the table's [0.00, {table_y_max_cm:.2f}] "
+						f"cm Y range."
+					)
+					self.waste_y_extent_te.show_error(msg)
+					errors.append(msg)
 
 		if errors:
 			messagebox.showerror(
@@ -2485,7 +2500,7 @@ class ManualFrame(tk.Frame):
 		)
 
 		tk.Label(cal, anchor="w", justify="left",
-			text="2. Position the needle over the waste bin opening.",
+			text="2. Position the needle over the CENTER of the waste bin.",
 		).grid(row=4, column=0, sticky="w")
 		self.save_waste_btn = save_waste_btn = primary_button(
 			cal, text="Save as Waste Bin Position",
@@ -2495,7 +2510,8 @@ class ManualFrame(tk.Frame):
 		Tooltip(
 			save_waste_btn,
 			"Write the current motor position to the Waste bin position "
-			"(x-axis / y-axis) fields shared with Cleaning mode.",
+			"(x-axis / y-axis) fields shared with Cleaning mode. The bin "
+			"extends ± extent/2 around this center point.",
 		)
 
 		# ---- Prime Time Calibration ------------------------------------
@@ -2942,8 +2958,12 @@ class CleaningFrame(tk.Frame):
 		# Purge Time Calibration Tool split width evenly on row 1,
 		# and so the Move/Purge buttons below them stay aligned with
 		# their respective panels.
-		self.grid_columnconfigure(0, weight=1)
-		self.grid_columnconfigure(1, weight=1)
+		# ``uniform="cleaning_cols"`` forces the two columns to share
+		# the same display width so the Move-to-Waste / Purge button
+		# pair on row 2 — which uses ``sticky="nsew"`` — renders at
+		# identical pixel size and stays equal as the window resizes.
+		self.grid_columnconfigure(0, weight=1, uniform="cleaning_cols")
+		self.grid_columnconfigure(1, weight=1, uniform="cleaning_cols")
 
 		# Run-active banner: gridded only while an Automated run is
 		# in flight. Spans both columns and sits at the very top so
@@ -2973,25 +2993,80 @@ class CleaningFrame(tk.Frame):
 			padx=(2, 2), pady=(2, 4))
 		bin_frame.grid_columnconfigure(0, weight=1)
 		self.waste_table_te = TextEntry(
-			bin_frame, "Waste bin position (x-axis):",
+			bin_frame, "Waste bin position (x-axis, center):",
 			textvariable=app.waste_bin_table_var,
 		)
 		self.waste_table_te.grid(row=0, column=0, sticky="we")
 		Tooltip(
 			self.waste_table_te.entry,
-			"Mirrors Automated mode's Waste bin position (x-axis). "
-			"Edits propagate in both directions.",
+			"X coordinate of the bin's CENTER. Mirrors Tools → Cleaning "
+			"Parameters; edits propagate in both directions.",
 		)
 		self.waste_carriage_te = TextEntry(
-			bin_frame, "Waste bin position (y-axis):",
+			bin_frame, "Waste bin position (y-axis, center):",
 			textvariable=app.waste_bin_carriage_var,
 		)
 		self.waste_carriage_te.grid(row=1, column=0, sticky="we")
 		Tooltip(
 			self.waste_carriage_te.entry,
-			"Mirrors Automated mode's Waste bin position (y-axis). "
-			"Edits propagate in both directions.",
+			"Y coordinate of the bin's CENTER. Mirrors Tools → Cleaning "
+			"Parameters; edits propagate in both directions.",
 		)
+
+		# Compact bin-size row: "Bin size: X [__] cm  Y [__] cm". Bound
+		# to the SAME App-level StringVars as Tools → Cleaning
+		# Parameters' X-extent / Y-extent fields so edits propagate
+		# automatically; AutomatedFrame's existing trace_add on these
+		# vars fires _refresh_table_view so the XY-table rectangle
+		# repaints live as the operator types. These are secondary
+		# controls (not primary cleaning actions), so the row is one
+		# line of compact labelled entries — no sub-LabelFrame.
+		size_row = tk.Frame(bin_frame)
+		size_row.grid(row=2, column=0, sticky="we", pady=(4, 0))
+		tk.Label(size_row, text="Bin size:", anchor="w").grid(
+			row=0, column=0, padx=(0, 6))
+		tk.Label(size_row, text="X").grid(row=0, column=1, padx=(0, 2))
+		self.waste_x_extent_te = TextEntry(
+			size_row, "", textvariable=app.waste_bin_x_extent_var,
+		)
+		self.waste_x_extent_te.label.grid_remove()
+		self.waste_x_extent_te.entry.configure(width=6)
+		self.waste_x_extent_te.grid(row=0, column=2, sticky="w")
+		tk.Label(size_row, text="cm").grid(row=0, column=3, padx=(2, 10))
+		tk.Label(size_row, text="Y").grid(row=0, column=4, padx=(0, 2))
+		self.waste_y_extent_te = TextEntry(
+			size_row, "", textvariable=app.waste_bin_y_extent_var,
+		)
+		self.waste_y_extent_te.label.grid_remove()
+		self.waste_y_extent_te.entry.configure(width=6)
+		self.waste_y_extent_te.grid(row=0, column=5, sticky="w")
+		tk.Label(size_row, text="cm").grid(row=0, column=6, padx=(2, 0))
+		Tooltip(
+			self.waste_x_extent_te.entry,
+			"Full width of the bin rectangle along X. The rectangle "
+			"spans ± extent/2 around the center. Mirrors Tools → "
+			"Cleaning Parameters; edits propagate in both directions.",
+		)
+		Tooltip(
+			self.waste_y_extent_te.entry,
+			"Full height of the bin rectangle along Y. The rectangle "
+			"spans ± extent/2 around the center. Mirrors Tools → "
+			"Cleaning Parameters; edits propagate in both directions.",
+		)
+		# Live inline validation on every keystroke or programmatic
+		# .set(): runs the same validators the Tools dialog uses,
+		# surfaces the inline error indicator on the offending entry,
+		# clears it once the input parses inside [center − extent/2,
+		# center + extent/2] inside the physical table.
+		for _te in (self.waste_table_te, self.waste_carriage_te,
+				self.waste_x_extent_te, self.waste_y_extent_te):
+			_te.var.trace_add(
+				"write",
+				lambda *_a, _self=self: _self._refresh_waste_bin_errors(),
+			)
+		# Run once at construction so any stale invalid value from
+		# config.json shows its indicator right away.
+		self.after_idle(self._refresh_waste_bin_errors)
 
 		# Purge Time Calibration sub-panel. Measures how long wash
 		# takes to fully replace one tubing-volume so the operator
@@ -3025,7 +3100,7 @@ class CleaningFrame(tk.Frame):
 		self.move_btn = primary_button(
 			self, text="Move to Waste Bin", command=self.move_clicked,
 		)
-		self.move_btn.grid(row=2, column=0, sticky="we", padx=2, pady=2)
+		self.move_btn.grid(row=2, column=0, sticky="nsew", padx=2, pady=2)
 		Tooltip(
 			self.move_btn,
 			"Drive the needle to the Waste bin coordinates above so "
@@ -3039,7 +3114,7 @@ class CleaningFrame(tk.Frame):
 			command=lambda: app._handle_pump_click("purge", parent=self),
 			style="PumpOff.TButton", cursor="hand2",
 		)
-		self.purge_btn.grid(row=2, column=1, sticky="we", padx=2, pady=2)
+		self.purge_btn.grid(row=2, column=1, sticky="nsew", padx=2, pady=2)
 		Tooltip(
 			self.purge_btn,
 			"Toggle the peristaltic pump for a free-form cleaning purge. "
@@ -3268,6 +3343,82 @@ class CleaningFrame(tk.Frame):
 
 	def set_controls_enabled(self, enabled):
 		self.move_btn["state"] = tk.NORMAL if enabled else tk.DISABLED
+
+	def _refresh_waste_bin_errors(self):
+		"""Validate the four shared waste-bin StringVars and surface an
+		inline red error indicator next to whichever entry is currently
+		invalid. Runs on every keystroke in either the Cleaning Mode
+		panel or the Tools → Cleaning Parameters dialog (since both
+		surfaces edit the same vars), keeping the two views in sync
+		without manual callbacks.
+
+		Validation chain:
+		  1. Each axis position / extent parses through its individual
+			 validator (``validation.table_pos`` / ``.carriage_pos`` /
+			 ``.waste_bin_extent`` with ``allow_empty=True``).
+		  2. If both position + extent on an axis parse, the rectangle
+			 edges (``center ± extent/2``) must lie inside the physical
+			 table — otherwise the offending extent entry surfaces an
+			 overhang error.
+		"""
+		from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
+		table_x_max = TABLE_WIDTH_MM / 10.0
+		table_y_max = TABLE_HEIGHT_MM / 10.0
+
+		# Per-axis position validation.
+		x_ok, x_val = validation.table_pos(
+			self.waste_table_te.get(), allow_empty=True)
+		y_ok, y_val = validation.carriage_pos(
+			self.waste_carriage_te.get(), allow_empty=True)
+		if x_ok:
+			self.waste_table_te.clear_error()
+		else:
+			self.waste_table_te.show_error(x_val)
+		if y_ok:
+			self.waste_carriage_te.clear_error()
+		else:
+			self.waste_carriage_te.show_error(y_val)
+
+		# Per-axis extent validation.
+		ex_ok, ex_val = validation.waste_bin_extent(
+			self.waste_x_extent_te.get(), allow_empty=True)
+		ey_ok, ey_val = validation.waste_bin_extent(
+			self.waste_y_extent_te.get(), allow_empty=True)
+
+		# Overhang check: center ± extent/2 must lie inside the table.
+		# Only fires when both the center coord and the extent on the
+		# same axis parsed cleanly AND the extent is non-zero.
+		def _overhang(axis_label, center, extent, axis_max):
+			if center is None or extent is None or extent <= 0:
+				return None
+			lo = center - extent / 2.0
+			hi = center + extent / 2.0
+			if lo < -1e-6 or hi > axis_max + 1e-6:
+				return (
+					f"{axis_label} rectangle ({lo:.2f} → {hi:.2f} cm) "
+					f"overhangs [0.00, {axis_max:.2f}] cm."
+				)
+			return None
+
+		x_overhang = _overhang(
+			"Waste bin X", x_val if x_ok else None,
+			ex_val if ex_ok else None, table_x_max)
+		y_overhang = _overhang(
+			"Waste bin Y", y_val if y_ok else None,
+			ey_val if ey_ok else None, table_y_max)
+
+		if not ex_ok:
+			self.waste_x_extent_te.show_error(ex_val)
+		elif x_overhang is not None:
+			self.waste_x_extent_te.show_error(x_overhang)
+		else:
+			self.waste_x_extent_te.clear_error()
+		if not ey_ok:
+			self.waste_y_extent_te.show_error(ey_val)
+		elif y_overhang is not None:
+			self.waste_y_extent_te.show_error(y_overhang)
+		else:
+			self.waste_y_extent_te.clear_error()
 
 	def refresh_pump_buttons(self, claimant, relay_on, in_run):
 		_update_pump_button(self.purge_btn, "purge", claimant, relay_on, in_run)
@@ -3589,6 +3740,13 @@ class App(tk.Tk):
 		# Max waste-bin volume in mL. Live value driving the auto-shutoff
 		# and the status-bar fill-level indicator.
 		self.max_waste_volume_var = tk.StringVar(value="250.0")
+		# Syringe pump rate (mL/hr) and drip-wait time (s). Promoted to
+		# App level so the new Tools → Pump Parameters dialog can bind
+		# to the same variables that get_values / set_values + the
+		# state machine read. No inline default — operator must
+		# configure before the first run (run-start guard fires).
+		self.pump_rate_var = tk.StringVar(value="")
+		self.drip_wait_time_var = tk.StringVar(value="1.0")
 
 		# Waste-bin estimate. Initialized to 0 on every launch and NOT
 		# persisted to disk -- users typically empty the bin between
@@ -3683,6 +3841,11 @@ class App(tk.Tk):
 		last_used = config_store.load_last_used()
 		if last_used:
 			self.automated_frame.set_values(last_used)
+		# Show the Tools-menu hint banner if any required pump /
+		# cleaning parameter is still unset after last_used has
+		# populated. Runs unconditionally so a fresh install with no
+		# config.json (last_used == {}) still gets the banner.
+		self.automated_frame._refresh_config_banner()
 
 		# One-time INFO breadcrumb if the old ~/.autosip/runs/ tree exists
 		# from earlier versions. We do NOT auto-migrate -- moving the
@@ -3746,9 +3909,14 @@ class App(tk.Tk):
 		menubar.add_cascade(label="File", menu=file_menu)
 
 		tools = tk.Menu(menubar, tearoff=False)
-		tools.add_command(label="Open last run folder", command=self._open_last_run)
-		tools.add_separator()
 		tools.add_command(label="Preferences…", command=self._show_preferences_dialog)
+		tools.add_separator()
+		tools.add_command(label="Pump Parameters…",
+			command=self._show_pump_parameters_dialog)
+		tools.add_command(label="Cleaning Parameters…",
+			command=self._show_cleaning_parameters_dialog)
+		tools.add_separator()
+		tools.add_command(label="Open last run folder", command=self._open_last_run)
 		menubar.add_cascade(label="Tools", menu=tools)
 
 		help_menu = tk.Menu(menubar, tearoff=False)
@@ -4178,6 +4346,322 @@ class App(tk.Tk):
 		win.geometry(f"+{max(0, x)}+{max(0, y)}")
 		win.grab_set()
 
+	# -- Pump / Cleaning parameter dialogs ------------------------------
+
+	def _modal_param_dialog(self, *, title, sections, cross_field_check=None):
+		"""Shared modal-dialog template for Pump Parameters / Cleaning
+		Parameters.
+
+		``sections`` is a list of ``(label_text, [(field_label, var,
+		validator, tooltip), ...])`` tuples. Each section becomes a
+		LabelFrame. Each field renders as a TextEntry bound to the
+		given App-level ``var`` (so edits are live but the snapshot
+		under ``initial`` lets Cancel revert).
+
+		Live validation: every field's var is wired through ``trace_add``
+		so the inline error indicator updates on every keystroke, in
+		both the dialog and any other surface bound to the same var.
+
+		``cross_field_check`` (optional) is a callable taking the list
+		of ``(te, var, validator, label)`` entries; it should walk the
+		entries, call ``te.show_error(msg)`` for any field that fails a
+		cross-field invariant, and return ``True`` if all checks
+		passed. It runs after the per-field pass on every var write and
+		during Save.
+
+		Save re-runs validation; on failure the offending entry
+		surfaces the inline error and the dialog stays open. On success
+		the dialog closes and the new values stay on the App-level
+		StringVars.
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title(title)
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		body = tk.Frame(dlg, padx=14, pady=12)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		# Snapshot every var's current value so Cancel can revert.
+		initial = {}
+		entries = []
+		for sect_title, fields in sections:
+			lf = tk.LabelFrame(body, text=sect_title, padx=8, pady=6)
+			lf.pack(fill=tk.X, expand=True, pady=(0, 6))
+			lf.grid_columnconfigure(0, weight=1)
+			for row, (field_label, var, validator, tooltip) in enumerate(fields):
+				initial[id(var)] = var.get()
+				te = TextEntry(lf, field_label, textvariable=var)
+				te.grid(row=row, column=0, sticky="we")
+				if tooltip:
+					Tooltip(te.entry, tooltip)
+				entries.append((te, var, validator, field_label))
+
+		def _validate_all(*, surface_errors):
+			"""Run per-field + cross-field validation. ``surface_errors``
+			controls whether failures call show_error/clear_error or
+			just return the pass/fail verdict. Returns True if every
+			check passes."""
+			ok_all = True
+			for te, _v, validator, _label in entries:
+				if validator is None:
+					if surface_errors:
+						te.clear_error()
+					continue
+				ok, val = validator(te.get())
+				if ok:
+					if surface_errors:
+						te.clear_error()
+				else:
+					if surface_errors:
+						te.show_error(val)
+					ok_all = False
+			if cross_field_check is not None:
+				if not cross_field_check(entries):
+					ok_all = False
+			return ok_all
+
+		# Live revalidation on every var write. Bound after the
+		# entries list is built so cross_field_check can inspect
+		# sibling fields.
+		def _on_var_write(*_a):
+			_validate_all(surface_errors=True)
+		for _te, v, _validator, _label in entries:
+			v.trace_add("write", _on_var_write)
+		# Initial pass so any stale invalid value from config.json or
+		# from a prior in-Cleaning-mode edit shows its indicator the
+		# moment the dialog opens.
+		dlg.after_idle(_on_var_write)
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X, pady=(4, 0))
+		def _cancel(_e=None):
+			# Revert every var to its pre-open snapshot.
+			for _te, v, _val, _lbl in entries:
+				v.set(initial[id(v)])
+			dlg.destroy()
+		def _save(_e=None):
+			if not _validate_all(surface_errors=True):
+				return
+			dlg.destroy()
+		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(
+			side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text="Save", command=_save,
+			style="Primary.TButton").pack(side=tk.RIGHT, padx=4)
+		dlg.bind("<Escape>", _cancel)
+		dlg.bind("<Return>", _save)
+		dlg.protocol("WM_DELETE_WINDOW", _cancel)
+		dlg.update_idletasks()
+		x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+		y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+		dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+		dlg.grab_set()
+		return dlg
+
+	def _show_pump_parameters_dialog(self):
+		"""Tools → Pump Parameters. Houses the fields formerly in the
+		Automated mode "Fractionation Pump Parameters" LabelFrame: syringe
+		pump rate, drip-wait time, and prime time. All three stay bound
+		to the App-level StringVars so the Manual mode Prime Time
+		Calibration tool can still write directly to ``prime_time_var``.
+		On Save the dialog also persists last_used so the next launch
+		picks up the new values.
+		"""
+		dlg = self._modal_param_dialog(
+			title="Pump Parameters",
+			sections=[
+				("Pump", [
+					("Pump rate (mL/hr — see your syringe pump spec):",
+						self.pump_rate_var, validation.pump_rate,
+						"Volumetric flow rate of the syringe pump driving "
+						"fractionation. Set from the pump spec."),
+					("Drip wait time (s):", self.drip_wait_time_var,
+						validation.drip_wait_time,
+						"Wait time between pump-off and moving to the "
+						"next well. Longer waits improve volume "
+						"consistency; shorter waits run faster."),
+					("Prime time (s):", self.prime_time_var,
+						validation.prime_time,
+						"Time to walk the sample fractionation solution "
+						"from the tube to ~5 cm below the syringe "
+						"dispenser. The Manual mode Prime Time "
+						"Calibration tool can measure this for you."),
+				]),
+			],
+		)
+		# After Save: persist last_used + refresh anything that watches
+		# these values. Wait for the dialog to close, then act if the
+		# values changed.
+		self._after_param_dialog(dlg, refresh_table_view=False)
+
+	def _waste_bin_geometry_error(self):
+		"""Return the first validation error string for the four
+		waste-bin StringVars, or None if everything parses and the
+		rectangle (center ± extent/2) fits inside the physical table.
+
+		Centralised so File → Save profile…, the Tools dialog Save,
+		and the Cleaning Mode panel all agree on what "invalid" means.
+		"""
+		from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
+		table_x_max = TABLE_WIDTH_MM / 10.0
+		table_y_max = TABLE_HEIGHT_MM / 10.0
+		x_ok, x_val = validation.table_pos(
+			self.waste_bin_table_var.get(), allow_empty=True)
+		y_ok, y_val = validation.carriage_pos(
+			self.waste_bin_carriage_var.get(), allow_empty=True)
+		ex_ok, ex_val = validation.waste_bin_extent(
+			self.waste_bin_x_extent_var.get(), allow_empty=True)
+		ey_ok, ey_val = validation.waste_bin_extent(
+			self.waste_bin_y_extent_var.get(), allow_empty=True)
+		if not x_ok:
+			return f"Waste bin X: {x_val}"
+		if not y_ok:
+			return f"Waste bin Y: {y_val}"
+		if not ex_ok:
+			return f"Waste bin X-extent: {ex_val}"
+		if not ey_ok:
+			return f"Waste bin Y-extent: {ey_val}"
+		if x_val is not None and ex_val is not None and ex_val > 0:
+			lo, hi = x_val - ex_val / 2.0, x_val + ex_val / 2.0
+			if lo < -1e-6 or hi > table_x_max + 1e-6:
+				return (f"Waste bin X rectangle ({lo:.2f} → {hi:.2f} cm) "
+					f"overhangs [0.00, {table_x_max:.2f}] cm.")
+		if y_val is not None and ey_val is not None and ey_val > 0:
+			lo, hi = y_val - ey_val / 2.0, y_val + ey_val / 2.0
+			if lo < -1e-6 or hi > table_y_max + 1e-6:
+				return (f"Waste bin Y rectangle ({lo:.2f} → {hi:.2f} cm) "
+					f"overhangs [0.00, {table_y_max:.2f}] cm.")
+		return None
+
+	def _show_cleaning_parameters_dialog(self):
+		"""Tools → Cleaning Parameters. Houses everything purge- /
+		bin-related: per-phase purge time, peristaltic pump rate, max
+		waste-bin volume, and the four waste-bin geometry fields
+		(center X/Y + extent X/Y). On Save the table view repaints so
+		the new bin rectangle renders immediately. Bin geometry
+		entries are also duplicated in the Cleaning Mode Waste Bin
+		panel; both surfaces edit the same App-level StringVars."""
+		# Cross-field overhang check shared with CleaningFrame: the
+		# rectangle (center ± extent/2) must fit inside the physical
+		# table. Identifies the bin entries by var identity so it
+		# doesn't depend on the field order in ``sections``.
+		from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
+		table_x_max = TABLE_WIDTH_MM / 10.0
+		table_y_max = TABLE_HEIGHT_MM / 10.0
+		bin_vars = (
+			self.waste_bin_table_var, self.waste_bin_carriage_var,
+			self.waste_bin_x_extent_var, self.waste_bin_y_extent_var,
+		)
+		def _overhang_check(entries):
+			by_var = {id(v): te for te, v, _val, _lbl in entries
+				if v in bin_vars}
+			cx_te = by_var.get(id(self.waste_bin_table_var))
+			cy_te = by_var.get(id(self.waste_bin_carriage_var))
+			ex_te = by_var.get(id(self.waste_bin_x_extent_var))
+			ey_te = by_var.get(id(self.waste_bin_y_extent_var))
+			def _parse(te, validator):
+				if te is None:
+					return None
+				ok, val = validator(te.get(), allow_empty=True)
+				return val if ok else None
+			cx = _parse(cx_te, validation.table_pos)
+			cy = _parse(cy_te, validation.carriage_pos)
+			ex = _parse(ex_te, validation.waste_bin_extent)
+			ey = _parse(ey_te, validation.waste_bin_extent)
+			ok = True
+			if ex_te is not None and cx is not None and ex is not None and ex > 0:
+				lo, hi = cx - ex / 2.0, cx + ex / 2.0
+				if lo < -1e-6 or hi > table_x_max + 1e-6:
+					ex_te.show_error(
+						f"Waste bin X rectangle ({lo:.2f} → {hi:.2f} cm) "
+						f"overhangs [0.00, {table_x_max:.2f}] cm."
+					)
+					ok = False
+			if ey_te is not None and cy is not None and ey is not None and ey > 0:
+				lo, hi = cy - ey / 2.0, cy + ey / 2.0
+				if lo < -1e-6 or hi > table_y_max + 1e-6:
+					ey_te.show_error(
+						f"Waste bin Y rectangle ({lo:.2f} → {hi:.2f} cm) "
+						f"overhangs [0.00, {table_y_max:.2f}] cm."
+					)
+					ok = False
+			return ok
+		dlg = self._modal_param_dialog(
+			title="Cleaning Parameters",
+			cross_field_check=_overhang_check,
+			sections=[
+				("Purge & Pump", [
+					("Purge time (s):", self.purge_time_var,
+						validation.purge_time,
+						"Per-phase duration of the inter-sample purge. "
+						"Use Cleaning mode's Purge Time Calibration tool "
+						"to measure the right value for your tubing."),
+					("Peristaltic pump rate (mL/min):",
+						self.peristaltic_rate_var,
+						validation.peristaltic_rate,
+						"Flow rate of the peristaltic pump used for "
+						"purges. Drives the waste-bin volume estimate."),
+					("Max waste bin volume (mL):",
+						self.max_waste_volume_var,
+						validation.max_waste_volume,
+						"Capacity of your waste container. autoSIP warns "
+						"at 80% and halts at 100% to prevent overflow."),
+				]),
+				("Waste Bin Geometry", [
+					("Waste bin position X (cm):",
+						self.waste_bin_table_var, validation.table_pos,
+						"X (table-axis) coordinate of the bin's CENTER. "
+						"Calibrate via Manual mode by jogging the needle "
+						"to the visual center of the bin."),
+					("Waste bin position Y (cm):",
+						self.waste_bin_carriage_var, validation.carriage_pos,
+						"Y (carriage-axis) coordinate of the bin's CENTER. "
+						"Calibrate via Manual mode by jogging the needle "
+						"to the visual center of the bin."),
+					("Waste bin X-extent (cm):",
+						self.waste_bin_x_extent_var,
+						validation.waste_bin_extent,
+						"Full width of the bin rectangle along X. The "
+						"rectangle spans ± extent/2 around the center. "
+						"0 = legacy point target."),
+					("Waste bin Y-extent (cm):",
+						self.waste_bin_y_extent_var,
+						validation.waste_bin_extent,
+						"Full height of the bin rectangle along Y. The "
+						"rectangle spans ± extent/2 around the center. "
+						"0 = legacy point target."),
+				]),
+			],
+		)
+		self._after_param_dialog(dlg, refresh_table_view=True)
+
+	def _after_param_dialog(self, dlg, *, refresh_table_view):
+		"""When the dialog finishes (Save or Cancel), reconcile state.
+
+		Persistence: the AutomatedFrame's existing focus-out save handler
+		can't fire because the inline widgets don't exist. So we call
+		``_save_last_used`` directly after the modal closes.
+
+		Table view refresh: bin-geometry edits in the Cleaning dialog
+		need an immediate repaint so the operator sees the new
+		rectangle without waiting for the next mode switch.
+		"""
+		def _on_destroy(_e=None):
+			af = getattr(self, "automated_frame", None)
+			if af is not None and hasattr(af, "_save_last_used"):
+				try:
+					af._save_last_used()
+				except Exception as exc:
+					logger.debug("save_last_used after dialog failed: %s", exc)
+			if refresh_table_view and af is not None:
+				try:
+					af._refresh_table_view()
+				except Exception as exc:
+					logger.debug(
+						"refresh_table_view after dialog failed: %s", exc)
+			if af is not None and hasattr(af, "_refresh_config_banner"):
+				af._refresh_config_banner()
+		dlg.bind("<Destroy>", _on_destroy, add="+")
+
 	# -- Profile menu handlers ------------------------------------------
 
 	def _save_profile_as(self):
@@ -4208,6 +4692,19 @@ class App(tk.Tk):
 				parent=self,
 			):
 				return
+		# Refuse to write a profile while the waste-bin geometry
+		# fields are invalid (negative extent, unparseable position,
+		# or a rectangle that overhangs the table). Mirrors the
+		# inline error indicators already shown in Tools → Cleaning
+		# Parameters and Cleaning Mode's Waste Bin panel.
+		bin_err = self._waste_bin_geometry_error()
+		if bin_err is not None:
+			messagebox.showerror(
+				"Cannot save profile",
+				f"Fix the waste-bin geometry before saving:\n\n{bin_err}",
+				parent=self,
+			)
+			return
 		try:
 			config_store.save_profile(name, self.automated_frame.get_values())
 			logger.info("Saved profile %s", name)
@@ -4239,6 +4736,7 @@ class App(tk.Tk):
 			config_store.save_last_used(self.automated_frame.get_values())
 		except OSError as exc:
 			logger.warning("Failed to save last_used after load: %s", exc)
+		self.automated_frame._refresh_config_banner()
 		logger.info("Loaded profile %s", name)
 
 	def _delete_profile(self):
@@ -5026,10 +5524,11 @@ class App(tk.Tk):
 		motor XY and the bin rectangle.
 
 		If both extents are zero (legacy default), return the bin
-		anchor directly — preserves the previous point-target
+		center directly — preserves the previous point-target
 		behaviour exactly. Otherwise route through
 		``shortest_point_in_waste_bin``: clamp the current motor
-		position to the bin's interior (anchor + extent shrunk by the
+		position to the bin's interior (rectangle spanning
+		[center − extent/2, center + extent/2], then shrunk by the
 		``WASTE_BIN_INTERIOR_MARGIN_MM`` rim margin on each side).
 
 		Returns (target_x_cm, target_y_cm) in motor cm. Y is the
@@ -5039,13 +5538,13 @@ class App(tk.Tk):
 		"""
 		from well_plate import shortest_point_in_waste_bin
 		s = self.state
-		anchor_x = float(s.waste_bin_table)
-		anchor_y = float(s.waste_bin_carriage)
+		center_x = float(s.waste_bin_table)
+		center_y = float(s.waste_bin_carriage)
 		ext_x = float(s.waste_bin_x_extent)
 		ext_y = float(s.waste_bin_y_extent)
 		if ext_x <= 0.0 and ext_y <= 0.0:
-			# Legacy point-target — preserve the anchor exactly.
-			return anchor_x, anchor_y
+			# Legacy point-target — preserve the center exactly.
+			return center_x, center_y
 		# Current motor XY, converted to the state-machine positive-
 		# south-distance convention so it shares a frame with the bin.
 		cur_x_cm = self.table_motor.get_angle() * self.table_motor.cm_per_deg
@@ -5053,7 +5552,7 @@ class App(tk.Tk):
 		# Helper takes mm; convert + back.
 		tx_mm, ty_mm = shortest_point_in_waste_bin(
 			cur_x_cm * 10.0, cur_y_cm * 10.0,
-			anchor_x * 10.0, anchor_y * 10.0,
+			center_x * 10.0, center_y * 10.0,
 			ext_x * 10.0, ext_y * 10.0,
 		)
 		return tx_mm / 10.0, ty_mm / 10.0

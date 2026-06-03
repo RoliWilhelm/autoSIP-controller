@@ -105,14 +105,6 @@ five run-control buttons sits at the top-right of the frame.
   to skip the discard phase entirely.
 - **Volume per well (mL)** — float in `[0.1, 2.0]`. The pump runs for
   `volume / pump_rate` seconds per well.
-- **Prime time (s)** — float in `[0.0, 600.0]`, default `60`. Duration
-  the system automatically runs the fractionation pump at the start of
-  every run to walk sample solution from the source tube up to roughly
-  5 cm below the syringe dispenser, before the operator performs the
-  manual walk-to-droplet step. Used by the pre-fractionation priming
-  workflow (§6.3.2a). Set this based on your tubing length; Manual
-  mode's *Prime Time Calibration Tool* (§6.2.2) measures it
-  empirically.
 
 **Bulk Sample Submission.** Preload Sample ID, Plate ID, fraction
 counts, and volume for an entire multi-sample session from a CSV so
@@ -143,48 +135,74 @@ Full workflow: §6.3.7.
   `[0.0, 20.0]`.
 - **Starting well position (y-axis)** — Y position of well A1 in cm,
   `[0.0, 15.0]`.
-- **Waste bin position (x-axis)** — X position of the waste container
-  in cm, `[0.0, 20.0]`. Required when Discard fractions > 0. The
-  application warns at run start if this position appears to fall
-  inside the plate footprint.
-- **Waste bin position (y-axis)** — Y position of the waste container
-  in cm, `[0.0, 15.0]`.
 
-**Fractionation Pump Parameters.** Settings for the Razel R-200
-syringe pump used during fractionation (column 0, below Run
-Parameters):
+The previous *Waste bin position (x-axis)* and *(y-axis)* rows
+moved out of Plate Parameters and now live in **Tools → Cleaning
+Parameters…** alongside the rest of the waste-bin geometry; see
+the Tools menu entries below.
+
+**Tools → Pump Parameters…** Razel R-200 syringe pump settings,
+collected in a modal dialog with Save / Cancel buttons:
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
   the syringe pump's gear-set.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`, default `1.0`. The
   dwell time *after* the pump shuts off and *before* the carriage moves
   to the next well, so a dispensed drop has time to detach cleanly.
-  Longer waits improve volume consistency; shorter waits speed up the
-  run.
+- **Prime time (s)** — float in `[0.0, 600.0]`, default `60`. Duration
+  the system automatically runs the fractionation pump at the start of
+  every run to walk sample solution from the source tube up to roughly
+  5 cm below the syringe dispenser, before the operator performs the
+  manual walk-to-droplet step (§6.3.2a). Set this based on your tubing
+  length; Manual mode's *Prime Time Calibration Tool* (§6.2.2)
+  measures it empirically.
 
-**Cleaning Parameters.** Settings for the Adafruit 3910 peristaltic
-pump used during inter-sample purges, manual purges, and Cleaning
-Purge (column 1, below Plate Parameters):
+Save persists the values to `config.json`; Cancel reverts the dialog
+to the values it opened with. Mid-run pump-rate edits apply to the
+*next* dispense — the in-flight dispense uses the rate captured when
+it started.
+
+**Tools → Cleaning Parameters…** Adafruit 3910 peristaltic pump
+settings and waste-bin geometry, collected in a modal dialog with
+two LabelFrame sections (Purge & Pump; Waste Bin Geometry):
 
 - **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
   per-phase duration of the inter-sample purge (see §6.3.2). Use
-  Cleaning mode's *Purge Time Calibration Tool* panel (§6.2.3) to measure
-  the right value for your tubing geometry.
+  Cleaning mode's *Purge Time Calibration Tool* panel (§6.2.3) to
+  measure the right value for your tubing geometry.
 - **Peristaltic pump rate (mL/min)** — float in `[1.0, 200.0]`,
   default `100.0`. Used by the waste-bin estimator (see §6.5) to
   convert purge-phase pump-on time into a volume contribution.
-  Calibrate this against your physical hardware for accurate
-  estimates.
 - **Max waste bin volume (mL)** — float in `[10.0, 5000.0]`, default
   `250.0`. Capacity of your waste container. autoSIP warns at 80 %
-  and halts all pump activity at 100 % to prevent overflow. The
-  estimate is based on configured pump rates × pump-on time, not a
-  real measurement; the *Reset* button in the status bar is the
-  ground-truth mechanism after a physical empty.
+  and halts all pump activity at 100 % to prevent overflow.
+- **Waste bin position (x-axis)** — X coordinate of the waste
+  container's CENTER in cm, `[0.0, 20.0]`. Required when Discard
+  fractions > 0.
+- **Waste bin position (y-axis)** — Y coordinate of the waste
+  container's CENTER in cm, `[0.0, 15.0]`.
+- **Waste bin size (X × Y, cm)** — full width and height of the
+  rectangular waste bin. The rectangle spans `± extent/2` around
+  the center; Begin Fractionation rejects configurations whose
+  edges would extend outside the physical table. Non-zero values
+  enable shortest-path routing; default `0` keeps the legacy
+  point-target behaviour (every move-to-waste targets the center).
 
-The *Skip inter-sample purge* behavioral preference moved to **Tools
-→ Preferences** (§6.2.4) so it persists across launches alongside
-*Return needle to origin on exit*.
+Save persists the values and immediately repaints the table view so
+bin geometry edits are visible without a mode switch.
+
+**First-launch hint banner.** On a fresh install where the relocated
+pump / cleaning fields have not yet been configured, an italic muted
+banner appears at the top of the Automated panel: *"Configure pump
+and cleaning parameters in the Tools menu before starting a run."*
+The banner dismisses itself once the required fields are populated.
+Clicking **Begin Fractionation** with any required pump / cleaning
+field still blank surfaces a targeted dialog naming the missing
+fields and the Tools entry to open.
+
+The *Skip inter-sample purge* behavioral preference lives under
+**Tools → Preferences** (§6.2.4) alongside *Return needle to origin
+on exit*.
 
 **Run controls** (top-right of the Automated frame):
 
@@ -250,8 +268,11 @@ relative to the table layout. Elements:
   and a 384-well plate all render at the same plastic perimeter with
   different grid densities inside.
 - **Waste-bin marker** — when the Waste Bin Position fields validate,
-  a 20 × 20 mm amber square labelled *Waste* at the configured motor
-  coordinates.
+  an amber rectangle labelled *Waste* drawn at scale and centered on
+  the configured `(waste_bin_table, waste_bin_carriage)` coordinate.
+  The rectangle spans `± extent/2` around the center on each axis;
+  when both extents are 0 the marker collapses to a small amber dot
+  at the center (legacy point-target rendering).
 - **Live crosshair** — a small red "+" tracks the dispenser's real
   position. Updated at 10 Hz by polling the motor angles, so the
   crosshair traces the snake across the plate during fractionation,
@@ -379,7 +400,8 @@ for flushing the fluid path between sample types.
   duration is entered at runtime in the Phase 1 (Bleach Fill) dialog
   — default 5 minutes (range 0-30); each invocation resets the field
   to 5, so the value never carries over between System Clean runs and
-  no soak-time parameter is persisted in Cleaning Parameters. Use at
+  no soak-time parameter is persisted in Tools → Cleaning
+  Parameters. Use at
   session start or during a paused automated run; the button is
   disabled only during active (non-paused) dispensing. System Clean
   intentionally stops after the second water rinse — priming with
@@ -574,12 +596,18 @@ well A1 and to the waste container.
    position (y-axis)`. Automated mode's Y validator accepts values in
    `[0.0, 15.0]` cm.
 
-8. **Repeat the jog process for the waste container.** Return to
-   Manual mode, jog the needle until it sits above the waste
-   container's opening, and record the magnitudes. Enter them in
-   Automated mode under `Waste bin position (x-axis)` and
-   `Waste bin position (y-axis)`. (Cleaning mode shares these two
-   fields, so editing in either mode updates both.)
+8. **Repeat the jog process for the waste container's CENTER.**
+   Return to Manual mode, jog the needle until it sits directly
+   above the geometric center of the waste container's opening
+   (not a corner), and record the magnitudes. Enter them in
+   Tools → Cleaning Parameters… under `Waste bin position (x-axis)`
+   and `Waste bin position (y-axis)`. (Cleaning mode and Manual
+   mode share these two fields, so editing in any of the three
+   places updates the others.) If the bin has measurable extents,
+   set `Waste bin size (X × Y, cm)` to the full width and height;
+   the rectangle spans `± extent/2` around the saved center on
+   each axis, and Begin Fractionation refuses to launch a run
+   whose bin edges would overhang the physical table.
 
 9. **Save the calibration.** File → *Save current as profile…* writes
    the field values to `~/.autosip/profiles/{name}.json` so you can

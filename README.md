@@ -94,29 +94,32 @@ Two consequences follow from that convention:
   by jogging the needle in Manual mode (see
   [Operation Instructions §6.3.1](docs/operation_instructions.md#631-calibrating-plate-start-and-waste-bin-coordinates)).
 
-- **Waste bin position** (Plate Parameters → *Waste bin position
-  (x-axis)* / *Waste bin position (y-axis)*) is the X, Y position of
-  the **UPPER-LEFT CORNER (anchor)** of the waste bin rectangle —
-  consistent with the plate's Starting Well Position convention.
-  These same two values are mirrored in Cleaning mode — editing them
-  in either mode updates the other.
+- **Waste bin position** (Tools → Cleaning Parameters… → *Waste bin
+  position (x-axis)* / *Waste bin position (y-axis)*) is the X, Y
+  position of the **CENTER** of the waste bin rectangle. Manual
+  mode's Position Calibration Tool prompts the operator to jog the
+  needle over the bin's visual center before saving, so the stored
+  coordinate matches what the operator physically aimed at. These
+  same two values are mirrored in Cleaning mode — editing them in
+  either place updates the other.
 
-- **Waste bin size** (Cleaning Parameters → *Waste bin size
-  (X × Y, cm)*) — two new optional extents that extend the bin
-  rectangle south (Y) and east (X) from the anchor. When both
-  extents are 0 (default), every move-to-waste targets the anchor
-  point itself (legacy point-target behaviour). When extents are
-  set, every move-to-waste — discards, inter-sample purge phases,
-  System Clean, pre-fractionation prime when `D > 0`, and the
-  Manual Move-to-Waste button — routes through a shortest-path
-  helper that clamps the current needle XY to the bin's interior
-  (anchor + extent shrunk by a 5 mm rim margin on each side). This
-  saves motor travel when the needle is far from the bin anchor
-  but already near a different bin edge. `log.csv` records the
-  actual entry point used, not the anchor, so per-event coordinates
-  reflect where the fluid physically went. The XY table view
-  renders the bin as a semi-transparent amber rectangle at scale;
-  the marker falls back to a small amber dot when extents are 0.
+- **Waste bin size** (Tools → Cleaning Parameters… → *Waste bin size
+  (X × Y, cm)*) — two optional extents giving the bin's full width
+  and height. The rectangle spans `± extent/2` around the center on
+  each axis. When both extents are 0 (default), every move-to-waste
+  targets the center point itself (legacy point-target behaviour).
+  When extents are set, every move-to-waste — discards,
+  inter-sample purge phases, System Clean, pre-fractionation prime
+  when `D > 0`, and the Manual Move-to-Waste button — routes
+  through a shortest-path helper that clamps the current needle XY
+  to the bin's interior (rectangle shrunk by a 5 mm rim margin on
+  each side). This saves motor travel when the needle is far from
+  the bin center but already near a different bin edge. `log.csv`
+  records the actual entry point used, not the center, so per-event
+  coordinates reflect where the fluid physically went. The XY
+  table view renders the bin as a semi-transparent amber rectangle
+  at scale, centered on the saved coordinate; the marker falls back
+  to a small amber dot at the center when extents are 0.
 
 Two button names cover the same action in different places:
 
@@ -227,16 +230,14 @@ suffix. End Run implicitly exits bulk mode.
 - **Well width (cm)** — center-to-center well spacing, `[0.1, 5.0]`.
 - **Starting well position (x-axis)** — X position of well A1, `[0.0, 20.0]` cm.
 - **Starting well position (y-axis)** — Y position of well A1, `[0.0, 15.0]` cm.
-- **Waste bin position (x-axis)** — X position of the waste container
-  in the same coordinate frame, `[0.0, 20.0]` cm. Required when
-  Discard fractions > 0. autoSIP warns if this position appears to
-  fall inside the plate footprint.
-- **Waste bin position (y-axis)** — Y position of the waste
-  container, `[0.0, 15.0]` cm.
 
-**Fractionation Pump Parameters** (column 0, below Run Parameters)
-— settings for the Razel R-200 syringe pump used during
-fractionation:
+The previous *Waste bin position (x-axis)* and *(y-axis)* rows
+moved out of Plate Parameters and now live in **Tools → Cleaning
+Parameters…** alongside the rest of the waste-bin geometry; see
+"Tools menu" below.
+
+**Tools menu — Pump Parameters…** (Razel R-200 syringe pump settings
+used during fractionation):
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value
   to your syringe pump's gear-set.
@@ -245,10 +246,19 @@ fractionation:
   well, so the dispensed drop has time to detach cleanly. Default
   `1.0`. Longer waits improve volume consistency; shorter waits
   speed up the run.
+- **Prime time (s)** — float in `[0.0, 600.0]`, default `60`. How
+  long the syringe pump runs to walk fractionation solution from
+  the tube to the dispenser tip. Cleaning mode's *Prime Time
+  Calibration Tool* measures this empirically.
 
-**Cleaning Parameters** (column 1, below Plate Parameters) —
-settings for the Adafruit 3910 peristaltic pump used during
-inter-sample purges, manual purges, and Cleaning Purge:
+Save persists the values to `config.json`; Cancel reverts the dialog
+to the values it opened with. Mid-run pump-rate changes apply to the
+next dispense (the in-flight dispense uses the rate captured when
+it started).
+
+**Tools menu — Cleaning Parameters…** (Adafruit 3910 peristaltic
+pump and waste-bin geometry, used during inter-sample purges,
+manual purges, and Cleaning Purge):
 
 - **Purge time (s)** — float in `[1.0, 600.0]`, default `30.0`. The
   duration of each of two pump phases run between samples: one
@@ -265,17 +275,29 @@ inter-sample purges, manual purges, and Cleaning Purge:
   is on), shows an advisory **80% auto-pause** dialog (where the
   operator may Reset after a physical empty *or* Resume past the
   warning) and a blocking **100% hard stop** dialog (where Resume
-  is disabled until Reset is clicked). The estimate is based on
-  configured pump rates × pump-on time, not a real measurement;
-  the *Reset* button in the status bar is the ground-truth
-  mechanism after a physical empty. The counter resets to 0 on
-  every app launch (so closing and reopening the app produces a
-  fresh counter — empty the bin first if you want the new counter
-  to reflect reality).
+  is disabled until Reset is clicked).
+- **Waste bin position (x-axis)** — X anchor of the waste container
+  in table coordinates, `[0.0, 20.0]` cm. Required when Discard
+  fractions > 0.
+- **Waste bin position (y-axis)** — Y anchor of the waste container,
+  `[0.0, 15.0]` cm.
+- **Waste bin size (X × Y, cm)** — width and height of the
+  rectangular waste bin. Non-zero values enable shortest-path
+  routing; default `0` keeps the legacy point-target behaviour.
 
-The *Skip inter-sample purge* preference moved to **Tools →
-Preferences** so it persists across launches alongside *Return
-needle to origin on exit*.
+Save persists and triggers an immediate repaint of the table view
+so bin geometry edits are visible without a mode switch.
+
+If either dialog has required fields left blank, an italic muted
+hint banner appears at the top of the Automated panel:
+*"Configure pump and cleaning parameters in the Tools menu before
+starting a run."* The banner dismisses itself once the relocated
+fields are populated. Clicking **Begin Fractionation** with any
+required pump/cleaning field still blank surfaces a targeted dialog
+that names the missing fields and the Tools entry to open.
+
+The *Skip inter-sample purge* preference lives under **Tools →
+Preferences** alongside *Return needle to origin on exit*.
 
 **Run controls** (top-right of the Automated frame):
 

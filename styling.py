@@ -70,6 +70,12 @@ PALETTE = {
 _FAMILY_PREFERENCE = ("DejaVu Sans", "Helvetica")
 _BODY_SIZE = 11
 _HEADING_SIZE = 13
+# LabelFrame titles are bolder + one point larger than body text so the
+# panel labels (Plate Parameters, Run Parameters, Jog Controls, etc.)
+# read as section headings rather than as inline labels. Single source
+# of truth — both the tk.LabelFrame option_add and the ttk
+# TLabelframe.Label style consume this constant.
+_LABELFRAME_TITLE_SIZE = _BODY_SIZE + 3
 
 FONTS = {
 	# Populated by apply_style() once Tk is initialized; consumers must
@@ -103,10 +109,12 @@ def apply_style(root):
 	body = (family, _BODY_SIZE)
 	bold = (family, _BODY_SIZE, "bold")
 	heading = (family, _HEADING_SIZE, "bold")
+	labelframe_title = (family, _LABELFRAME_TITLE_SIZE, "bold")
 	mono = ("DejaVu Sans Mono", _BODY_SIZE)
 	FONTS["body"] = body
 	FONTS["bold"] = bold
 	FONTS["heading"] = heading
+	FONTS["labelframe_title"] = labelframe_title
 	FONTS["mono"] = mono
 	FONTS["family"] = family
 	FONTS["size"] = _BODY_SIZE
@@ -130,7 +138,7 @@ def apply_style(root):
 	root.option_add("*LabelFrame.Foreground", PALETTE["fg_text"])
 	root.option_add("*LabelFrame.relief", "solid")
 	root.option_add("*LabelFrame.borderwidth", 1)
-	root.option_add("*LabelFrame.Font", bold)
+	root.option_add("*LabelFrame.Font", labelframe_title)
 	root.option_add("*Button.Background", PALETTE["button_bg"])
 	root.option_add("*Button.activeBackground", PALETTE["button_active"])
 	root.option_add("*Button.Foreground", PALETTE["fg_text"])
@@ -170,7 +178,8 @@ def apply_style(root):
 		background=PALETTE["bg_frame"], bordercolor=PALETTE["border_frame"],
 		relief="solid", borderwidth=1)
 	style.configure("TLabelframe.Label",
-		background=PALETTE["bg_frame"], foreground=PALETTE["fg_text"], font=bold)
+		background=PALETTE["bg_frame"], foreground=PALETTE["fg_text"],
+		font=labelframe_title)
 
 	# Entries: white field, dark text, thin border. Both ``fieldbackground``
 	# (the editable area) and ``background`` (the wider widget frame) get
