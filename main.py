@@ -1385,14 +1385,14 @@ class AutomatedFrame(tk.Frame):
 			"by Load Labware Specs.",
 		)
 
-		self.table_te = TextEntry(platep, "Starting well position (x-axis):")
+		self.table_te = TextEntry(platep, "Starting well position (x-axis; cm):")
 		self.table_te.grid(row=4, column=0, sticky="we")
 		Tooltip(
 			self.table_te.entry,
 			"X coordinate of well A1 in cm. Set via Manual mode's "
 			"Position Calibration Tool.",
 		)
-		self.carriage_te = TextEntry(platep, "Starting well position (y-axis):")
+		self.carriage_te = TextEntry(platep, "Starting well position (y-axis; cm):")
 		self.carriage_te.grid(row=5, column=0, sticky="we")
 		Tooltip(
 			self.carriage_te.entry,
@@ -4505,9 +4505,9 @@ class App(tk.Tk):
 		if not y_ok:
 			return f"Waste bin Y: {y_val}"
 		if not ex_ok:
-			return f"Waste bin X-extent: {ex_val}"
+			return f"Waste bin size (x-axis): {ex_val}"
 		if not ey_ok:
-			return f"Waste bin Y-extent: {ey_val}"
+			return f"Waste bin size (y-axis): {ey_val}"
 		if x_val is not None and ex_val is not None and ex_val > 0:
 			lo, hi = x_val - ex_val / 2.0, x_val + ex_val / 2.0
 			if lo < -1e-6 or hi > table_x_max + 1e-6:
@@ -4595,23 +4595,23 @@ class App(tk.Tk):
 						"at 80% and halts at 100% to prevent overflow."),
 				]),
 				("Waste Bin Geometry", [
-					("Waste bin position X (cm):",
+					("Waste bin position (x-axis; cm):",
 						self.waste_bin_table_var, validation.table_pos,
 						"X (table-axis) coordinate of the bin's CENTER. "
 						"Calibrate via Manual mode by jogging the needle "
 						"to the visual center of the bin."),
-					("Waste bin position Y (cm):",
+					("Waste bin position (y-axis; cm):",
 						self.waste_bin_carriage_var, validation.carriage_pos,
 						"Y (carriage-axis) coordinate of the bin's CENTER. "
 						"Calibrate via Manual mode by jogging the needle "
 						"to the visual center of the bin."),
-					("Waste bin X-extent (cm):",
+					("Waste bin size (x-axis; cm):",
 						self.waste_bin_x_extent_var,
 						validation.waste_bin_extent,
 						"Full width of the bin rectangle along X. The "
 						"rectangle spans ± extent/2 around the center. "
 						"0 = legacy point target."),
-					("Waste bin Y-extent (cm):",
+					("Waste bin size (y-axis; cm):",
 						self.waste_bin_y_extent_var,
 						validation.waste_bin_extent,
 						"Full height of the bin rectangle along Y. The "
