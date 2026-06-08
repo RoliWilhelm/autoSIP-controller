@@ -31,7 +31,7 @@ labware). Manuscript in preparation (Elango et al., 2026, for HardwareX).
   steps/rev. Lead screws have 40 mm pitch (40 mm linear travel per revolution).
 - Single Digital Loggers IoT relay on GPIO 5 (driven via `gpiozero.LED`). The relay
   outlet physically powers whichever single pump the operator has plugged in:
-  the Razel R-200 syringe pump for **fractionation** runs, or the Adafruit 3910
+  the Razel R-200 fractionation pump for **fractionation** runs, or the Adafruit 3910
   peristaltic pump for **purging** / line cleaning. Only one pump is connected at
   a time; the operator swaps the plug between runs. There is no second relay or
   GPIO pin.

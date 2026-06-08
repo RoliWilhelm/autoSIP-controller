@@ -402,7 +402,7 @@ def save_skip_intersample_purge(enabled):
 
 # Top-level string preference selecting the inter-sample purge
 # workflow. ``"basic"`` is the default three-phase water flush + air
-# clear + syringe priming. ``"decontamination"`` expands to a
+# clear + needle priming. ``"decontamination"`` expands to a
 # five-phase water → bleach → water → air → prime sequence.
 
 def load_purge_protocol():

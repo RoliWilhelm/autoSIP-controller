@@ -1122,7 +1122,7 @@ class RunLogger:
 		      "rinse": (seconds, cycles), # post-bleach water flush (decon)
 		      "bleach": (seconds, cycles),# bleach phase (decon)
 		      "clear": (seconds, cycles), # air clear
-		      "prime": (seconds, cycles), # syringe priming
+		      "prime": (seconds, cycles), # needle priming
 		    }
 
 		Missing phases come back as ``(0.0, 0)``. The purge rows

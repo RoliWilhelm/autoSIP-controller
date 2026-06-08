@@ -16,7 +16,7 @@ Under active development — manuscript in preparation.
   steps/rev) driving lead screws with a 40 mm pitch (40 mm linear travel per
   revolution).
 - Digital Loggers IoT relay on GPIO 5 (driven through `gpiozero.LED`) switching
-  one of: a Razel R-200 syringe pump or an Adafruit 3910 peristaltic pump. Only
+  one of: a Razel R-200 fractionation pump or an Adafruit 3910 peristaltic pump. Only
   one pump is connected at a time.
 - Display: a ~7" Raspberry Pi touchscreen, or a developer laptop over VNC.
 
@@ -180,7 +180,7 @@ move:
 - **Volume per well (mL)** — float in `[0.1, 2.0]`, e.g. `0.22`.
   The pump runs for `volume / pump_rate` seconds per well.
 - **Prime time (s)** — float in `[0.0, 600.0]`, default `60`.
-  Duration the syringe pump runs automatically at the start of
+  Duration the fractionation pump runs automatically at the start of
   every run to walk the sample solution from the tube up to roughly
   5 cm below the dispenser. Used by the pre-fractionation priming
   workflow (see *Pre-fractionation priming* below). Manual mode's
@@ -228,18 +228,18 @@ moved out of Plate Parameters and now live in **Tools → Cleaning
 Parameters…** alongside the rest of the waste-bin geometry; see
 "Tools menu" below.
 
-**Tools menu — Pump Parameters…** (Razel R-200 syringe pump settings
+**Tools menu — Pump Parameters…** (Razel R-200 fractionation pump settings
 used during fractionation):
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value
-  to your syringe pump's gear-set.
+  to your fractionation pump's gear-set.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`. The dwell time
   *after* the pump shuts off, *before* the carriage moves to the next
   well, so the dispensed drop has time to detach cleanly. Default
   `1.0`. Longer waits improve volume consistency; shorter waits
   speed up the run.
 - **Prime time (s)** — float in `[0.0, 600.0]`, default `60`. How
-  long the syringe pump runs to walk fractionation solution from
+  long the fractionation pump runs to walk fractionation solution from
   the tube to the dispenser tip. Cleaning mode's *Prime Time
   Calibration Tool* measures this empirically.
 
@@ -323,7 +323,7 @@ machine.
 **Pre-fractionation priming.** After the Begin-Fractionation
 confirmation, the needle moves to its first-dispense position
 (waste bin if Discard fractions > 0, otherwise plate start well
-A1) and a *Prime Fractionation Line* modal opens. The syringe pump
+A1) and a *Prime Fractionation Line* modal opens. The fractionation pump
 runs automatically for the configured **Prime time** seconds with a
 live countdown; when the automatic prime completes, the dialog
 switches to a *manual walk-to-droplet* phase — press **Space** to
@@ -404,7 +404,7 @@ The full step-by-step calibration walkthrough lives in
 
 **Prime Time Calibration Tool** — a stopwatch panel that measures
 the *Prime time* parameter empirically for your tubing geometry.
-Connect a sample tube, click **Start** to run the syringe pump and
+Connect a sample tube, click **Start** to run the fractionation pump and
 begin the timer, watch the line, and click **Stop** the moment the
 solution reaches ~5 cm below the syringe needle. Click **Save as
 Prime Time** to write the measured value into Automated mode's
@@ -480,7 +480,7 @@ action button starts the appropriate pump (peristaltic for
 wash/bleach/rinse/clear, syringe for the final *Prime sample*
 phase). Wash/bleach/rinse/clear phases run for *Purge time*
 seconds with a live countdown; the *Prime sample* phase runs the
-syringe pump for **Prime time** seconds, then enters a
+fractionation pump for **Prime time** seconds, then enters a
 walk-to-droplet state where pressing **Space** extends pumping
 until the operator sees an even droplet. A dynamic line in the
 prime dialog names the destination of the priming output (the
@@ -533,7 +533,7 @@ autoSIP exposes two semantic pump buttons — **Fractionate** and
 IoT relay on GPIO 5). The operator physically plugs **one** pump
 into the relay outlet at a time:
 
-- The **Razel R-200 syringe pump** for fractionation runs.
+- The **Razel R-200 fractionation pump** for fractionation runs.
 - The **Adafruit 3910 peristaltic pump** for purging / line cleaning.
 
 The two labels are an intentional UX safety cue. Before the relay

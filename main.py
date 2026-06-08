@@ -3740,7 +3740,7 @@ class App(tk.Tk):
 		# Max waste-bin volume in mL. Live value driving the auto-shutoff
 		# and the status-bar fill-level indicator.
 		self.max_waste_volume_var = tk.StringVar(value="250.0")
-		# Syringe pump rate (mL/hr) and drip-wait time (s). Promoted to
+		# Fractionation pump rate (mL/hr) and drip-wait time (s). Promoted to
 		# App level so the new Tools → Pump Parameters dialog can bind
 		# to the same variables that get_values / set_values + the
 		# state machine read. No inline default — operator must
@@ -4458,9 +4458,9 @@ class App(tk.Tk):
 			title="Fractionation Parameters",
 			sections=[
 				("Pump", [
-					("Pump rate (mL/hr — see your syringe pump spec):",
+					("Pump rate (mL/hr — see your fractionation pump spec):",
 						self.pump_rate_var, validation.pump_rate,
-						"Volumetric flow rate of the syringe pump driving "
+						"Volumetric flow rate of the fractionation pump driving "
 						"fractionation. Set from the pump spec."),
 					("Drip wait time (s):", self.drip_wait_time_var,
 						validation.drip_wait_time,
@@ -5773,7 +5773,7 @@ class App(tk.Tk):
 		if name == "fractionate":
 			return (
 				"Activating the relay (GPIO 5). Confirm before continuing:\n"
-				"  • The Razel R-200 syringe pump is plugged into the relay outlet.\n"
+				"  • The Razel R-200 fractionation pump is plugged into the relay outlet.\n"
 				"  • Any other pumps are unplugged or switched off at their own switch.\n"
 				"  • Tubing is routed to your intended container.\n"
 				"\n"
@@ -5796,7 +5796,7 @@ class App(tk.Tk):
 		on every relay-OFF transition with a final per-tick increment.
 
 		Tracking every claimant -- including ``fractionate`` -- means
-		Automated-mode discards + syringe priming are accounted for via
+		Automated-mode discards + needle priming are accounted for via
 		the same code path that handles Manual/Cleaning Purge. Per-well
 		plate dispenses also count toward the running total even though
 		physically they land on the plate; operators set
@@ -5883,7 +5883,7 @@ class App(tk.Tk):
 		return 0.0
 
 	def _live_pump_rate_ml_per_min(self):
-		"""Read the syringe pump rate (Fractionation Pump Parameters →
+		"""Read the fractionation pump rate (Fractionation Pump Parameters →
 		Pump rate, mL/hr) and convert to mL/min so waste-volume math
 		mirrors the peristaltic path. Falls back to 60 mL/hr (= 1 mL/min)
 		when the field is blank or malformed."""
@@ -6854,7 +6854,7 @@ class App(tk.Tk):
 		discard_volume = discard_fractions * volume * n_samples
 		# Per-transition purge volume — protocol-dependent. Each
 		# peristaltic phase pumps for purge_time at peristaltic_rate;
-		# the priming phase pumps for purge_time at the syringe pump
+		# the priming phase pumps for purge_time at the fractionation pump
 		# rate. Basic: 2 peri (wash + clear) + 1 syringe (prime);
 		# decon: 4 peri (wash + bleach + rinse + clear) + 1 syringe.
 		if skip_intersample_purge or n_samples <= 1:
@@ -8089,14 +8089,14 @@ class App(tk.Tk):
 		  "basic" (3 phases):
 		     1. Connect inlet to water, flush  (peristaltic pump)
 		     2. Disconnect from water (in air), clear  (peristaltic pump)
-		     3. Connect to new sample, prime syringe  (syringe pump)
+		     3. Connect to new sample, prime syringe  (fractionation pump)
 
 		  "decontamination" (5 phases):
 		     1. Sterile water flush                   (peristaltic)
 		     2. Bleach flush                          (peristaltic)
 		     3. Sterile water rinse                   (peristaltic)
 		     4. Air clear                             (peristaltic)
-		     5. Connect to new sample, prime syringe  (syringe pump)
+		     5. Connect to new sample, prime syringe  (fractionation pump)
 
 		Each phase opens with the pump OFF. Pressing Space toggles the
 		pump on/off; the operator decides when enough fluid has flowed.
@@ -8778,7 +8778,7 @@ class App(tk.Tk):
 					"fractionation solution up to the syringe dispenser "
 					"until droplets form evenly, readying the line for "
 					"the next fractionation series.\n\n"
-					f"Click Prime sample to run the syringe pump for "
+					f"Click Prime sample to run the fractionation pump for "
 					f"{prime_s:.0f} s, then press Space to extend "
 					"pumping until droplets form evenly at the needle."
 				),
@@ -8796,7 +8796,7 @@ class App(tk.Tk):
 			)
 
 		def _finish():
-			# Workflow complete -- the syringe pump is the active
+			# Workflow complete -- the fractionation pump is the active
 			# claimant (we claimed "fractionate" entering the priming
 			# phase). The run continues into the new sample's discard
 			# phase via the on_done callback.

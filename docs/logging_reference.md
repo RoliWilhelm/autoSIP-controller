@@ -78,7 +78,7 @@ spaces of indentation. Fields:
 | `parameters.rows`           | Plate row count (e.g. 8 for SBS).                                                                  |
 | `parameters.cols`           | Plate column count (e.g. 12 for SBS).                                                              |
 | `parameters.well_size_cm`   | Centre-to-centre well spacing in cm.                                                               |
-| `parameters.pump_rate`      | Syringe pump rate value (mL/hr — unit recorded separately).                                        |
+| `parameters.pump_rate`      | Fractionation pump rate value (mL/hr — unit recorded separately).                                        |
 | `parameters.pump_rate_units`| Literal `"mL/hr"`.                                                                                 |
 | `parameters.drip_wait_time_s` | Post-dispense drip wait (seconds).                                                              |
 | `parameters.purge_time_s`   | Inter-sample purge cycle duration (seconds).                                                       |

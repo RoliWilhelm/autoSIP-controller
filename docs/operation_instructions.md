@@ -30,7 +30,7 @@ operator calibrates per session.
 The autoSIP supports two pumps connected to a single Digital Loggers
 IoT relay on Raspberry Pi GPIO 5:
 
-- The **Razel R-200 syringe pump** is used for fractionation runs.
+- The **Razel R-200 fractionation pump** is used for fractionation runs.
 - The **Adafruit 3910 peristaltic pump** is used for purging and line
   cleaning.
 
@@ -141,11 +141,11 @@ moved out of Plate Parameters and now live in **Tools → Cleaning
 Parameters…** alongside the rest of the waste-bin geometry; see
 the Tools menu entries below.
 
-**Tools → Pump Parameters…** Razel R-200 syringe pump settings,
+**Tools → Pump Parameters…** Razel R-200 fractionation pump settings,
 collected in a modal dialog with Save / Cancel buttons:
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value to
-  the syringe pump's gear-set.
+  the fractionation pump's gear-set.
 - **Drip wait time (s)** — float in `[0.0, 60.0]`, default `1.0`. The
   dwell time *after* the pump shuts off and *before* the carriage moves
   to the next well, so a dispensed drop has time to detach cleanly.
@@ -367,7 +367,7 @@ time empirically for your tubing geometry:
 
 1. Connect a sample tube to the inlet line and place the needle over
    the waste bin (or wherever the prime fluid should be sent).
-2. Click **Start**. The Razel R-200 syringe pump powers on (after the
+2. Click **Start**. The Razel R-200 fractionation pump powers on (after the
    first-of-session confirmation dialog) and an *Elapsed* timer ticks
    every 100 ms.
 3. Watch the sample solution walk through the tubing toward the
@@ -495,11 +495,11 @@ through shared profiles). All apply across launches.
   group selecting the workflow used between samples:
 
   - *Water only (water → sample)* — three phases: sterile water
-    flush, air clear, syringe priming.
+    flush, air clear, needle priming.
   - *Decontamination (water → bleach → water → sample)* — five
     phases: sterile water flush, **0.5% v/v sodium hypochlorite
     (bleach) flush** (1:10 dilution of household bleach), sterile
-    water rinse, air clear, syringe priming (which uses *Prime time*,
+    water rinse, air clear, needle priming (which uses *Prime time*,
     not *Purge time*). Use when carryover between sample types must
     be eliminated (e.g. between deuterated and undeuterated runs, or
     between projects). *Prepare the 0.5% bleach solution fresh on
@@ -751,7 +751,7 @@ two discard fractions each, total 100 dispense cycles = 90 collected
 
    - **Automatic prime.** The needle first moves to the first-
      dispense target (the waste bin if Discard fractions > 0,
-     otherwise the start well A1), then the syringe pump runs
+     otherwise the start well A1), then the fractionation pump runs
      automatically for the configured **Prime time** seconds. A
      live countdown shows `Prime time: X / Y s remaining` and the
      pump-on indicator. Begin Run is disabled and the space bar
@@ -852,7 +852,7 @@ two discard fractions each, total 100 dispense cycles = 90 collected
        configured, so this is collected sample material. Walk only as
        much as needed to form an even droplet."* (when D = 0). The
        primary button reads **Prime sample**; clicking it runs the
-       *syringe pump* for **Prime time** seconds (NOT *Purge time*),
+       *fractionation pump* for **Prime time** seconds (NOT *Purge time*),
        then enters the "complete" state where pressing **Space**
        extends pumping in walk-to-droplet style. Click **Continue**
        to apply the next sample's parameters and start its
@@ -876,7 +876,7 @@ two discard fractions each, total 100 dispense cycles = 90 collected
     4. **Air clear** (peristaltic) — checklist: *Disconnected the
        inlet line from the water container* / *Line is in air,
        nothing dripping*. Click **Purge** to push air through.
-    5. **Prime sample** (syringe pump) — same checklist + dynamic
+    5. **Prime sample** (fractionation pump) — same checklist + dynamic
        destination line + Prime-time mechanic as the Water-only
        Prime phase above.
 
@@ -1048,7 +1048,7 @@ Use Cleaning mode to flush the fluid path between sample types — for
 example, after running an undeuterated control and before running a
 deuterated one, to clear residual buffer or DNA from the tubing.
 
-1. **Disconnect the Razel R-200 syringe pump from the relay outlet
+1. **Disconnect the Razel R-200 fractionation pump from the relay outlet
    and connect the Adafruit 3910 peristaltic pump.** Only one pump
    is wired to the relay at a time; the operator does the swap
    manually.
@@ -1073,7 +1073,7 @@ deuterated one, to clear residual buffer or DNA from the tubing.
 
 7. **Click Purge again to stop.**
 
-8. **Disconnect the peristaltic pump and reconnect the syringe pump
+8. **Disconnect the peristaltic pump and reconnect the fractionation pump
    before starting the next Automated run.** The software cannot
    detect which pump is wired in — that is the purpose of the
    Fractionate/Purge confirmation dialogs.

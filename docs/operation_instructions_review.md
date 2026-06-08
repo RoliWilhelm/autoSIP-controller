@@ -28,12 +28,12 @@ in the manuscript outer chrome).
 
 ### A2. §6.1 — pump-model names
 
-> "a syringe pump for fractionation runs and a peristaltic pump for
+> "a fractionation pump for fractionation runs and a peristaltic pump for
 > purging and line cleaning"
 
 Specific models are part of the broader manuscript's hardware
 section, but the existing in-repo docs name them: **Razel R-200**
-syringe pump and **Adafruit 3910** peristaltic pump. Worth naming
+fractionation pump and **Adafruit 3910** peristaltic pump. Worth naming
 in §6.1 too for consistency with §2 (Bill of Materials).
 
 ### A3. §6.2.1 Run Parameters — mid-run editability note
