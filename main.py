@@ -2321,7 +2321,7 @@ class ManualFrame(tk.Frame):
 		# the operator's eye lands on it before reaching the (now
 		# greyed-out) jog buttons below.
 		self.run_active_banner = tk.Label(
-			self, anchor="w", justify="left", wraplength=540,
+			self, anchor="w", justify="left",
 			bg="#fff3cd", fg="#7a5d00",
 			padx=8, pady=4,
 			text=(
@@ -2334,6 +2334,11 @@ class ManualFrame(tk.Frame):
 		self.run_active_banner.grid(row=0, column=0, columnspan=2,
 			sticky="we", padx=4, pady=(4, 0))
 		self.run_active_banner.grid_remove()
+		# Track the panel width on every <Configure> so the banner
+		# stays single-line at any sensible width and degrades
+		# gracefully at extreme narrow widths instead of being capped
+		# by a static wraplength that's too small for the sentence.
+		bind_dynamic_wraplength(self.run_active_banner, self)
 
 		# ---- Jog Controls ----
 		# Row 1 (was row 0 -- banner now occupies row 0). Spans both
@@ -2970,7 +2975,7 @@ class CleaningFrame(tk.Frame):
 		# the operator's eye lands on the warning before the locked
 		# controls below.
 		self.run_active_banner = tk.Label(
-			self, anchor="w", justify="left", wraplength=540,
+			self, anchor="w", justify="left",
 			bg="#fff3cd", fg="#7a5d00",
 			padx=8, pady=4,
 			text=(
@@ -2982,6 +2987,10 @@ class CleaningFrame(tk.Frame):
 		self.run_active_banner.grid(row=0, column=0, columnspan=2,
 			sticky="we", padx=2, pady=(2, 0))
 		self.run_active_banner.grid_remove()
+		# Same dynamic-wraplength treatment as ManualFrame's banner:
+		# track the panel width so the single-line sentence isn't
+		# capped by a static wraplength that's too small for the text.
+		bind_dynamic_wraplength(self.run_active_banner, self)
 
 		# Waste-bin coords -- bound to the same App-level StringVars
 		# as Automated mode's Waste bin entries, so an edit in either
