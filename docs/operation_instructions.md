@@ -156,6 +156,28 @@ collected in a modal dialog with Save / Cancel buttons:
   manual walk-to-droplet step (§6.3.2a). Set this based on your tubing
   length; Manual mode's *Prime Time Calibration Tool* (§6.2.2)
   measures it empirically.
+- **Skip wells (optional)** — comma-separated list of canonical
+  well IDs (e.g. `A1, B4, H12`) to leave empty during automated
+  fractionation, reserved for the operator to fill manually with
+  standards, blanks, or other non-fractionated material after the
+  run. The list applies uniformly to every plate in the session.
+  At Save the input is uppercased, deduplicated, and bounds-checked
+  against the loaded labware's row × column count; invalid or
+  out-of-range entries refuse the Save and surface an inline error
+  naming the offending IDs. *Number of fractions* counts collected
+  fractions only, so a request for 10 fractions with `B4` skipped
+  traverses 11 snake positions and collects 10. Each skipped well
+  appears in `log.csv` as a `status="well_skipped"` row at the
+  point in the snake order where the skip occurred. The plate
+  preview paints reserved wells with a sandy fill, dashed border,
+  and `—` glyph; the hover tooltip reads *"Skipped (reserved for
+  blank/standard)"*. Mid-run edits to this list queue for the next
+  inter-sample boundary and surface a *"Skip list updated. Changes
+  apply at the next sample."* notice; the current sample finishes
+  with the list it started with. If a smaller labware spec is
+  loaded that would invalidate previously valid entries, the
+  out-of-range entries are dropped automatically and a notice
+  names which were removed.
 
 Save persists the values to `config.json`; Cancel reverts the dialog
 to the values it opened with. Mid-run pump-rate edits apply to the
@@ -1291,6 +1313,14 @@ Status values:
   `well_id` is `checklist_skipped_plate_swap_{N}` or
   `checklist_skipped_purge_phase_{N}_{series}` so the bypass is
   pinpointed in the log.
+- `well_skipped` — emitted when the snake-routing path arrives at
+  a well in the operator's reserved list (Settings →
+  Fractionation Parameters → Skip wells). The `well_id` carries
+  the skipped well's canonical ID (e.g. `B4`); `plate_x` /
+  `plate_y` / `dispense_*` columns are left blank because no
+  dispense happened. One row is written per skipped well, in the
+  snake order where the skip occurred, so a reader can verify
+  the controller respected the list.
 - `waste_autopause` / `waste_hardstop` / `waste_reset` — breadcrumb
   rows for waste-bin events (80% advisory auto-pause, 100% hard
   stop, operator Reset). The legacy aliases `waste_warning` and

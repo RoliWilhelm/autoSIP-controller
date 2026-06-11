@@ -693,6 +693,29 @@ class RunLogger:
 		self._status_counts["prime_manual_ext"] = (
 			self._status_counts.get("prime_manual_ext", 0) + 1)
 
+	def well_skipped(self, well_id):
+		"""Append a status="well_skipped" row marking a well the operator
+		reserved (via Settings → Fractionation Parameters → Skip wells)
+		for a blank / standard / manual addition. The row carries the
+		skipped well's canonical ID (e.g. ``"B4"``) and blank coords +
+		dispense timestamps + duration — there is no dispense to record.
+		The row gives downstream readers a verifiable audit trail that
+		the controller respected the skip list at the moment in the
+		snake order where the skip occurred.
+		"""
+		if self.run_dir is None:
+			return
+		now = _now_iso()
+		rid = self._get_current_run_id()
+		self._write_row([
+			rid.get("project", ""), rid.get("sample_id", ""),
+			rid.get("plate_id", ""),
+			well_id, "", "",
+			now, now, "", "well_skipped",
+		])
+		self._status_counts["well_skipped"] = (
+			self._status_counts.get("well_skipped", 0) + 1)
+
 	def checklist_skipped(self, context_id):
 		"""Append a status="checklist_skipped" row marking a pre-flight
 		checklist that the operator bypassed via the Skip (Expert)

@@ -37,6 +37,10 @@ DISPENSING = "dispensing"
 WAIT = "wait"
 COMPLETED = "completed"
 SKIPPED = "skipped"
+# Operator-marked "reserved for blank/standard" wells from the Settings
+# → Fractionation Parameters → Skip wells list. Painted distinctly from
+# error-skipped wells so the two cases remain visually separable.
+RESERVED = "reserved"
 
 # ColorBrewer Set2-ish, picked for distinguishability under common color
 # vision deficiencies. Avoid the original green+blue+yellow trio.
@@ -46,6 +50,10 @@ _COLORS = {
 	WAIT: "#fc8d62",        # Set2 orange (amber substitute)
 	COMPLETED: "#8da0cb",   # Set2 blue-violet
 	SKIPPED: "#d62728",     # red
+	# Muted neutral with a dashed-border treatment (drawn at paint
+	# time) so the well reads as "intentionally left empty" rather
+	# than "failed to dispense".
+	RESERVED: "#f0e0c0",    # soft sand
 }
 
 # Glyph shown inside each well in addition to its color. Empty string means
@@ -56,6 +64,7 @@ _ICONS = {
 	WAIT: "⋯",
 	COMPLETED: "✓",
 	SKIPPED: "✗",
+	RESERVED: "—",
 }
 
 # Glyph color -- white reads better on the darker fills, dark on the lighter
@@ -68,6 +77,7 @@ _ICON_COLORS = {
 	WAIT: _ICON_COLOR_DARK,
 	COMPLETED: _ICON_COLOR_LIGHT,
 	SKIPPED: _ICON_COLOR_LIGHT,
+	RESERVED: _ICON_COLOR_DARK,
 }
 
 
@@ -186,6 +196,7 @@ _SNAPSHOT_GLYPHS = {
 	WAIT: "W",
 	COMPLETED: "*",
 	SKIPPED: "X",
+	RESERVED: "R",
 }
 
 
@@ -206,10 +217,12 @@ def format_snapshot_log(snap):
 
 	lines = [
 		f"Plate snapshot ({rows} rows x {cols} cols):",
-		f"  *={COMPLETED} D={DISPENSING} W={WAIT} X={SKIPPED} .={UNVISITED}",
+		f"  *={COMPLETED} D={DISPENSING} W={WAIT} X={SKIPPED} "
+		f"R={RESERVED} .={UNVISITED}",
 		f"  Counts: completed={counts[COMPLETED]} "
 		f"dispensing={counts[DISPENSING]} wait={counts[WAIT]} "
-		f"skipped={counts[SKIPPED]} unvisited={counts[UNVISITED]}",
+		f"skipped={counts[SKIPPED]} reserved={counts.get(RESERVED, 0)} "
+		f"unvisited={counts[UNVISITED]}",
 		"",
 	]
 	# Column number header (right-aligned in 2-char cells)
@@ -1082,6 +1095,27 @@ class WellPlateProgress(tk.Frame):
 			self.dispensing_xy = None
 		self._update_header_count()
 
+	def well_reserved(self, x, y):
+		"""Paint the well as RESERVED — the operator marked it in the
+		Settings → Fractionation Parameters → Skip wells list so the
+		state machine left it empty. Visually distinct from the
+		error-skip path (no red fill, dashed border, em-dash glyph)
+		and from completed wells (no sequence number, sandy fill).
+
+		The hover tooltip resolves to "Skipped (reserved for blank/
+		standard)" via the ``error_reasons`` map; the existing
+		Tooltip-binding code on the well items already reads from
+		``error_reasons`` for SKIPPED wells and the same map is
+		consulted for RESERVED.
+		"""
+		self._set_status(x, y, RESERVED)
+		self.error_reasons[(x, y)] = (
+			"Skipped (reserved for blank/standard)")
+		if self.dispensing_xy == (x, y):
+			self._stop_pulse()
+			self.dispensing_xy = None
+		self._update_header_count()
+
 	def end_run(self):
 		"""Stop the pulsing border and the elapsed clock tick.
 
@@ -1189,7 +1223,8 @@ class WellPlateProgress(tk.Frame):
 		Returns a dict suitable for ``format_snapshot_log`` -- counts per
 		status plus the list of well IDs in each status.
 		"""
-		counts = {UNVISITED: 0, DISPENSING: 0, WAIT: 0, COMPLETED: 0, SKIPPED: 0}
+		counts = {UNVISITED: 0, DISPENSING: 0, WAIT: 0, COMPLETED: 0,
+			SKIPPED: 0, RESERVED: 0}
 		wells_by_status = {k: [] for k in counts}
 		for (x, y), status in self.status_grid.items():
 			counts[status] += 1
@@ -1406,6 +1441,7 @@ class WellPlateProgress(tk.Frame):
 					cx - well_radius, cy - well_radius,
 					cx + well_radius, cy + well_radius,
 					fill=fill, outline="#444", width=border,
+					dash=self._dash_for(x, y, status),
 				)
 				self._well_items[(x, y)] = oval
 				text_id = self.canvas.create_text(
@@ -1439,7 +1475,21 @@ class WellPlateProgress(tk.Frame):
 	def _border_for(self, x, y, status):
 		if status == DISPENSING and self._pulse_thick:
 			return 3
+		if status == RESERVED:
+			# Slightly thicker outline so the dashed pattern reads
+			# clearly at small well sizes.
+			return 2
 		return 1
+
+	def _dash_for(self, _x, _y, status):
+		"""Return the canvas-item dash tuple (or empty string for a
+		solid line) for a well's outline. RESERVED wells get a
+		dashed border so the "intentionally left empty" treatment
+		reads at a glance, distinct from the SKIPPED red error fill.
+		"""
+		if status == RESERVED:
+			return (4, 3)
+		return ""
 
 	def _fill_glyph_for(self, x, y, status):
 		"""Return ``(fill_hex, glyph_text, glyph_color_hex)`` for a well.
@@ -1464,6 +1514,7 @@ class WellPlateProgress(tk.Frame):
 		fill, glyph, glyph_color = self._fill_glyph_for(x, y, status)
 		self.canvas.itemconfig(
 			oval, fill=fill, width=self._border_for(x, y, status),
+			dash=self._dash_for(x, y, status),
 		)
 		text_id = self._well_text_items.get((x, y))
 		if text_id is not None:
@@ -1612,6 +1663,10 @@ class WellPlateProgress(tk.Frame):
 			reason = self.error_reasons.get(xy, "")
 			if reason:
 				lines.append(f"Reason: {reason}")
+		if status == RESERVED:
+			reason = self.error_reasons.get(xy, "")
+			if reason:
+				lines.append(reason)
 		# Planned per-well dispense duration. Actual per-well timing isn't
 		# tracked yet (every well uses the same pump_time); leave a TODO
 		# in the surrounding text if/when we start logging actuals.

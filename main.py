@@ -805,6 +805,19 @@ class FractionatorState:
 	current_series_sequence: int = 0
 	well_records: list = field(default_factory=list)
 
+	# Wells the operator has marked as "reserved" — left empty during
+	# automated fractionation so they can be hand-filled with standards,
+	# blanks, or other non-fractionated material. Canonical well IDs
+	# (e.g. "A1", "H12"). Edited mid-run through Settings → Fractionation
+	# Parameters; the state machine applies the new list at the NEXT
+	# inter-sample boundary so the current series finishes against the
+	# list it started with. ``effective_skip_wells`` is the snapshot used
+	# by the routing path; ``pending_skip_wells`` is None except in the
+	# brief window between the dialog Save and the next Continue to Next
+	# Sample (or End Run).
+	effective_skip_wells: list = field(default_factory=list)
+	pending_skip_wells: object = None
+
 	# Multi-plate run support. ``current_plate_id`` updates on each plate
 	# swap. ``wells_on_current_plate`` resets to 0 on each swap so the
 	# plate-full detection works on the live plate, not historical totals.
@@ -1446,6 +1459,9 @@ class AutomatedFrame(tk.Frame):
 		self.purge_time_te = _StringVarHolder(app.purge_time_var)
 		self.peristaltic_rate_te = _StringVarHolder(app.peristaltic_rate_var)
 		self.max_waste_te = _StringVarHolder(app.max_waste_volume_var)
+		# Comma-joined list of reserved wells; mirrors the dialog field
+		# via the shared App-level StringVar.
+		self.skip_wells_te = _StringVarHolder(app.skip_wells_var)
 
 		# Begin Fractionation -- the run-launch button. (The previous
 		# "Move (jog to Plate-start coords)" button was removed because the
@@ -1583,6 +1599,7 @@ class AutomatedFrame(tk.Frame):
 			"waste_bin_carriage": self.waste_carriage_te,
 			"waste_bin_x_extent": self.waste_x_extent_te,
 			"waste_bin_y_extent": self.waste_y_extent_te,
+			"skip_wells": self.skip_wells_te,
 		}.get(field)
 
 	def end_run_clicked(self):
@@ -2008,10 +2025,52 @@ class AutomatedFrame(tk.Frame):
 		self.table_te.set(f"{15 - a1_x * 0.1:.2f}")
 		self.carriage_te.set(f"{0.1 * (y_dim - a1_y) - 0.5:.2f}")
 
+		# Drop any reserved wells that fall outside the new plate's
+		# row/col footprint. A smaller plate makes previously valid
+		# entries (e.g. H12 on a 96-well plate vs a 6-well plate)
+		# impossible to honour; rather than silently keeping the
+		# stale entries we trim and tell the operator.
+		self._prune_skip_wells_for_new_plate(n_rows, n_cols)
+
 		# Remember what was loaded so the RunLogger can include the file
 		# path + inline JSON contents in system.start.state.json.
 		self._loaded_labware_path = path
 		self._loaded_labware_data = data
+
+	def _prune_skip_wells_for_new_plate(self, n_rows, n_cols):
+		"""Drop any reserved wells that fall outside the freshly loaded
+		labware's row/col footprint. Notifies the operator if anything
+		was removed; silent no-op otherwise.
+		"""
+		app = self.app
+		raw = app.skip_wells_var.get()
+		if not raw.strip():
+			return
+		ok, parsed = validation.parse_skip_wells(raw)
+		if not ok:
+			return
+		surviving = []
+		dropped = []
+		for token in parsed:
+			ok_id, val = validation.parse_well_id(token)
+			if not ok_id:
+				dropped.append(token)
+				continue
+			col_idx, row_idx = val
+			if row_idx >= n_rows or col_idx >= n_cols:
+				dropped.append(token)
+			else:
+				surviving.append(token)
+		if not dropped:
+			return
+		app.skip_wells_var.set(", ".join(surviving))
+		messagebox.showinfo(
+			"Skip list updated",
+			f"{len(dropped)} well(s) removed from skip list (out of "
+			f"range for new plate). Please review."
+			f"\n\nRemoved: {', '.join(dropped)}",
+			parent=self,
+		)
 
 	def begin_clicked(self):
 		"""Validate every Begin-time input; show inline + summary errors on
@@ -2192,6 +2251,30 @@ class AutomatedFrame(tk.Frame):
 				"Cannot start fractionation",
 				"Please correct the following:\n\n"
 				+ "\n".join("• " + e for e in errors),
+				parent=self,
+			)
+			return
+
+		# Skip-wells pre-flight: parse the saved list against the live
+		# plate dims and refuse to start if the operator has reserved
+		# every well on the plate (which would leave no well for
+		# collection).
+		sw_ok, sw_parsed = validation.parse_skip_wells(
+			self.app.skip_wells_var.get(),
+			rows=rows_v, cols=cols_v,
+		)
+		if not sw_ok:
+			messagebox.showerror(
+				"Cannot start fractionation",
+				f"Skip wells: {sw_parsed}",
+				parent=self,
+			)
+			return
+		if sw_parsed and len(sw_parsed) >= rows_v * cols_v:
+			messagebox.showerror(
+				"Cannot start fractionation",
+				"All wells on this plate are in the skip list — no "
+				"wells available for collection.",
 				parent=self,
 			)
 			return
@@ -3736,6 +3819,14 @@ class App(tk.Tk):
 		# writes here and the Run Parameters Prime time entry mirrors
 		# it live.
 		self.prime_time_var = tk.StringVar(value="60")
+		# Comma-joined list of well IDs to skip during automated
+		# fractionation (reserved wells for blanks / standards /
+		# manual additions). Lives at App level so the Fractionation
+		# Parameters dialog and config_store's get_values/set_values
+		# round-trip share a single source of truth. The Settings
+		# dialog parses the string into a canonical list at Save and
+		# pushes the result back via _commit_skip_wells.
+		self.skip_wells_var = tk.StringVar(value="")
 		# Skip flag for the inter-sample purge workflow. Toggled via the
 		# Tools → Preferences dialog and persisted as a top-level field
 		# in config.json (not under last_used).
@@ -4431,6 +4522,10 @@ class App(tk.Tk):
 
 		btn_row = tk.Frame(body)
 		btn_row.pack(fill=tk.X, pady=(4, 0))
+		# Saved flag read by _after_param_dialog's destroy handler so
+		# post-save side effects (e.g. skip-wells canonicalisation) do
+		# not run when the operator clicks Cancel.
+		dlg._param_saved = False
 		def _cancel(_e=None):
 			# Revert every var to its pre-open snapshot.
 			for _te, v, _val, _lbl in entries:
@@ -4439,6 +4534,7 @@ class App(tk.Tk):
 		def _save(_e=None):
 			if not _validate_all(surface_errors=True):
 				return
+			dlg._param_saved = True
 			dlg.destroy()
 		ttk.Button(btn_row, text="Cancel", command=_cancel).pack(
 			side=tk.LEFT, padx=4)
@@ -4463,8 +4559,28 @@ class App(tk.Tk):
 		On Save the dialog also persists last_used so the next launch
 		picks up the new values.
 		"""
+		# Cross-field check for the Skip wells text input. Live-validates
+		# against the currently loaded plate's row/col count and (on
+		# Save success) canonicalises the entry to a sorted dedup'd
+		# comma-joined list in the same var. ``cross_field_check`` runs
+		# on every keystroke via the dialog's trace_add wiring, so the
+		# operator sees the error indicator flip live.
+		def _skip_wells_check(entries):
+			by_var = {id(v): te for te, v, _val, _lbl in entries}
+			skip_te = by_var.get(id(self.skip_wells_var))
+			if skip_te is None:
+				return True
+			rows_v, cols_v = self._current_plate_dims_for_skip_check()
+			ok, parsed = validation.parse_skip_wells(
+				self.skip_wells_var.get(), rows=rows_v, cols=cols_v)
+			if not ok:
+				skip_te.show_error(parsed)
+				return False
+			skip_te.clear_error()
+			return True
 		dlg = self._modal_param_dialog(
 			title="Fractionation Parameters",
+			cross_field_check=_skip_wells_check,
 			sections=[
 				("Pump", [
 					("Pump rate (mL/hr — see your fractionation pump spec):",
@@ -4482,13 +4598,74 @@ class App(tk.Tk):
 						"from the tube to ~5 cm below the syringe "
 						"dispenser. The Manual mode Prime Time "
 						"Calibration tool can measure this for you."),
+					("Skip wells (optional):", self.skip_wells_var,
+						None,
+						"Wells to leave empty during automated "
+						"fractionation (reserved for standards, blanks, "
+						"or manual additions). Comma-separated well "
+						"IDs, e.g., A1, B4, H12."),
 				]),
 			],
 		)
-		# After Save: persist last_used + refresh anything that watches
-		# these values. Wait for the dialog to close, then act if the
-		# values changed.
-		self._after_param_dialog(dlg, refresh_table_view=False)
+		# After Save: canonicalise skip_wells, push to the state
+		# machine, persist last_used, and refresh anything that
+		# watches the values. Wait for the dialog to close, then act
+		# if the values changed.
+		self._after_param_dialog(dlg, refresh_table_view=False,
+			extra_on_save=self._commit_skip_wells_from_var)
+
+	def _current_plate_dims_for_skip_check(self):
+		"""Return ``(rows, cols)`` parsed from AutomatedFrame's live
+		Plate Parameters entries, or ``(None, None)`` if either field
+		is blank/invalid. Used by the Skip wells validator so an
+		operator who hasn't loaded labware yet can still type a list
+		(it stays syntactic-only until rows/cols are known)."""
+		af = getattr(self, "automated_frame", None)
+		if af is None:
+			return None, None
+		rows_ok, rows_v = validation.rows(af.rows_text_entry.get())
+		cols_ok, cols_v = validation.cols(af.cols_text_entry.get())
+		return (rows_v if rows_ok else None,
+			cols_v if cols_ok else None)
+
+	def _commit_skip_wells_from_var(self):
+		"""After a successful Fractionation Parameters Save, reparse
+		the skip_wells_var, write the canonical (deduplicated,
+		uppercased) form back to the var, and propagate the new list
+		to the run-state machine.
+
+		If a run is in flight, the new list is queued on
+		``state.pending_skip_wells`` and applied at the next inter-
+		sample boundary (Continue to Next Sample / Continue to Next
+		Plate). If the run is idle, ``state.effective_skip_wells`` is
+		updated immediately.
+		"""
+		rows_v, cols_v = self._current_plate_dims_for_skip_check()
+		ok, parsed = validation.parse_skip_wells(
+			self.skip_wells_var.get(), rows=rows_v, cols=cols_v)
+		if not ok:
+			return
+		canonical = ", ".join(parsed)
+		if canonical != self.skip_wells_var.get():
+			self.skip_wells_var.set(canonical)
+		s = self.state
+		new_list = list(parsed)
+		run_active = s.state not in ("idle",) and (
+			s.phase not in ("idle",) or s.is_paused
+		)
+		if not run_active:
+			s.effective_skip_wells = new_list
+			s.pending_skip_wells = None
+			return
+		if new_list == s.effective_skip_wells:
+			s.pending_skip_wells = None
+			return
+		s.pending_skip_wells = new_list
+		messagebox.showinfo(
+			"Skip list updated",
+			"Skip list updated. Changes apply at the next sample.",
+			parent=self,
+		)
 
 	def _waste_bin_geometry_error(self):
 		"""Return the first validation error string for the four
@@ -4631,7 +4808,8 @@ class App(tk.Tk):
 		)
 		self._after_param_dialog(dlg, refresh_table_view=True)
 
-	def _after_param_dialog(self, dlg, *, refresh_table_view):
+	def _after_param_dialog(self, dlg, *, refresh_table_view,
+			extra_on_save=None):
 		"""When the dialog finishes (Save or Cancel), reconcile state.
 
 		Persistence: the AutomatedFrame's existing focus-out save handler
@@ -4641,9 +4819,20 @@ class App(tk.Tk):
 		Table view refresh: bin-geometry edits in the Cleaning dialog
 		need an immediate repaint so the operator sees the new
 		rectangle without waiting for the next mode switch.
+
+		``extra_on_save`` is an optional callable invoked after
+		``_save_last_used`` (and before the table-view refresh). Used
+		by the Fractionation Parameters dialog to canonicalise +
+		propagate the skip-wells list.
 		"""
 		def _on_destroy(_e=None):
 			af = getattr(self, "automated_frame", None)
+			if extra_on_save is not None and getattr(
+					dlg, "_param_saved", False):
+				try:
+					extra_on_save()
+				except Exception as exc:
+					logger.debug("extra_on_save after dialog failed: %s", exc)
 			if af is not None and hasattr(af, "_save_last_used"):
 				try:
 					af._save_last_used()
@@ -6493,6 +6682,44 @@ class App(tk.Tk):
 		_evaluate()
 		return vars_list, frame
 
+	def _format_skip_wells_for_begin_dialog(self):
+		"""Render the operator's reserved-wells list as a single
+		display string for the Begin Fractionation confirmation
+		dialog. Read fresh from ``skip_wells_var`` at every call so a
+		Cancel-edit-reopen cycle reflects the new value (Settings →
+		Fractionation Parameters edits propagate via the same shared
+		StringVar).
+
+		Formatting rules (spec-driven, single truncation):
+		  * Empty list           → ``"None"``
+		  * 1–5 wells            → ``"N (A1, B4, …)"`` — list all
+		  * 6 or more wells      → ``"N (A1, A2, A3, A4, A5, ... and K more)"``
+		    where K = N − 5
+
+		Sort order is snake (column number ascending, then row letter
+		ascending) so the row reads in the same order the snake walks.
+		"""
+		raw = self.skip_wells_var.get()
+		ok, parsed = validation.parse_skip_wells(raw)
+		if not ok or not parsed:
+			return "None"
+		def _key(wid):
+			letters = "".join(c for c in wid if c.isalpha())
+			digits = "".join(c for c in wid if c.isdigit())
+			try:
+				col_n = int(digits)
+			except ValueError:
+				col_n = 0
+			return (col_n, letters)
+		sorted_ids = sorted(parsed, key=_key)
+		n = len(sorted_ids)
+		if n <= 5:
+			return f"{n} ({', '.join(sorted_ids)})"
+		return (
+			f"{n} ({', '.join(sorted_ids[:5])}, ... "
+			f"and {n - 5} more)"
+		)
+
 	def _show_begin_fractionation_dialog(self, *,
 			sample_id, plate_id,
 			waste_rows, over_capacity):
@@ -6519,10 +6746,13 @@ class App(tk.Tk):
 		body.pack(fill=tk.BOTH, expand=True)
 
 		# Header: the two identifiers the operator is most likely to
-		# have mis-set when starting a new run.
+		# have mis-set when starting a new run, plus the reserved-
+		# wells summary so the skip list gets one last glance before
+		# the run commits.
 		id_table = self._build_kv_table(body, [
 			("Sample ID:", sample_id),
 			("Plate ID:", plate_id),
+			("Skipped wells:", self._format_skip_wells_for_begin_dialog()),
 		], value_anchor="w")
 		id_table.pack(fill=tk.X, pady=(0, 8))
 
@@ -6944,6 +7174,14 @@ class App(tk.Tk):
 		s.max_waste_volume_ml = max_waste_volume_ml
 		s.volume_per_well = volume
 		s.prime_time_s = float(prime_time_s)
+		# Snapshot the operator's reserved-wells list at run start so
+		# the routing path uses a stable list. Mid-run edits go
+		# through state.pending_skip_wells (queued in the Settings
+		# dialog Save) and apply at the next sample boundary.
+		ok_sw, parsed_sw = validation.parse_skip_wells(
+			self.skip_wells_var.get(), rows=rows, cols=cols)
+		s.effective_skip_wells = list(parsed_sw) if ok_sw else []
+		s.pending_skip_wells = None
 
 		# Snapshot the waste counter at run start so end.json can report
 		# how much waste this specific run added (independent of
@@ -7459,6 +7697,93 @@ class App(tk.Tk):
 		self._update_run_control_buttons()
 		self.set_status("Run aborted from priming. System idle.")
 
+	# ---- Skip-wells advancement helpers ------------------------------
+
+	def _is_skipped_well(self, x, y):
+		"""True if (x, y) — 0-based column / row — is in the active
+		``state.effective_skip_wells`` list."""
+		well_id = f"{chr(ord('A') + y)}{x + 1}"
+		return well_id in self.state.effective_skip_wells
+
+	def _advance_snake_state(self):
+		"""Pure state advancement: bumps s.x / s.y / s.carriage_forwards
+		one column-wise snake step WITHOUT firing any motor moves.
+
+		Mirrors the state-only portion of ``_snake_step``. Returns
+		True if the new (s.x, s.y) is still on the plate, False if
+		the snake walked off (caller handles the off-plate transition).
+		"""
+		s = self.state
+		if s.carriage_forwards:
+			s.y += 1
+			if s.y >= s.ROWS:
+				s.y = s.ROWS - 1
+				s.x += 1
+				s.carriage_forwards = False
+		else:
+			s.y -= 1
+			if s.y < 0:
+				s.y = 0
+				s.x += 1
+				s.carriage_forwards = True
+		return s.x < s.COLS
+
+	def _skip_advance_if_needed(self):
+		"""After landing at a snake well, advance the state past any
+		entries that fall in ``state.effective_skip_wells``. For each
+		skipped well encountered:
+
+		  * append a ``status="well_skipped"`` row to ``log.csv`` with
+		    the well's canonical ID,
+		  * paint the well as RESERVED in the plate preview (so the
+		    operator sees which positions were left empty),
+		  * advance the snake state without firing motor moves.
+
+		When at least one skipped well was passed, the motors are
+		still at the previous (pre-skip) position; issue an absolute
+		move to the final non-skipped well so the needle ends up
+		where the state machine believes it is.
+
+		Returns True if the needle is now parked at a non-skipped
+		on-plate well, False if the snake walked off the plate while
+		skip-advancing (caller should fire the plate-full /
+		total-reached path).
+		"""
+		s = self.state
+		advanced = False
+		while self._is_skipped_well(s.x, s.y):
+			well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+			if self.run_logger is not None:
+				try:
+					self.run_logger.well_skipped(well_id)
+				except Exception as exc:
+					logger.warning(
+						"Failed to log well_skipped %s: %s",
+						well_id, exc)
+			try:
+				self.automated_frame.progress.well_reserved(s.x, s.y)
+			except Exception:
+				pass
+			if not self._advance_snake_state():
+				return False
+			advanced = True
+		if advanced:
+			if self.plate_orientation == "portrait":
+				target_x_cm = s.table_start_cm + s.y * s.well_size
+				target_y_cm = s.carriage_start_cm - s.x * s.well_size
+			else:
+				target_x_cm = s.table_start_cm + s.x * s.well_size
+				target_y_cm = s.carriage_start_cm + s.y * s.well_size
+			well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
+			self.set_status(
+				f"Skipping reserved wells; moving to {well_id}…")
+			self.move_to_positions(
+				table_dist=target_x_cm,
+				carriage_dist=target_y_cm,
+				is_transit=True,
+			)
+		return True
+
 	def _begin_first_phase(self):
 		"""Fire the run's first dispense phase. Called by the priming
 		workflow's Begin Run, by which time the needle is parked at
@@ -7488,6 +7813,13 @@ class App(tk.Tk):
 		else:
 			self._set_phase("collect")
 			self.set_status("Fractionation in progress...")
+			# Skip-advance the initial (A1) starting position if the
+			# operator has reserved it. The skip helper logs +
+			# repaints each entry and may also issue an absolute
+			# motor move to the first non-skipped well.
+			if not self._skip_advance_if_needed():
+				self._auto_pause_total_reached()
+				return
 			self.pump_liquid()
 		self._update_run_control_buttons()
 
@@ -7587,6 +7919,12 @@ class App(tk.Tk):
 					if not self._snake_step_absolute():
 						self._auto_pause_total_reached()
 						return
+				# Skip-advance the just-landed snake position if the
+				# operator has reserved it (and any consecutive
+				# reserved wells after it).
+				if not self._skip_advance_if_needed():
+					self._auto_pause_total_reached()
+					return
 				self.set_status("Fractionation in progress...")
 				self.pump_liquid()
 			else:
@@ -7661,6 +7999,16 @@ class App(tk.Tk):
 
 		if s.is_paused:
 			return
+
+		# Skip-advance the just-landed snake position if it's in the
+		# operator's reserved list (and any consecutive reserved
+		# wells after it). The helper logs + repaints each entry and
+		# moves absolutely to the final non-skipped position. A
+		# False return means the snake walked off the plate while
+		# skip-advancing — fall through to the off-plate handler
+		# below.
+		if on_plate:
+			on_plate = self._skip_advance_if_needed()
 
 		if not on_plate:
 			# Plate fully traversed -- should be unreachable since the
@@ -8033,6 +8381,13 @@ class App(tk.Tk):
 		or via the purge workflow's on_done callback (after the three
 		modal phases complete)."""
 		s = self.state
+		# Apply any pending skip_wells edit at this inter-sample
+		# boundary so the previous series finishes with the list it
+		# started with. The Settings dialog queues changes here when
+		# a run is in flight; the operator was notified at queue time.
+		if s.pending_skip_wells is not None:
+			s.effective_skip_wells = list(s.pending_skip_wells)
+			s.pending_skip_wells = None
 		# Clear any mid-pause recalibration flag carried over from the
 		# auto-pause -- Continue advances the run, so the Resume
 		# confirmation path is no longer relevant.
@@ -8083,6 +8438,11 @@ class App(tk.Tk):
 			if not self._snake_step():
 				# Off the plate -- shouldn't happen post-capacity-check, but
 				# fall back to auto-pause if it does.
+				self._auto_pause_total_reached()
+				return
+			# Skip-advance if the new sample's first snake well is in
+			# the reserved list.
+			if not self._skip_advance_if_needed():
 				self._auto_pause_total_reached()
 				return
 			self.pump_liquid()
@@ -10098,6 +10458,12 @@ class App(tk.Tk):
 			# place and collection resumes -- restart the clock.
 			self.automated_frame.progress.resume_elapsed()
 			self.set_status(f"Resuming on plate {new_plate_id}...")
+			# Skip-advance A1 (and any consecutive reserved wells) on
+			# the fresh plate so the same skip pattern applies to
+			# every plate in the session.
+			if not self._skip_advance_if_needed():
+				self._auto_pause_total_reached()
+				return
 			self.pump_liquid()
 			self._update_run_control_buttons()
 

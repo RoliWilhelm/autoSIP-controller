@@ -36,6 +36,7 @@ FIELDS = (
 	"table_start", "carriage_start",
 	"waste_bin_table", "waste_bin_carriage",
 	"waste_bin_x_extent", "waste_bin_y_extent",
+	"skip_wells",
 	"labware_file",
 )
 

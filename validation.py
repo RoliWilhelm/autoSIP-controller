@@ -241,6 +241,96 @@ def waste_bin_extent(text, *, allow_empty=False):
 	)
 
 
+import re as _re
+
+_WELL_ID_RE = _re.compile(r"^[A-Z]+[0-9]+$")
+
+
+def parse_well_id(text):
+	"""Parse a single canonical well id (e.g. ``"A1"``, ``"H12"``)
+	into a ``(col_idx, row_idx)`` 0-based tuple. Returns
+	``(True, (col_idx, row_idx))`` on success or
+	``(False, error_message)``.
+
+	The convention matches the snake state machine: ``s.x`` is the
+	1-based column number minus 1 and ``s.y`` is the 0-based row
+	index from ``A`` (so ``A1`` → ``(0, 0)``, ``H12`` → ``(11, 7)``).
+	"""
+	stripped = (text or "").strip().upper()
+	if stripped == "":
+		return False, "Well id is empty"
+	if not _WELL_ID_RE.match(stripped):
+		return False, f"{stripped!r} is not a valid well id"
+	letters = "".join(c for c in stripped if c.isalpha())
+	digits = "".join(c for c in stripped if c.isdigit())
+	if len(letters) > 2:
+		return False, f"{stripped!r} row letter too long"
+	row_idx = 0
+	for ch in letters:
+		row_idx = row_idx * 26 + (ord(ch) - ord("A") + 1)
+	row_idx -= 1
+	try:
+		col_idx = int(digits) - 1
+	except ValueError:
+		return False, f"{stripped!r} column number invalid"
+	if col_idx < 0:
+		return False, f"{stripped!r} column number must be ≥ 1"
+	return True, (col_idx, row_idx)
+
+
+def parse_skip_wells(text, *, rows=None, cols=None):
+	"""Parse the operator-entered comma-separated skip-well list.
+
+	Returns ``(True, [canonical_ids])`` on success or
+	``(False, error_message)``. Input is split on commas, whitespace-
+	stripped, uppercased, deduplicated, and (if ``rows`` and
+	``cols`` are supplied) bounds-checked against the plate
+	dimensions. Empty input is accepted and returns an empty list.
+
+	When ``rows`` / ``cols`` are ``None``, only the syntactic check
+	runs — call sites that don't have plate dims yet can still
+	round-trip the list through persistence without losing data.
+	"""
+	if text is None:
+		return True, []
+	raw = text.strip()
+	if raw == "":
+		return True, []
+	seen = []
+	canonical = []
+	bad = []
+	out_of_range = []
+	for token in raw.split(","):
+		token = token.strip().upper()
+		if token == "":
+			continue
+		ok, parsed = parse_well_id(token)
+		if not ok:
+			bad.append(token)
+			continue
+		col_idx, row_idx = parsed
+		if rows is not None and cols is not None:
+			if row_idx >= rows or col_idx >= cols:
+				out_of_range.append(token)
+				continue
+		if token not in seen:
+			seen.append(token)
+			canonical.append(token)
+	if bad:
+		return False, (
+			"Invalid well id(s): "
+			+ ", ".join(sorted(set(bad)))
+			+ ". Use canonical IDs like A1, B4, H12."
+		)
+	if out_of_range:
+		return False, (
+			"Out-of-range well id(s) for the current plate "
+			f"({rows} rows × {cols} cols): "
+			+ ", ".join(sorted(set(out_of_range)))
+		)
+	return True, canonical
+
+
 def _parse_identifier(text, label):
 	text = (text or "").strip()
 	if text == "":
