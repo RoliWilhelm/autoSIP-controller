@@ -86,7 +86,7 @@ Two consequences follow from that convention:
   by jogging the needle in Manual mode (see
   [Operation Instructions §6.3.1](docs/operation_instructions.md#631-calibrating-plate-start-and-waste-bin-coordinates)).
 
-- **Waste bin position** (Tools → Cleaning Parameters… → *Waste bin
+- **Waste bin position** (Settings → Cleaning Parameters… → *Waste bin
   position (x-axis)* / *Waste bin position (y-axis)*) is the X, Y
   position of the **CENTER** of the waste bin rectangle. Manual
   mode's Position Calibration Tool prompts the operator to jog the
@@ -95,7 +95,7 @@ Two consequences follow from that convention:
   same two values are mirrored in Cleaning mode — editing them in
   either place updates the other.
 
-- **Waste bin size** (Tools → Cleaning Parameters… → *Waste bin size
+- **Waste bin size** (Settings → Cleaning Parameters… → *Waste bin size
   (X × Y, cm)*) — two optional extents giving the bin's full width
   and height. The rectangle spans `± extent/2` around the center on
   each axis. When both extents are 0 (default), every move-to-waste
@@ -224,12 +224,13 @@ suffix. End Run implicitly exits bulk mode.
 - **Starting well position (y-axis)** — Y position of well A1, `[0.0, 15.0]` cm.
 
 The previous *Waste bin position (x-axis)* and *(y-axis)* rows
-moved out of Plate Parameters and now live in **Tools → Cleaning
+moved out of Plate Parameters and now live in **Settings → Cleaning
 Parameters…** alongside the rest of the waste-bin geometry; see
-"Tools menu" below.
+"Settings menu" below.
 
-**Tools menu — Pump Parameters…** (Razel R-200 fractionation pump settings
-used during fractionation):
+**Settings menu — Fractionation Parameters…** (Razel R-200
+fractionation pump settings and reserved-well list used during
+fractionation):
 
 - **Pump rate (mL/hr)** — float in `[0.1, 600.0]`. Match the value
   to your fractionation pump's gear-set.
@@ -242,13 +243,33 @@ used during fractionation):
   long the fractionation pump runs to walk fractionation solution from
   the tube to the dispenser tip. Cleaning mode's *Prime Time
   Calibration Tool* measures this empirically.
+- **Skip wells (optional)** — comma-separated list of canonical
+  well IDs (e.g. `A1, B4, H12`) to leave empty during automated
+  fractionation, reserved for the operator to fill manually with
+  standards, blanks, or other non-fractionated material after the
+  run. The list applies uniformly to every sample and every plate
+  in the session. At Save the input is uppercased, deduplicated,
+  and bounds-checked against the loaded labware's row × column
+  count; invalid or out-of-range entries refuse the Save and
+  surface an inline error naming the offending IDs. *Number of
+  fractions* counts collected fractions only — a 10-fraction
+  request with `H1` reserved traverses 11 snake positions and
+  collects 10 (A1–G1 then H2–F2; H1 is logged as `well_skipped`
+  but never visited by the dispenser). The plate preview paints
+  reserved wells with a sandy fill, dashed border, and `—` glyph;
+  the hover tooltip reads *"Skipped (reserved for blank/standard)"*.
+  Mid-run edits queue for the next inter-sample boundary and
+  surface a *"Skip list updated. Changes apply at the next sample."*
+  notice; the current sample finishes with the list it started
+  with. Loading a smaller labware spec drops out-of-range entries
+  automatically and names which were removed.
 
 Save persists the values to `config.json`; Cancel reverts the dialog
 to the values it opened with. Mid-run pump-rate changes apply to the
 next dispense (the in-flight dispense uses the rate captured when
 it started).
 
-**Tools menu — Cleaning Parameters…** (Adafruit 3910 peristaltic
+**Settings menu — Cleaning Parameters…** (Adafruit 3910 peristaltic
 pump and waste-bin geometry, used during inter-sample purges,
 manual purges, and Cleaning Purge):
 
@@ -286,9 +307,14 @@ hint banner appears at the top of the Automated panel:
 starting a run."* The banner dismisses itself once the relocated
 fields are populated. Clicking **Begin Fractionation** with any
 required pump/cleaning field still blank surfaces a targeted dialog
-that names the missing fields and the Tools entry to open.
+that names the missing fields and the Settings entry to open.
 
-The *Skip inter-sample purge* preference lives under **Tools →
+Clicking **Begin Fractionation** opens a confirmation dialog whose
+identity table lists Sample ID, Plate ID, and **Skipped wells** —
+the latter shows `None`, or `N (id1, …, id5, ... and K more)` so the
+reserved list gets one last glance before the run commits.
+
+The *Skip inter-sample purge* preference lives under **Settings →
 Preferences** alongside *Return needle to origin on exit*.
 
 **Run controls** (top-right of the Automated frame):
@@ -421,7 +447,7 @@ maintenance:
 
 - **Waste bin position (x-axis, center)** and **Waste bin position
   (y-axis, center)** — the bin's geometric CENTER in motor cm.
-  Mirrored from Tools → Cleaning Parameters… and Manual mode's
+  Mirrored from Settings → Cleaning Parameters… and Manual mode's
   Waste Bin panel via shared App-level StringVars; edits in any
   surface propagate everywhere and trigger a live repaint of the
   XY-table view.
@@ -429,7 +455,7 @@ maintenance:
   under the position entries. Full width and height of the bin
   rectangle; the rectangle spans `± extent/2` around the center
   on each axis. Bound to the same shared StringVars as the
-  matching X-extent / Y-extent fields in Tools → Cleaning
+  matching X-extent / Y-extent fields in Settings → Cleaning
   Parameters. Default `0` keeps the legacy point-target
   behaviour; non-zero values turn on shortest-path routing into
   the bin interior on every move-to-waste event.
@@ -463,7 +489,7 @@ Clean** instead.
 Between samples in a multi-sample run, autoSIP opens a modal
 sequence that walks the operator through swapping the syringe,
 attaching tubing, cleaning the line, and re-priming. The protocol
-is selected in **Tools → Preferences → Inter-sample purge
+is selected in **Settings → Preferences → Inter-sample purge
 protocol**:
 
 - **Water only (3 phases)** — wash, air clear, prime sample.
@@ -491,7 +517,7 @@ freely). The workflow can be bypassed entirely by ticking
 
 ### Preferences
 
-**Tools → Preferences** exposes six persistent behavioral
+**Settings → Preferences** exposes six persistent behavioral
 preferences. Five are stored in `~/.autosip/config.json`; the
 sensitive notification topic lives in a separate
 `~/.autosip/notification_config.json` that is `.gitignore`d.
@@ -613,6 +639,13 @@ logs/
     advisory, 100% hard stop, operator Reset.
   - `checklist_skipped` — operator clicked Skip Checklist
     (Expert) on a purge or plate-swap dialog.
+  - `well_skipped` — snake routing arrived at a well in the
+    operator's reserved list (Settings → Fractionation
+    Parameters → Skip wells). `well_id` carries the canonical
+    well ID (e.g. `B4`); `plate_x` / `plate_y` /
+    `dispense_duration_s` are blank because no dispense
+    happened. One row per skipped well in snake order, so a
+    reader can verify the controller honoured the list.
 
   See [docs/logging_reference.md](docs/logging_reference.md) for
   the complete column-by-column and status-by-status reference.
