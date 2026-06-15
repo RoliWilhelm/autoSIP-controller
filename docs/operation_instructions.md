@@ -645,6 +645,165 @@ every move-to-waste event in its `plate_x` / `plate_y` columns — not
 the saved center — so per-event provenance reflects where the fluid
 physically went, even when the rectangle is large.
 
+### 6.2.6 Motor Usage Tracking
+
+autoSIP keeps a per-axis tally of stepper-motor activity so the
+operator can correlate measured slippage (the gap between where the
+controller thinks the needle is and where it physically is) against
+cumulative mechanical wear. The data lives in two files under
+`~/.autosip/`:
+
+- **`usage.json`** — live counter snapshot, flushed on every reset
+  event, on application shutdown, and periodically every ~60 s.
+  Tracks four integers — `x_steps`, `y_steps`, `x_reversals`,
+  `y_reversals` — plus the most-recent `last_reset_iso` /
+  `last_reset_trigger` breadcrumb. A missing or corrupt file
+  reinitialises to zero at startup (loader logs a warning rather
+  than crashing).
+- **`usage_history.csv`** — append-only log of every reset event.
+  Columns: `timestamp_iso, x_steps, y_steps, x_reversals,
+  y_reversals, reset_trigger`. `reset_trigger` ∈ `{"manual",
+  "origin_calibration"}`. One row is appended per reset; values
+  carry the counters *immediately before* zeroing so the historical
+  record is preserved across resets.
+
+**Counter semantics.** The step counter is microstep-quantised
+because the motor driver always issues microsteps
+(`style=MICROSTEP`). Both *intent* steps (the move the operator
+requested) and *backlash* steps (the one-shot rotation through the
+lead-screw nut's play on direction reversal) count — both
+contribute to mechanical wear. The Settings → Usage dialog labels
+the column `"Steps (microsteps)"` to make the unit explicit. A
+reversal is counted when one move's direction sign differs from
+the previous non-zero move's sign — reversals are between moves,
+not within a single move (each `move_relative` call has one
+direction).
+
+**Settings → Usage…** Modal dialog showing the live counters in a
+compact two-column table:
+
+| Axis   | Steps (microsteps) | Reversals |
+|--------|--------------------:|-----------:|
+| X-axis | 142,587            | 38         |
+| Y-axis |  98,213            | 27         |
+
+A `Last reset:` line below the table shows the ISO timestamp and
+the trigger label. Three buttons:
+
+- **Export usage history…** — open a Save As dialog, copy
+  `~/.autosip/usage_history.csv` to the chosen location. Useful for
+  archiving or post-analysis.
+- **Reset counters** — confirm; then append the current values to
+  `usage_history.csv` with `reset_trigger="manual"`, zero the live
+  counters (and clear each motor's reversal-direction memory), and
+  refresh the table. The Last reset breadcrumb updates.
+- **Close** — dismiss.
+
+**Auto-reset at Origin Calibration.** When the operator clicks
+Return to Origin during a mid-run pause and confirms Resume on the
+Origin Calibration dialog (§6.3.6), the controller appends a row
+to `usage_history.csv` with `reset_trigger="origin_calibration"`
+and zeroes the counters AFTER the return-to-pause-position move
+(so the steps issued during that move are included in the
+historical record). The status bar surfaces *"Usage counters
+reset (Origin Calibration)."* No confirmation prompt — it is
+implicit in the Origin Calibration workflow.
+
+**Multi-instance caveat.** If two App instances run on the same
+machine simultaneously (unlikely on a dedicated Pi), the last
+writer wins on `usage.json` and earlier activity from the other
+instance may be lost.
+
+### 6.2.7 Slippage Validation Routine
+
+Settings → Slippage Validation… opens a one-time post-build
+characterisation routine that exercises the steppers across
+reversal-heavy, traversal-heavy, and snake-pattern regimes (~60 min
+total) so anyone who constructs an autoSIP can quantify their own
+rig's wear profile and decide how often Origin Calibration is needed
+in practice. The routine is motion-only: the pump is never
+activated, and the routine refuses to open while a fractionation
+run is in flight (End Run first).
+
+**Setup.** Before clicking Start Phase 1:
+
+1. Park the carriage at origin manually (the routine returns to
+   origin between phases via Return to Origin, without manual
+   re-parking — the point is to measure what the controller
+   *thinks* is origin against where it physically is).
+2. Affix a physical reference mark next to the needle's current
+   XY position.
+3. Ensure no sample tube or plate is on the bed.
+
+**Three phases.**
+
+- **Phase 1 — Reversal cycling.** Per axis: 50 cycles of
+  ±10 mm reversals, then 20 cycles of ±50 mm reversals. X first
+  then Y. Stresses backlash takeup and accumulates reversal counts
+  rapidly relative to net motion.
+- **Phase 2 — Full-range traversals.** 30 round trips between
+  origin and `(table_width − 2 cm, table_height − 1 cm)` —
+  ~15 cm × ~11 cm on the stock chassis. Stresses long absolute
+  moves with no direction change between the outbound and return
+  legs of a trip.
+- **Phase 3 — Simulated snake fractionation.** Walks the
+  column-major snake across a virtual 8×12 plate at 0.9 cm well
+  spacing, 2 plates' worth. Reproduces the production motion
+  profile so the slippage signal is comparable to real runs.
+
+**Between phases.** The carriage returns to origin and a
+measurement panel appears asking for `x_offset_mm` and
+`y_offset_mm` — the operator measures the offset of the dispensing
+needle from the reference mark and enters the values (millimetres,
+signed). Clicking **Continue** appends one row to
+`~/.autosip/slippage_validation.csv` with columns
+`phase, timestamp_iso, x_steps, y_steps, x_reversals, y_reversals,
+x_offset_mm, y_offset_mm`. The step / reversal columns carry the
+*absolute* counter values at the moment of the measurement, NOT
+phase deltas — the user computes deltas in post-analysis.
+
+**Controls during a phase.**
+
+- **Skip to next phase** — flag the current phase to bail. The
+  motion loop sees the skip on its next checkpoint, returns to
+  origin, and jumps straight to the measurement panel for the
+  phase that was running.
+- **Cancel** — two-step: first press during a phase pauses the
+  loop (the button's label flips to **Quit** and a **Resume**
+  button appears); pressing **Quit** while paused confirms the
+  abort, returns the carriage to origin, and closes the dialog.
+  Already-saved phase rows on disk are preserved. **Resume**
+  clears the pause; motion continues from exactly where it
+  stopped (the counters keep accumulating without double-counting).
+
+**On all-phases complete.** A summary screen shows per-axis totals
+across all three phases (absolute counter values), the sum of
+measured offsets per axis, the CSV path, and a regression hint:
+
+> *"Run regression on cumulative steps and reversals against
+> measured offset to estimate per-step and per-reversal slippage
+> coefficients."*
+
+The controller does **not** compute the regression — this is a
+data-collection routine, not an analysis routine. Run the analysis
+externally in whatever statistical tool the operator prefers
+(R / Python / Excel).
+
+**Interaction with Usage tracking.** The Slippage Validation routine
+does **not** reset the Usage counters; it reads them. A typical
+workflow:
+
+1. Open Settings → Usage and click Reset counters (counters → 0,
+   `usage_history.csv` gains a `manual` row).
+2. Open Settings → Slippage Validation and run all three phases.
+3. Each phase row captures the absolute counter values at
+   measurement time, so phase deltas (`phase2.x_steps -
+   phase1.x_steps`, etc.) are recoverable in post-analysis.
+
+Repeat the routine on different days; new rows append to the same
+CSV with new timestamps, building longitudinal data across
+sessions.
+
 ## 6.3 Common Workflows
 
 The following five workflows cover the operations most autoSIP users

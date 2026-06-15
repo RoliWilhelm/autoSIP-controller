@@ -19,6 +19,7 @@ import hardware
 import styling
 import validation
 import config_store
+import usage_store
 from styling import (
 	FONTS, PALETTE, apply_style, bind_dynamic_wraplength,
 	make_bimodal_distribution_canvas, make_bucket_canvas,
@@ -238,6 +239,25 @@ class StepperMotor:
 		# Direction the needle is moving during fractionation
 		self.forwards = True
 
+		# ---- Usage tracking ------------------------------------------
+		# Cumulative count of microsteps issued to the motor (intent
+		# + backlash steps both count — every microstep is real wear
+		# on the lead screw and motor). Restored from
+		# ``~/.autosip/usage.json`` at App init and reset only via the
+		# Settings → Usage dialog or the Origin Calibration auto-
+		# reset hook. The counter is microstep-quantised because the
+		# motor driver always issues microsteps (style=MICROSTEP).
+		self.total_microsteps_taken = 0
+		# Reversal counter: incremented when a move's direction sign
+		# differs from the previous non-zero move's direction sign.
+		# Counted between consecutive moves, not within a single move
+		# (each ``move_relative`` call has one direction).
+		self.reversal_count = 0
+		# Sign of the last non-zero move (-1, 0, +1). 0 means "no
+		# prior move yet" — the first non-zero move does not count as
+		# a reversal regardless of its direction.
+		self._last_move_sign = 0
+
 		# Step-rate configuration. ``fractionation_step_delay`` is the
 		# slow per-microstep sleep used for well-to-well dispensing
 		# moves (and for every move when ``variable_speed_enabled`` is
@@ -321,6 +341,19 @@ class StepperMotor:
 			self.forwards = True
 
 		total_steps = intent_steps + extra_steps
+
+		# Usage tracking: count microsteps + reversals before the
+		# step loop fires. ``abs(total_steps)`` is exactly the
+		# number of ``onestep`` calls the loop will make below
+		# (intent + backlash microsteps both count as real wear).
+		# A zero-step call (``angle == 0`` with no backlash) does
+		# not advance any counters.
+		if total_steps != 0:
+			self.total_microsteps_taken += abs(total_steps)
+			move_sign = 1 if total_steps > 0 else -1
+			if self._last_move_sign != 0 and move_sign != self._last_move_sign:
+				self.reversal_count += 1
+			self._last_move_sign = move_sign
 
 		# FORWARD if net motion is positive and motor not reversed, or
 		# negative and motor reversed. Sign of total_steps matches sign of
@@ -3711,6 +3744,34 @@ class App(tk.Tk):
 			reverse=True, name="carriage",
 		)
 
+		# Restore the persistent motor-usage counters and the
+		# ``last_reset_iso`` / ``last_reset_trigger`` breadcrumb. The
+		# table_motor drives the X-axis (table lead screw) and the
+		# carriage_motor drives the Y-axis (carriage lead screw); the
+		# usage file uses ``x_steps`` / ``y_steps`` naming consistent
+		# with the Settings → Usage dialog. Missing / corrupt
+		# ``usage.json`` falls back to zeros — usage_store.load_usage()
+		# never raises.
+		self.usage_data = usage_store.load_usage()
+		self.table_motor.total_microsteps_taken = int(
+			self.usage_data.get("x_steps", 0))
+		self.table_motor.reversal_count = int(
+			self.usage_data.get("x_reversals", 0))
+		self.carriage_motor.total_microsteps_taken = int(
+			self.usage_data.get("y_steps", 0))
+		self.carriage_motor.reversal_count = int(
+			self.usage_data.get("y_reversals", 0))
+
+		# Periodic checkpoint of the live counters to disk so an
+		# unexpected app crash loses at most one period of activity.
+		# The 60-second cadence matches the spec; ``_usage_flush_ms``
+		# is the constant that pacing reads from so tests and a future
+		# Tools-menu "save now" button can override it.
+		self._usage_flush_ms = 60_000
+		self._usage_flush_after_id = None
+		# Started after Tk's mainloop is up so the first ``after`` lands
+		# inside the running event loop, not the constructor.
+
 		self.state = FractionatorState()
 		self.mode = None
 		self._active_frame = None
@@ -3951,6 +4012,11 @@ class App(tk.Tk):
 		# "manual_abort" rather than just orphaned on disk.
 		self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+		# Kick off the periodic motor-usage checkpoint. Scheduled via
+		# ``after_idle`` so the first ``after(60_000, …)`` lands once
+		# the mainloop is up; subsequent flushes self-reschedule.
+		self.after_idle(self._schedule_usage_flush)
+
 		# Space-bar shortcut: toggle the most-recently-used pump in Manual
 		# mode. Bound at root with ``bind_all`` so it fires regardless of
 		# which widget has focus, but the handler self-gates on mode and
@@ -4003,6 +4069,10 @@ class App(tk.Tk):
 			command=self._show_pump_parameters_dialog)
 		tools.add_command(label="Cleaning Parameters…",
 			command=self._show_cleaning_parameters_dialog)
+		tools.add_command(label="Usage…",
+			command=self._show_usage_dialog)
+		tools.add_command(label="Slippage Validation…",
+			command=self._show_slippage_validation_dialog)
 		tools.add_separator()
 		tools.add_command(label="Open last run folder", command=self._open_last_run)
 		menubar.add_cascade(label="Settings", menu=tools)
@@ -4367,6 +4437,898 @@ class App(tk.Tk):
 		y = self.winfo_rooty() + (self.winfo_height() - default_h) // 3
 		dlg.geometry(f"{default_w}x{default_h}+{max(0, x)}+{max(0, y)}")
 		dlg.minsize(720, 380)
+		dlg.grab_set()
+
+	def _show_usage_dialog(self):
+		"""Settings → Usage. Modal Toplevel showing per-axis cumulative
+		motor activity (microsteps + direction reversals) and the most
+		recent reset breadcrumb. Buttons:
+
+		  * **Export usage history…** — open a Save As dialog and copy
+		    ``~/.autosip/usage_history.csv`` to the chosen location.
+		  * **Reset counters** — confirm, then append the current
+		    values to the history CSV with trigger ``"manual"``,
+		    zero the live counters, and refresh the table.
+		  * **Close** — dismiss.
+
+		Step counters are microstep-quantised (the motor driver
+		issues microsteps exclusively); the column header makes this
+		explicit so the operator doesn't misread a 6-digit number as
+		whole revolutions.
+		"""
+		dlg = tk.Toplevel(self)
+		dlg.title("Motor Usage")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+
+		body = tk.Frame(dlg, padx=18, pady=14)
+		body.pack(fill=tk.BOTH, expand=True)
+
+		tk.Label(body,
+			text="Cumulative motor activity since last reset:",
+			anchor="w", font=FONTS["bold"],
+		).pack(anchor="w", pady=(0, 6))
+
+		# Counter table -- column widths fixed so values right-align
+		# cleanly even when counts grow into 7+ digit territory.
+		table = tk.Frame(body)
+		table.pack(fill=tk.X, pady=(0, 10))
+		header_font = (FONTS["family"], FONTS["size"], "bold")
+		tk.Label(table, text="Axis", anchor="w", width=10,
+			font=header_font).grid(row=0, column=0, sticky="w", padx=4)
+		tk.Label(table, text="Steps (microsteps)", anchor="e", width=20,
+			font=header_font).grid(row=0, column=1, sticky="e", padx=4)
+		tk.Label(table, text="Reversals", anchor="e", width=12,
+			font=header_font).grid(row=0, column=2, sticky="e", padx=4)
+
+		x_steps_lbl = tk.Label(table, anchor="e", width=20)
+		x_steps_lbl.grid(row=1, column=1, sticky="e", padx=4)
+		x_rev_lbl = tk.Label(table, anchor="e", width=12)
+		x_rev_lbl.grid(row=1, column=2, sticky="e", padx=4)
+		tk.Label(table, text="X-axis", anchor="w", width=10).grid(
+			row=1, column=0, sticky="w", padx=4)
+
+		y_steps_lbl = tk.Label(table, anchor="e", width=20)
+		y_steps_lbl.grid(row=2, column=1, sticky="e", padx=4)
+		y_rev_lbl = tk.Label(table, anchor="e", width=12)
+		y_rev_lbl.grid(row=2, column=2, sticky="e", padx=4)
+		tk.Label(table, text="Y-axis", anchor="w", width=10).grid(
+			row=2, column=0, sticky="w", padx=4)
+
+		last_reset_lbl = tk.Label(body, anchor="w", justify="left",
+			fg=PALETTE.get("fg_muted", "#555555"))
+		last_reset_lbl.pack(anchor="w", pady=(0, 12))
+
+		def _refresh_table():
+			x_steps_lbl["text"] = f"{int(self.table_motor.total_microsteps_taken):,}"
+			x_rev_lbl["text"] = f"{int(self.table_motor.reversal_count):,}"
+			y_steps_lbl["text"] = f"{int(self.carriage_motor.total_microsteps_taken):,}"
+			y_rev_lbl["text"] = f"{int(self.carriage_motor.reversal_count):,}"
+			iso = self.usage_data.get("last_reset_iso") or ""
+			trig = self.usage_data.get("last_reset_trigger") or ""
+			if iso:
+				trig_label = "Origin Calibration" if trig == "origin_calibration" else (
+					"manual" if trig == "manual" else trig
+				)
+				last_reset_lbl["text"] = f"Last reset: {iso} ({trig_label})"
+			else:
+				last_reset_lbl["text"] = "Last reset: (never reset on this machine)"
+
+		_refresh_table()
+
+		btn_row = tk.Frame(body)
+		btn_row.pack(fill=tk.X)
+
+		def _export(_e=None):
+			from tkinter import filedialog
+			default_name = (
+				f"autosip_usage_history_"
+				f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+			)
+			dest = filedialog.asksaveasfilename(
+				parent=dlg,
+				title="Export usage history",
+				defaultextension=".csv",
+				initialfile=default_name,
+				filetypes=[("CSV", "*.csv"), ("All files", "*")],
+			)
+			if not dest:
+				return
+			src = usage_store.get_history_path()
+			if not src.exists():
+				messagebox.showinfo(
+					"No history yet",
+					"No reset events have been recorded yet; "
+					"there is no history file to export.",
+					parent=dlg,
+				)
+				return
+			try:
+				import shutil as _shutil
+				_shutil.copyfile(src, dest)
+			except OSError as exc:
+				messagebox.showerror(
+					"Export failed",
+					f"Could not copy usage history to {dest!r}:\n{exc}",
+					parent=dlg,
+				)
+				return
+			messagebox.showinfo(
+				"Export complete",
+				f"Usage history written to {dest}",
+				parent=dlg,
+			)
+
+		def _reset(_e=None):
+			if not messagebox.askyesno(
+				"Reset usage counters",
+				"Reset all usage counters to zero? Current values will "
+				"be appended to the usage history log.",
+				parent=dlg,
+			):
+				return
+			self._reset_usage_counters(trigger="manual")
+			_refresh_table()
+			self.set_status("Usage counters reset.")
+
+		def _close(_e=None):
+			dlg.destroy()
+
+		ttk.Button(btn_row, text="Export usage history…",
+			command=_export).pack(side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text="Reset counters",
+			command=_reset, style="Danger.TButton").pack(
+				side=tk.LEFT, padx=4)
+		ttk.Button(btn_row, text="Close", command=_close,
+			style="Primary.TButton").pack(side=tk.RIGHT, padx=4)
+
+		dlg.bind("<Escape>", _close)
+		dlg.protocol("WM_DELETE_WINDOW", _close)
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
+		dlg.grab_set()
+
+	# ---- Slippage Validation routine ----------------------------------
+
+	# Phase 1 reversal cycling: small-amplitude (10 mm) and large-amplitude
+	# (50 mm) reversal cycles per axis. A "cycle" is one round trip (+amp
+	# then −amp), so 50 cycles of small + 20 cycles of large yields
+	# 70 reversals per axis (the spec's "~400" was approximate; the
+	# routine's value as a wear stressor comes from the absolute step
+	# count, which dominates the offset signal).
+	_SLIPPAGE_PHASE1_SMALL_CYCLES = 50
+	_SLIPPAGE_PHASE1_SMALL_AMP_CM = 1.0   # 10 mm
+	_SLIPPAGE_PHASE1_LARGE_CYCLES = 20
+	_SLIPPAGE_PHASE1_LARGE_AMP_CM = 5.0   # 50 mm
+	# Phase 2 round trips between origin and far corner.
+	_SLIPPAGE_PHASE2_ROUND_TRIPS = 30
+	# Phase 3: virtual 96-well plate, 2 plates' worth.
+	_SLIPPAGE_PHASE3_ROWS = 8
+	_SLIPPAGE_PHASE3_COLS = 12
+	_SLIPPAGE_PHASE3_WELL_SIZE_CM = 0.9
+	_SLIPPAGE_PHASE3_PLATES = 2
+
+	def _show_slippage_validation_dialog(self):
+		"""Settings → Slippage Validation. Multi-phase motion-only
+		routine that exercises the steppers across reversal-heavy,
+		traversal-heavy, and snake-pattern regimes so the operator
+		can correlate measured slippage against cumulative motor
+		usage. The dialog never activates a pump and never touches
+		the run state machine; if a fractionation run is in flight
+		the entry refuses to open (operator must End Run first).
+
+		On Continue after each phase the dialog appends a row to
+		``~/.autosip/slippage_validation.csv``. The Usage counters
+		are NOT reset by this routine — phase rows carry the
+		absolute counter values so the user can compute phase
+		deltas in post-analysis.
+		"""
+		# Refuse to open during an active fractionation run — the
+		# routine drives the motors directly and would step on the
+		# state machine's toes.
+		if self.run_logger is not None or self.state.state not in (
+				"idle",):
+			messagebox.showerror(
+				"Slippage Validation unavailable",
+				"End the current fractionation run before opening "
+				"the Slippage Validation routine.",
+				parent=self,
+			)
+			return
+
+		dlg = tk.Toplevel(self)
+		dlg.title("Slippage Validation")
+		dlg.transient(self)
+		dlg.resizable(False, False)
+		container = tk.Frame(dlg, padx=18, pady=14)
+		container.pack(fill=tk.BOTH, expand=True)
+
+		# Workflow state. ``stage`` walks through:
+		#   "intro" → "phase1_run" → "phase1_measure"
+		#   → "phase2_run" → "phase2_measure"
+		#   → "phase3_run" → "phase3_measure"
+		#   → "summary"
+		# ``cancelled`` / ``paused`` / ``skip_phase`` are checked
+		# between every motor move via the ``_yield`` helper, which
+		# also pumps Tk events (so Cancel/Skip/Resume actually fire
+		# while the synchronous motor loop is running).
+		ctx = {
+			"stage": "intro",
+			"cancelled": False,
+			"paused": False,
+			"skip_phase": False,
+			"current_phase": None,
+			"phase_progress": "",
+			"x_offset_var": tk.StringVar(value=""),
+			"y_offset_var": tk.StringVar(value=""),
+			"summary": [],   # list of (phase, x_off, y_off, x_steps,
+			                 #         y_steps, x_rev, y_rev)
+		}
+
+		# Live status block — phase name + progress + counter snapshot
+		header_lbl = tk.Label(container, text="", anchor="w",
+			font=FONTS["bold"], justify="left", wraplength=520)
+		header_lbl.pack(anchor="w")
+		body_lbl = tk.Label(container, text="", anchor="w",
+			justify="left", wraplength=520)
+		body_lbl.pack(anchor="w", pady=(4, 8))
+		progress_lbl = tk.Label(container, text="", anchor="w",
+			justify="left", fg=PALETTE.get("fg_muted", "#555555"))
+		progress_lbl.pack(anchor="w")
+		counters_lbl = tk.Label(container, text="", anchor="w",
+			justify="left", fg=PALETTE.get("fg_muted", "#555555"))
+		counters_lbl.pack(anchor="w", pady=(0, 8))
+
+		# Measurement input -- packed only during the "measure" stages
+		measure_frame = tk.Frame(container)
+		tk.Label(measure_frame,
+			text="Measure the offset of the dispensing needle from "
+			     "your reference mark and enter the values below "
+			     "(millimetres, signed):",
+			anchor="w", justify="left", wraplength=520,
+		).grid(row=0, column=0, columnspan=2, sticky="w",
+			pady=(0, 6))
+		tk.Label(measure_frame, text="x_offset_mm:",
+			anchor="e").grid(row=1, column=0, sticky="e", padx=(0, 6))
+		x_off_entry = ttk.Entry(measure_frame, width=12,
+			textvariable=ctx["x_offset_var"])
+		x_off_entry.grid(row=1, column=1, sticky="w")
+		tk.Label(measure_frame, text="y_offset_mm:",
+			anchor="e").grid(row=2, column=0, sticky="e",
+				padx=(0, 6), pady=(4, 0))
+		y_off_entry = ttk.Entry(measure_frame, width=12,
+			textvariable=ctx["y_offset_var"])
+		y_off_entry.grid(row=2, column=1, sticky="w", pady=(4, 0))
+
+		btn_row = tk.Frame(container)
+		btn_row.pack(fill=tk.X, pady=(10, 0))
+
+		primary_btn = ttk.Button(btn_row, text="Start Phase 1",
+			style="Primary.TButton")
+		primary_btn.pack(side=tk.RIGHT, padx=4)
+		skip_btn = ttk.Button(btn_row, text="Skip to next phase")
+		skip_btn.pack(side=tk.RIGHT, padx=4)
+		cancel_btn = ttk.Button(btn_row, text="Cancel",
+			style="Danger.TButton")
+		cancel_btn.pack(side=tk.LEFT, padx=4)
+		# Resume button: only visible while paused. Packs next to
+		# Cancel; ``pack_forget`` hides it for every other state.
+		resume_btn = ttk.Button(btn_row, text="Resume",
+			style="Primary.TButton")
+
+		def _update_counters_label():
+			counters_lbl["text"] = (
+				f"Live counters — X: {int(self.table_motor.total_microsteps_taken):,} "
+				f"steps / {int(self.table_motor.reversal_count):,} reversals   "
+				f"Y: {int(self.carriage_motor.total_microsteps_taken):,} "
+				f"steps / {int(self.carriage_motor.reversal_count):,} reversals"
+			)
+
+		def _update_progress(text):
+			"""Refresh the progress label + counters. Does NOT pump
+			Tk events — call ``_yield`` between motor moves for
+			cancel / skip / resume handling."""
+			progress_lbl["text"] = text
+			_update_counters_label()
+			try:
+				dlg.update_idletasks()
+			except tk.TclError:
+				pass
+
+		def _yield(text=None):
+			"""Refresh the progress label and pump pending Tk events
+			so Cancel / Skip / Resume button clicks fire while the
+			synchronous motor loop is between moves. Blocks while
+			``ctx["paused"]`` is True (the cancel-button's pause
+			state) and returns one of:
+
+			  ``"continue"``  — loop should keep going,
+			  ``"skip"``      — Skip pressed; loop should bail to
+			                    the measurement screen,
+			  ``"cancel"``    — Cancel pressed twice (Quit); loop
+			                    should return-to-origin and bail.
+
+			Call between every motor command in each phase loop.
+			"""
+			if text is not None:
+				progress_lbl["text"] = text
+			_update_counters_label()
+			try:
+				dlg.update()
+			except tk.TclError:
+				return "cancel"
+			if ctx["cancelled"]:
+				return "cancel"
+			if ctx["skip_phase"]:
+				return "skip"
+			# Block while paused, periodically processing events so
+			# Resume / second-Cancel-press can flip us out.
+			while ctx["paused"]:
+				try:
+					dlg.update()
+				except tk.TclError:
+					return "cancel"
+				if ctx["cancelled"]:
+					return "cancel"
+				if ctx["skip_phase"]:
+					return "skip"
+				sleep(0.05)
+			return "continue"
+
+		def _show_intro():
+			ctx["stage"] = "intro"
+			header_lbl["text"] = "Slippage Validation routine"
+			body_lbl["text"] = (
+				"This routine exercises the steppers across reversal,\n"
+				"traversal, and snake-pattern regimes (~60 min total) so "
+				"you can correlate measured slippage against cumulative "
+				"motor activity.\n\n"
+				"Before starting:\n"
+				"  • Park the carriage at origin manually.\n"
+				"  • Affix a physical reference mark next to the needle's "
+				"current XY position.\n"
+				"  • Ensure no sample tube or plate is on the bed.\n\n"
+				"The pump is disabled throughout. The routine returns to "
+				"origin between phases via Return to Origin without manual "
+				"re-parking — the point is to measure what the controller "
+				"THINKS is origin against where it physically is."
+			)
+			measure_frame.pack_forget()
+			progress_lbl["text"] = ""
+			_update_counters_label()
+			primary_btn["text"] = "Start Phase 1"
+			primary_btn["state"] = tk.NORMAL
+			skip_btn["state"] = tk.DISABLED
+
+		def _show_measure(phase_label):
+			ctx["stage"] = phase_label + "_measure"
+			header_lbl["text"] = f"{phase_label.title()} complete"
+			body_lbl["text"] = (
+				f"Phase {phase_label[-1]} finished. Needle should now "
+				"be at origin. Measure the X and Y offsets from your "
+				"reference mark and enter them below."
+			)
+			ctx["x_offset_var"].set("")
+			ctx["y_offset_var"].set("")
+			measure_frame.pack(anchor="w", pady=(0, 8),
+				after=counters_lbl)
+			primary_btn["text"] = "Continue"
+			primary_btn["state"] = tk.NORMAL
+			skip_btn["state"] = tk.NORMAL
+			_update_counters_label()
+			x_off_entry.focus_set()
+
+		def _show_summary():
+			ctx["stage"] = "summary"
+			measure_frame.pack_forget()
+			header_lbl["text"] = "Slippage Validation complete"
+			lines = [
+				"All three phases finished. Per-phase rows have been "
+				"appended to:",
+				"",
+				f"  {usage_store.get_slippage_path()}",
+				"",
+				"Per-axis totals across all phases:",
+			]
+			x_steps = int(self.table_motor.total_microsteps_taken)
+			y_steps = int(self.carriage_motor.total_microsteps_taken)
+			x_rev = int(self.table_motor.reversal_count)
+			y_rev = int(self.carriage_motor.reversal_count)
+			lines.append(f"  X: {x_steps:,} steps  /  {x_rev:,} reversals")
+			lines.append(f"  Y: {y_steps:,} steps  /  {y_rev:,} reversals")
+			x_off_total = sum(r[1] for r in ctx["summary"])
+			y_off_total = sum(r[2] for r in ctx["summary"])
+			lines.append("")
+			lines.append(
+				f"Total measured offset:  X = {x_off_total:+.2f} mm,  "
+				f"Y = {y_off_total:+.2f} mm"
+			)
+			lines.append("")
+			lines.append(
+				"Run regression on cumulative steps and reversals "
+				"against measured offset to estimate per-step and "
+				"per-reversal slippage coefficients."
+			)
+			body_lbl["text"] = "\n".join(lines)
+			progress_lbl["text"] = ""
+			_update_counters_label()
+			primary_btn["text"] = "Close"
+			primary_btn["state"] = tk.NORMAL
+			skip_btn["state"] = tk.DISABLED
+			cancel_btn["state"] = tk.DISABLED
+
+		def _return_to_origin():
+			"""Drive both motors back to (0, 0) via absolute moves.
+			Cancel-checked between axes."""
+			try:
+				self.table_motor.move_dist_absolute(0.0, is_transit=True)
+				if ctx["cancelled"]:
+					return
+				self.carriage_motor.move_dist_absolute(0.0,
+					is_transit=True)
+			except Exception as exc:
+				logger.warning(
+					"Slippage: return-to-origin failed: %s", exc)
+
+		# ---- Phase 1: reversal cycling --------------------------------
+		def _run_phase1():
+			ctx["current_phase"] = "phase1"
+			ctx["stage"] = "phase1_run"
+			header_lbl["text"] = "Phase 1 — Reversal cycling"
+			body_lbl["text"] = (
+				"Alternating short / long reversals on each axis. "
+				"This stresses the backlash takeup and accumulates "
+				"reversal counts."
+			)
+			measure_frame.pack_forget()
+			primary_btn["state"] = tk.DISABLED
+			skip_btn["state"] = tk.NORMAL
+
+			def _axis_pass(motor, axis_label):
+				"""Run the reversal pattern on one axis. Returns
+				the ``_yield`` status of whatever exit condition
+				fired: ``"continue"`` on natural completion,
+				``"skip"`` if Skip was pressed, ``"cancel"`` for
+				the second Cancel press."""
+				small_amp = self._SLIPPAGE_PHASE1_SMALL_AMP_CM
+				large_amp = self._SLIPPAGE_PHASE1_LARGE_AMP_CM
+				small_cycles = self._SLIPPAGE_PHASE1_SMALL_CYCLES
+				large_cycles = self._SLIPPAGE_PHASE1_LARGE_CYCLES
+				total = small_cycles * 2 + large_cycles * 2
+				done = 0
+				for cycle in range(small_cycles):
+					motor.move_dist_relative(+small_amp,
+						is_transit=True)
+					done += 1
+					status = _yield(
+						f"{axis_label}-axis small reversals: {done}/{total} "
+						f"moves (cycle {cycle + 1}/{small_cycles})"
+					)
+					if status != "continue":
+						return status
+					motor.move_dist_relative(-small_amp,
+						is_transit=True)
+					done += 1
+					status = _yield(
+						f"{axis_label}-axis small reversals: {done}/{total} "
+						f"moves (cycle {cycle + 1}/{small_cycles})"
+					)
+					if status != "continue":
+						return status
+				for cycle in range(large_cycles):
+					motor.move_dist_relative(+large_amp,
+						is_transit=True)
+					done += 1
+					status = _yield(
+						f"{axis_label}-axis large reversals: {done}/{total} "
+						f"moves (cycle {cycle + 1}/{large_cycles})"
+					)
+					if status != "continue":
+						return status
+					motor.move_dist_relative(-large_amp,
+						is_transit=True)
+					done += 1
+					status = _yield(
+						f"{axis_label}-axis large reversals: {done}/{total} "
+						f"moves (cycle {cycle + 1}/{large_cycles})"
+					)
+					if status != "continue":
+						return status
+				return "continue"
+
+			status = _axis_pass(self.table_motor, "X")
+			if status == "cancel":
+				_return_to_origin()
+				return
+			if status == "skip":
+				# Skip during X: finish phase early, go to measure.
+				ctx["skip_phase"] = False
+				_update_progress("Skipped — returning to origin…")
+				_return_to_origin()
+				_show_measure("phase1")
+				return
+			status = _axis_pass(self.carriage_motor, "Y")
+			if status == "cancel":
+				_return_to_origin()
+				return
+			if status == "skip":
+				ctx["skip_phase"] = False
+				_update_progress("Skipped — returning to origin…")
+				_return_to_origin()
+				_show_measure("phase1")
+				return
+			_update_progress("Returning to origin…")
+			_return_to_origin()
+			if ctx["cancelled"]:
+				return
+			_show_measure("phase1")
+
+		# ---- Phase 2: full-range traversals ---------------------------
+		def _run_phase2():
+			ctx["current_phase"] = "phase2"
+			ctx["stage"] = "phase2_run"
+			header_lbl["text"] = "Phase 2 — Full-range traversals"
+			body_lbl["text"] = (
+				"Round trips between origin and the far corner of "
+				"the table. This stresses long absolute moves with "
+				"no backlash between the outbound and return legs."
+			)
+			measure_frame.pack_forget()
+			primary_btn["state"] = tk.DISABLED
+			skip_btn["state"] = tk.NORMAL
+			from well_plate import TABLE_WIDTH_MM, TABLE_HEIGHT_MM
+			target_x_cm = max(0.0, TABLE_WIDTH_MM / 10.0 - 2.0)
+			target_y_cm = max(0.0, TABLE_HEIGHT_MM / 10.0 - 1.0)
+			trips = self._SLIPPAGE_PHASE2_ROUND_TRIPS
+
+			def _handle_skip_or_cancel(status):
+				"""Dispatch the helper status. Returns True if the
+				caller should bail; False if loop continues."""
+				if status == "cancel":
+					_return_to_origin()
+					return True
+				if status == "skip":
+					ctx["skip_phase"] = False
+					_update_progress("Skipped — returning to origin…")
+					_return_to_origin()
+					_show_measure("phase2")
+					return True
+				return False
+
+			for trip in range(trips):
+				self.table_motor.move_dist_absolute(target_x_cm,
+					is_transit=True)
+				status = _yield(
+					f"Round trip {trip + 1}/{trips}: outbound X reached "
+					f"({target_x_cm:.2f} cm)"
+				)
+				if _handle_skip_or_cancel(status):
+					return
+				self.carriage_motor.move_dist_absolute(target_y_cm,
+					is_transit=True)
+				status = _yield(
+					f"Round trip {trip + 1}/{trips}: outbound Y reached "
+					f"({target_y_cm:.2f} cm)"
+				)
+				if _handle_skip_or_cancel(status):
+					return
+				self.table_motor.move_dist_absolute(0.0,
+					is_transit=True)
+				status = _yield(
+					f"Round trip {trip + 1}/{trips}: return X to origin"
+				)
+				if _handle_skip_or_cancel(status):
+					return
+				self.carriage_motor.move_dist_absolute(0.0,
+					is_transit=True)
+				status = _yield(
+					f"Round trip {trip + 1}/{trips}: return Y to origin"
+				)
+				if _handle_skip_or_cancel(status):
+					return
+			_update_progress("Returning to origin…")
+			_return_to_origin()
+			if ctx["cancelled"]:
+				return
+			_show_measure("phase2")
+
+		# ---- Phase 3: virtual snake -----------------------------------
+		def _run_phase3():
+			ctx["current_phase"] = "phase3"
+			ctx["stage"] = "phase3_run"
+			header_lbl["text"] = "Phase 3 — Simulated snake fractionation"
+			body_lbl["text"] = (
+				f"Walking the column-major snake across a virtual "
+				f"{self._SLIPPAGE_PHASE3_ROWS}×{self._SLIPPAGE_PHASE3_COLS}-"
+				f"well plate at {self._SLIPPAGE_PHASE3_WELL_SIZE_CM} cm "
+				f"well spacing, {self._SLIPPAGE_PHASE3_PLATES} plates' "
+				"worth. This reproduces the production fractionation "
+				"motion profile."
+			)
+			measure_frame.pack_forget()
+			primary_btn["state"] = tk.DISABLED
+			skip_btn["state"] = tk.NORMAL
+			ws = self._SLIPPAGE_PHASE3_WELL_SIZE_CM
+			rows = self._SLIPPAGE_PHASE3_ROWS
+			cols = self._SLIPPAGE_PHASE3_COLS
+			plates = self._SLIPPAGE_PHASE3_PLATES
+			# Anchor the virtual plate to the current calibration so
+			# the snake fits the physical table.
+			try:
+				x0_ok, x0 = validation.table_pos(
+					self.automated_frame.table_te.get())
+				y0_ok, y0 = validation.carriage_pos(
+					self.automated_frame.carriage_te.get())
+			except Exception:
+				x0_ok, y0_ok = False, False
+			x_start = x0 if x0_ok else 1.0
+			y_start = y0 if y0_ok else 1.0
+			wells_per_plate = rows * cols
+			total_wells = plates * wells_per_plate
+
+			def _handle_skip_or_cancel(status):
+				if status == "cancel":
+					_return_to_origin()
+					return True
+				if status == "skip":
+					ctx["skip_phase"] = False
+					_update_progress("Skipped — returning to origin…")
+					_return_to_origin()
+					_show_measure("phase3")
+					return True
+				return False
+
+			done = 0
+			bail = False
+			for _plate in range(plates):
+				carriage_forwards = True
+				cx = 0
+				cy = 0
+				for _well in range(wells_per_plate):
+					target_x = x_start + cx * ws
+					target_y = y_start + cy * ws
+					self.table_motor.move_dist_absolute(
+						target_x, is_transit=False)
+					status = _yield(
+						f"Snake well {done + 1}/{total_wells} "
+						f"(plate {_plate + 1}/{plates}) — X reached"
+					)
+					if _handle_skip_or_cancel(status):
+						bail = True
+						break
+					self.carriage_motor.move_dist_absolute(
+						target_y, is_transit=False)
+					done += 1
+					status = _yield(
+						f"Snake well {done}/{total_wells} "
+						f"(plate {_plate + 1}/{plates})"
+					)
+					if _handle_skip_or_cancel(status):
+						bail = True
+						break
+					# Advance snake state.
+					if carriage_forwards:
+						cy += 1
+						if cy >= rows:
+							cy = rows - 1
+							cx += 1
+							carriage_forwards = False
+					else:
+						cy -= 1
+						if cy < 0:
+							cy = 0
+							cx += 1
+							carriage_forwards = True
+					if cx >= cols:
+						break
+				if bail:
+					break
+			if bail:
+				return
+			_update_progress("Returning to origin…")
+			_return_to_origin()
+			if ctx["cancelled"]:
+				return
+			_show_measure("phase3")
+
+		def _commit_phase_row():
+			"""Validate the measurement inputs, append a row to the
+			slippage CSV, and advance to the next phase or summary."""
+			x_raw = ctx["x_offset_var"].get().strip()
+			y_raw = ctx["y_offset_var"].get().strip()
+			try:
+				x_off = float(x_raw)
+				y_off = float(y_raw)
+			except ValueError:
+				messagebox.showerror(
+					"Invalid offset",
+					"Enter numeric values (mm, signed) for both X "
+					"and Y offsets before clicking Continue.",
+					parent=dlg,
+				)
+				return
+			phase = ctx["current_phase"]
+			ts = usage_store.append_slippage_row(
+				phase=phase,
+				x_steps=int(self.table_motor.total_microsteps_taken),
+				y_steps=int(self.carriage_motor.total_microsteps_taken),
+				x_reversals=int(self.table_motor.reversal_count),
+				y_reversals=int(self.carriage_motor.reversal_count),
+				x_offset_mm=x_off,
+				y_offset_mm=y_off,
+			)
+			ctx["summary"].append((phase, x_off, y_off, ts))
+			logger.info(
+				"Slippage %s logged at %s: x_off=%+.2f mm y_off=%+.2f mm",
+				phase, ts, x_off, y_off,
+			)
+			# Advance.
+			if phase == "phase1":
+				primary_btn["text"] = "Start Phase 2"
+				ctx["stage"] = "between"
+				measure_frame.pack_forget()
+				header_lbl["text"] = "Ready for Phase 2"
+				body_lbl["text"] = (
+					"Phase 1 measurement saved. Click Start Phase 2 "
+					"when ready."
+				)
+				primary_btn["state"] = tk.NORMAL
+				return
+			if phase == "phase2":
+				primary_btn["text"] = "Start Phase 3"
+				ctx["stage"] = "between"
+				measure_frame.pack_forget()
+				header_lbl["text"] = "Ready for Phase 3"
+				body_lbl["text"] = (
+					"Phase 2 measurement saved. Click Start Phase 3 "
+					"when ready."
+				)
+				primary_btn["state"] = tk.NORMAL
+				return
+			# phase3 complete.
+			_show_summary()
+
+		def _on_primary(_e=None):
+			"""Primary button dispatches based on current stage."""
+			stage = ctx["stage"]
+			if stage == "intro":
+				_run_phase1()
+				return
+			if stage == "phase1_measure":
+				_commit_phase_row()
+				return
+			if stage == "phase2_measure":
+				_commit_phase_row()
+				return
+			if stage == "phase3_measure":
+				_commit_phase_row()
+				return
+			if stage == "between":
+				if primary_btn["text"] == "Start Phase 2":
+					_run_phase2()
+				elif primary_btn["text"] == "Start Phase 3":
+					_run_phase3()
+				return
+			if stage == "summary":
+				dlg.destroy()
+				return
+
+		def _on_skip(_e=None):
+			"""Skip button. Behaviour depends on stage:
+
+			  * Measurement screens — confirm + log a zero-offset
+			    row, then advance to the next phase.
+			  * Mid-phase motion — flag the current phase to bail
+			    out; the loop will see ``skip_phase`` on its next
+			    yield and jump straight to the measurement screen
+			    for the phase currently running.
+
+			In both cases the operator's intent is "I'm done with
+			this phase; move on."
+			"""
+			stage = ctx["stage"]
+			if stage.endswith("_run"):
+				ctx["skip_phase"] = True
+				# Wake the pause loop if we're paused — Skip wins
+				# over pause.
+				ctx["paused"] = False
+				resume_btn.pack_forget()
+				cancel_btn["text"] = "Cancel"
+				return
+			if stage.endswith("_measure"):
+				if not messagebox.askyesno(
+					"Skip measurement",
+					"Skip this measurement and log a row with "
+					"x_offset_mm = 0, y_offset_mm = 0?",
+					parent=dlg,
+				):
+					return
+				ctx["x_offset_var"].set("0")
+				ctx["y_offset_var"].set("0")
+				_commit_phase_row()
+				return
+			# In intro / between / summary, Skip is a no-op.
+			return
+
+		def _on_resume(_e=None):
+			"""Clear the pause flag; the ``_yield`` loop spinning
+			on ``ctx["paused"]`` exits and motion resumes from
+			wherever it stopped."""
+			ctx["paused"] = False
+			resume_btn.pack_forget()
+			cancel_btn["text"] = "Cancel"
+			_update_progress("Resuming…")
+
+		def _on_cancel(_e=None):
+			"""Two-step cancel:
+
+			  1. First press during a phase → pause the loop and
+			     change Cancel's label to ``"Quit"``. A Resume
+			     button appears next to it.
+			  2. Press while paused (label now ``"Quit"``) → set
+			     ``cancelled``, the loop bails on its next yield,
+			     return-to-origin, dialog closes.
+
+			Outside a running phase (intro / measure / between /
+			summary), Cancel quits immediately — there's nothing
+			to pause.
+			"""
+			stage = ctx["stage"]
+			if not stage.endswith("_run"):
+				# Outside motion: confirm + quit. Already-saved
+				# phase rows on disk are preserved.
+				if stage in ("intro", "summary"):
+					dlg.destroy()
+					return
+				if messagebox.askyesno(
+					"Cancel Slippage Validation",
+					"Cancel the validation routine? Previously "
+					"saved phase rows are preserved on disk.",
+					parent=dlg,
+				):
+					ctx["cancelled"] = True
+					try:
+						_return_to_origin()
+					except Exception as exc:
+						logger.warning(
+							"Slippage cancel: return-to-origin "
+							"failed: %s", exc)
+					dlg.destroy()
+				return
+			# Mid-phase: pause vs quit dispatch.
+			if not ctx["paused"]:
+				ctx["paused"] = True
+				cancel_btn["text"] = "Quit"
+				resume_btn.pack(side=tk.LEFT, padx=4,
+					after=cancel_btn)
+				progress_lbl["text"] = (
+					"PAUSED — click Resume to continue, "
+					"Quit to abort."
+				)
+				return
+			# Already paused: this click confirms the quit.
+			ctx["cancelled"] = True
+			try:
+				_return_to_origin()
+			except Exception as exc:
+				logger.warning(
+					"Slippage cancel: return-to-origin failed: %s",
+					exc)
+			dlg.destroy()
+
+		primary_btn["command"] = _on_primary
+		skip_btn["command"] = _on_skip
+		cancel_btn["command"] = _on_cancel
+		resume_btn["command"] = _on_resume
+		# Escape no longer instantly aborts — it dispatches the same
+		# two-step pause/quit so an accidental keystroke can't
+		# obliterate a long-running phase.
+		dlg.bind("<Escape>", _on_cancel)
+		dlg.protocol("WM_DELETE_WINDOW", _on_cancel)
+
+		_show_intro()
+		dlg.update_idletasks()
+		self._center_over_main(dlg)
 		dlg.grab_set()
 
 	def _show_about_dialog(self):
@@ -5083,7 +6045,85 @@ class App(tk.Tk):
 			except Exception as exc:
 				logger.warning("Run logger failed to close on window close: %s", exc)
 			self.run_logger = None
+		# Final usage flush before the window goes away so the
+		# counters on disk match the steps actually issued during
+		# this session (the periodic checkpoint may be up to
+		# ``_usage_flush_ms`` stale at any moment).
+		try:
+			self._flush_usage_to_disk()
+		except Exception as exc:
+			logger.warning("Final usage flush failed: %s", exc)
 		self.destroy()
+
+	# -- Motor-usage tracking --------------------------------------------
+
+	def _flush_usage_to_disk(self):
+		"""Capture the live per-motor counters into ``self.usage_data``
+		and persist to ``~/.autosip/usage.json``. Idempotent. Silently
+		swallows write errors (logged by ``usage_store.save_usage``)."""
+		self.usage_data["x_steps"] = int(
+			self.table_motor.total_microsteps_taken)
+		self.usage_data["y_steps"] = int(
+			self.carriage_motor.total_microsteps_taken)
+		self.usage_data["x_reversals"] = int(
+			self.table_motor.reversal_count)
+		self.usage_data["y_reversals"] = int(
+			self.carriage_motor.reversal_count)
+		usage_store.save_usage(self.usage_data)
+
+	def _schedule_usage_flush(self):
+		"""Tick the periodic motor-usage checkpoint. Each tick flushes
+		the live counters to disk and re-schedules itself
+		``_usage_flush_ms`` later. Robust against re-entry: cancels
+		any pending after_id before scheduling the next one."""
+		if self._usage_flush_after_id is not None:
+			try:
+				self.after_cancel(self._usage_flush_after_id)
+			except tk.TclError:
+				pass
+			self._usage_flush_after_id = None
+		try:
+			self._flush_usage_to_disk()
+		except Exception as exc:
+			logger.warning("Periodic usage flush failed: %s", exc)
+		# Re-arm. ``after`` returns a stable id so cancel-on-shutdown
+		# works cleanly.
+		self._usage_flush_after_id = self.after(
+			self._usage_flush_ms, self._schedule_usage_flush)
+
+	def _reset_usage_counters(self, *, trigger):
+		"""Append the pre-reset values to ``usage_history.csv``,
+		then zero the live counters on both motor instances and
+		clear their reversal-direction memory. Persist the result.
+
+		``trigger`` is recorded in the history CSV's last column.
+		Accepts ``"manual"`` or ``"origin_calibration"`` per spec;
+		any other string is written verbatim (the loader tolerates
+		new values for forward compatibility).
+		"""
+		pre_x = int(self.table_motor.total_microsteps_taken)
+		pre_y = int(self.carriage_motor.total_microsteps_taken)
+		pre_xr = int(self.table_motor.reversal_count)
+		pre_yr = int(self.carriage_motor.reversal_count)
+		ts = usage_store.append_history_row(
+			x_steps=pre_x, y_steps=pre_y,
+			x_reversals=pre_xr, y_reversals=pre_yr,
+			reset_trigger=trigger,
+		)
+		self.table_motor.total_microsteps_taken = 0
+		self.table_motor.reversal_count = 0
+		self.table_motor._last_move_sign = 0
+		self.carriage_motor.total_microsteps_taken = 0
+		self.carriage_motor.reversal_count = 0
+		self.carriage_motor._last_move_sign = 0
+		self.usage_data["last_reset_iso"] = ts
+		self.usage_data["last_reset_trigger"] = trigger
+		self._flush_usage_to_disk()
+		logger.info(
+			"Motor usage reset (trigger=%s): pre-reset x_steps=%d "
+			"y_steps=%d x_reversals=%d y_reversals=%d",
+			trigger, pre_x, pre_y, pre_xr, pre_yr,
+		)
 
 	# -- Mode switching ---------------------------------------------------
 
@@ -6611,6 +7651,14 @@ class App(tk.Tk):
 		position, clear the recalibration flag, and trigger the
 		normal Resume path. Called by the Origin Calibration dialog's
 		Resume button after the operator confirms the re-park.
+
+		Also resets the cumulative motor-usage counters: the operator
+		has just re-parked the carriage against the mechanical limit,
+		so all step / reversal activity accrued before this moment is
+		"pre-calibration" and the wear-vs-slippage analysis starts a
+		fresh epoch. The pre-reset values land in
+		``~/.autosip/usage_history.csv`` with trigger
+		``origin_calibration`` so the long-term record is preserved.
 		"""
 		s = self.state
 		self.set_status("Returning to last visited well…")
@@ -6622,6 +7670,16 @@ class App(tk.Tk):
 		# Clear the flag so toggle_pause's recalibration guard doesn't
 		# re-open the dialog when we hand off to the normal Resume.
 		s.origin_returned_during_pause = False
+		# Reset usage counters AFTER the return-to-pause-position
+		# move so the steps issued during that move are included in
+		# the historical row. The post-reset epoch begins with the
+		# next operator-initiated motor command.
+		try:
+			self._reset_usage_counters(trigger="origin_calibration")
+			self.set_status("Usage counters reset (Origin Calibration).")
+		except Exception as exc:
+			logger.warning(
+				"Origin Calibration usage reset failed: %s", exc)
 		self.toggle_pause()
 
 	# -- Dialog helpers ---------------------------------------------------
