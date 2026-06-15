@@ -48,7 +48,7 @@ _HISTORY_HEADER = [
 	"x_reversals", "y_reversals", "reset_trigger",
 ]
 
-# Append-only CSV at ``~/.autosip/slippage_validation.csv``. One row per
+# Append-only CSV at ``~/.autosip/slippage_test.csv``. One row per
 # completed validation phase; users build longitudinal data by re-running
 # the routine on different days and letting rows accumulate. Columns:
 #   phase             — "phase1" / "phase2" / "phase3"
@@ -73,7 +73,7 @@ def get_history_path():
 
 
 def get_slippage_path():
-	return _CONFIG_DIR / "slippage_validation.csv"
+	return _CONFIG_DIR / "slippage_test.csv"
 
 
 def load_usage():
@@ -170,7 +170,7 @@ def append_history_row(*, x_steps, y_steps, x_reversals, y_reversals,
 def append_slippage_row(*, phase, x_steps, y_steps,
 		x_reversals, y_reversals, x_offset_mm, y_offset_mm,
 		timestamp_iso=None):
-	"""Append one row to ``slippage_validation.csv``. Creates the file
+	"""Append one row to ``slippage_test.csv``. Creates the file
 	with a header line on the first write. ``timestamp_iso`` defaults
 	to the current wall-clock time in ISO-8601 with millisecond
 	precision. Returns the timestamp written.

@@ -4071,7 +4071,7 @@ class App(tk.Tk):
 			command=self._show_cleaning_parameters_dialog)
 		tools.add_command(label="Usage…",
 			command=self._show_usage_dialog)
-		tools.add_command(label="Slippage Validation…",
+		tools.add_command(label="Slippage Test…",
 			command=self._show_slippage_validation_dialog)
 		tools.add_separator()
 		tools.add_command(label="Open last run folder", command=self._open_last_run)
@@ -4588,7 +4588,7 @@ class App(tk.Tk):
 		self._center_over_main(dlg)
 		dlg.grab_set()
 
-	# ---- Slippage Validation routine ----------------------------------
+	# ---- Slippage Test routine ----------------------------------
 
 	# Phase 1 reversal cycling: small-amplitude (10 mm) and large-amplitude
 	# (50 mm) reversal cycles per axis. A "cycle" is one round trip (+amp
@@ -4609,7 +4609,7 @@ class App(tk.Tk):
 	_SLIPPAGE_PHASE3_PLATES = 2
 
 	def _show_slippage_validation_dialog(self):
-		"""Settings → Slippage Validation. Multi-phase motion-only
+		"""Settings → Slippage Test. Multi-phase motion-only
 		routine that exercises the steppers across reversal-heavy,
 		traversal-heavy, and snake-pattern regimes so the operator
 		can correlate measured slippage against cumulative motor
@@ -4618,7 +4618,7 @@ class App(tk.Tk):
 		the entry refuses to open (operator must End Run first).
 
 		On Continue after each phase the dialog appends a row to
-		``~/.autosip/slippage_validation.csv``. The Usage counters
+		``~/.autosip/slippage_test.csv``. The Usage counters
 		are NOT reset by this routine — phase rows carry the
 		absolute counter values so the user can compute phase
 		deltas in post-analysis.
@@ -4629,15 +4629,15 @@ class App(tk.Tk):
 		if self.run_logger is not None or self.state.state not in (
 				"idle",):
 			messagebox.showerror(
-				"Slippage Validation unavailable",
+				"Slippage Test unavailable",
 				"End the current fractionation run before opening "
-				"the Slippage Validation routine.",
+				"the Slippage Test routine.",
 				parent=self,
 			)
 			return
 
 		dlg = tk.Toplevel(self)
-		dlg.title("Slippage Validation")
+		dlg.title("Slippage Test")
 		dlg.transient(self)
 		dlg.resizable(False, False)
 		container = tk.Frame(dlg, padx=18, pady=14)
@@ -4777,7 +4777,7 @@ class App(tk.Tk):
 
 		def _show_intro():
 			ctx["stage"] = "intro"
-			header_lbl["text"] = "Slippage Validation routine"
+			header_lbl["text"] = "Slippage Test routine"
 			body_lbl["text"] = (
 				"This routine exercises the steppers across reversal,\n"
 				"traversal, and snake-pattern regimes (~60 min total) so "
@@ -4821,7 +4821,7 @@ class App(tk.Tk):
 		def _show_summary():
 			ctx["stage"] = "summary"
 			measure_frame.pack_forget()
-			header_lbl["text"] = "Slippage Validation complete"
+			header_lbl["text"] = "Slippage Test complete"
 			lines = [
 				"All three phases finished. Per-phase rows have been "
 				"appended to:",
@@ -5281,7 +5281,7 @@ class App(tk.Tk):
 					dlg.destroy()
 					return
 				if messagebox.askyesno(
-					"Cancel Slippage Validation",
+					"Cancel Slippage Test",
 					"Cancel the validation routine? Previously "
 					"saved phase rows are preserved on disk.",
 					parent=dlg,

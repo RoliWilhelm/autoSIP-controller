@@ -714,9 +714,9 @@ machine simultaneously (unlikely on a dedicated Pi), the last
 writer wins on `usage.json` and earlier activity from the other
 instance may be lost.
 
-### 6.2.7 Slippage Validation Routine
+### 6.2.7 Slippage Test Routine
 
-Settings → Slippage Validation… opens a one-time post-build
+Settings → Slippage Test… opens a one-time post-build
 characterisation routine that exercises the steppers across
 reversal-heavy, traversal-heavy, and snake-pattern regimes (~60 min
 total) so anyone who constructs an autoSIP can quantify their own
@@ -756,7 +756,7 @@ measurement panel appears asking for `x_offset_mm` and
 `y_offset_mm` — the operator measures the offset of the dispensing
 needle from the reference mark and enters the values (millimetres,
 signed). Clicking **Continue** appends one row to
-`~/.autosip/slippage_validation.csv` with columns
+`~/.autosip/slippage_test.csv` with columns
 `phase, timestamp_iso, x_steps, y_steps, x_reversals, y_reversals,
 x_offset_mm, y_offset_mm`. The step / reversal columns carry the
 *absolute* counter values at the moment of the measurement, NOT
@@ -789,13 +789,13 @@ data-collection routine, not an analysis routine. Run the analysis
 externally in whatever statistical tool the operator prefers
 (R / Python / Excel).
 
-**Interaction with Usage tracking.** The Slippage Validation routine
+**Interaction with Usage tracking.** The Slippage Test routine
 does **not** reset the Usage counters; it reads them. A typical
 workflow:
 
 1. Open Settings → Usage and click Reset counters (counters → 0,
    `usage_history.csv` gains a `manual` row).
-2. Open Settings → Slippage Validation and run all three phases.
+2. Open Settings → Slippage Test and run all three phases.
 3. Each phase row captures the absolute counter values at
    measurement time, so phase deltas (`phase2.x_steps -
    phase1.x_steps`, etc.) are recoverable in post-analysis.
