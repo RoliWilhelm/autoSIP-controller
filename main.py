@@ -300,6 +300,76 @@ class StepperMotor:
 			return self.transit_step_delay
 		return self.fractionation_step_delay
 
+	def _plan_move(self, angle):
+		"""Compute the step plan for an ``angle`` move without firing
+		any motor commands.
+
+		Returns ``(intent_steps, backlash_steps, total_steps, direction)``:
+
+		  * ``intent_steps`` — signed microstep count that actually
+		    advances the slider (matches the sign of ``angle``).
+		  * ``backlash_steps`` — signed microstep count for the
+		    one-shot direction-reversal takeup (0 when no reversal).
+		  * ``total_steps`` — ``intent_steps + backlash_steps``;
+		    abs() is the number of ``onestep`` calls the caller will
+		    make and the number that feeds usage tracking.
+		  * ``direction`` — the ``hardware.FORWARD`` /
+		    ``hardware.BACKWARD`` sentinel matching ``total_steps``'s
+		    sign and the motor's ``reverse`` flag.
+
+		Side effects: updates ``self.forwards`` on a reversal (so
+		subsequent calls treat the new direction as the current
+		one) but does NOT update ``self.angle`` — the caller is
+		responsible for that after the steps actually fire.
+
+		Centralised so the simultaneous (Bresenham-interleaved)
+		dual-axis path can share the exact same backlash + direction
+		math as the sequential single-axis path.
+		"""
+		# Backlash takeup, expressed as an exact microstep count. For
+		# the stock geometry this evaluates to 240 microsteps
+		# (= 27°, = 0.3 cm of motor rotation that engages the nut
+		# before the slider moves).
+		backlash_microsteps = round(0.3 * self.steps_per_degree / self.cm_per_deg)
+
+		intent_steps = floor(self.steps_per_degree * angle)
+		extra_steps = 0
+		if self.forwards and angle < 0:
+			extra_steps = -backlash_microsteps
+			self.forwards = False
+		elif not self.forwards and angle > 0:
+			extra_steps = backlash_microsteps
+			self.forwards = True
+
+		total_steps = intent_steps + extra_steps
+
+		# FORWARD if net motion is positive and motor not reversed,
+		# or negative and motor reversed.
+		direction = (
+			hardware.FORWARD
+			if (total_steps > 0 and not self.reverse) or (total_steps < 0 and self.reverse)
+			else hardware.BACKWARD
+		)
+		return intent_steps, extra_steps, total_steps, direction
+
+	def _record_usage(self, total_steps):
+		"""Increment microstep + reversal counters for a planned
+		move of ``total_steps`` signed microsteps. Shared by the
+		sequential and simultaneous paths so wear tracking sees the
+		same numbers under both modes.
+
+		Reversal fires when the move's sign differs from the previous
+		non-zero move's sign; zero-step moves are ignored. Mirrors
+		the previous inline logic in ``move_relative``.
+		"""
+		if total_steps == 0:
+			return
+		self.total_microsteps_taken += abs(total_steps)
+		move_sign = 1 if total_steps > 0 else -1
+		if self._last_move_sign != 0 and move_sign != self._last_move_sign:
+			self.reversal_count += 1
+		self._last_move_sign = move_sign
+
 	def move_relative(self, angle, *, is_transit=False):
 		"""Turn the shaft so the slider moves by ``angle`` degrees' worth.
 
@@ -326,43 +396,14 @@ class StepperMotor:
 		single float angle before flooring lost a microstep at certain
 		step sizes (e.g. ``floor(8.888… × 27.9°) = 247`` instead of 248).
 		"""
-		# Backlash takeup, expressed as an exact microstep count. For the
-		# stock geometry this evaluates to 240 microsteps (= 27°, = 0.3 cm
-		# of motor rotation that engages the nut before the slider moves).
-		backlash_steps = round(0.3 * self.steps_per_degree / self.cm_per_deg)
-
-		intent_steps = floor(self.steps_per_degree * angle)
-		extra_steps = 0
-		if self.forwards and angle < 0:
-			extra_steps = -backlash_steps
-			self.forwards = False
-		elif not self.forwards and angle > 0:
-			extra_steps = backlash_steps
-			self.forwards = True
-
-		total_steps = intent_steps + extra_steps
+		intent_steps, extra_steps, total_steps, direction = self._plan_move(angle)
 
 		# Usage tracking: count microsteps + reversals before the
-		# step loop fires. ``abs(total_steps)`` is exactly the
-		# number of ``onestep`` calls the loop will make below
-		# (intent + backlash microsteps both count as real wear).
-		# A zero-step call (``angle == 0`` with no backlash) does
-		# not advance any counters.
-		if total_steps != 0:
-			self.total_microsteps_taken += abs(total_steps)
-			move_sign = 1 if total_steps > 0 else -1
-			if self._last_move_sign != 0 and move_sign != self._last_move_sign:
-				self.reversal_count += 1
-			self._last_move_sign = move_sign
-
-		# FORWARD if net motion is positive and motor not reversed, or
-		# negative and motor reversed. Sign of total_steps matches sign of
-		# ``angle`` since extra_steps is signed to match.
-		direction = (
-			hardware.FORWARD
-			if (total_steps > 0 and not self.reverse) or (total_steps < 0 and self.reverse)
-			else hardware.BACKWARD
-		)
+		# step loop fires. abs(total_steps) is exactly the number of
+		# onestep calls the loop will make below (intent + backlash
+		# microsteps both count as real wear). A zero-step call
+		# (angle == 0 with no backlash) does not advance counters.
+		self._record_usage(total_steps)
 
 		logger.debug(
 			"%s move_relative angle=%.3f° steps=%d (intent=%d + backlash=%d) direction=%s",
@@ -2493,18 +2534,48 @@ class ManualFrame(tk.Frame):
 		)
 		self.y_plus_btn.grid(row=0, column=1, padx=2, pady=2)
 		self._y_plus_tooltip = Tooltip(self.y_plus_btn, "")
+		# Button labels follow the CANVAS direction relative to the
+		# origin marker (now displayed at the upper-right of the
+		# XY-table after the X-axis mirror). Anything to the LEFT
+		# of origin on screen is the "X−" direction; anything to
+		# the RIGHT is "X+". The kinematic layer still treats
+		# "workspace X" as a magnitude-from-origin so the LEFT
+		# button must command +1 in workspace terms (to walk
+		# AWAY from origin = canvas-left), and the RIGHT button
+		# must command −1 (to walk back TOWARD origin). The arrow
+		# glyph, the +/− label, and the on-screen motion all line
+		# up; the only quirk is that the Position readout's X
+		# number *decreases* when you press the "X+" button (since
+		# X+ canvas-right corresponds to a smaller workspace X
+		# magnitude from origin).
+		# After the XY-table widget's X-axis mirror, increasing
+		# workspace X (motor.angle going up) renders as CANVAS-LEFT
+		# motion (origin marker is at the canvas right). So for
+		# arrow-direction to match crosshair motion:
+		#   LEFT-arrow button → must INCREASE workspace X (+1)
+		#   RIGHT-arrow button → must DECREASE workspace X (−1)
+		# The "+/−" labels follow the canvas-direction convention
+		# (anything canvas-left of origin is "X−"); the Position
+		# readout's X number behaves opposite to the label sign
+		# because of the mirror — that's the irreducible cost of
+		# putting origin at the canvas right.
 		self.x_minus_btn = ttk.Button(
 			pad, text="◀ X−", width=8,
-			command=lambda: self._jog("x", -1),
-		)
-		self.x_minus_btn.grid(row=1, column=0, padx=2, pady=2)
-		Tooltip(self.x_minus_btn, "Jog one step in the −X direction (left).")
-		self.x_plus_btn = ttk.Button(
-			pad, text="X+ ▶", width=8,
 			command=lambda: self._jog("x", +1),
 		)
+		self.x_minus_btn.grid(row=1, column=0, padx=2, pady=2)
+		Tooltip(self.x_minus_btn,
+			"Jog one step toward the canvas-left side of the "
+			"workspace. Crosshair moves LEFT on screen.")
+		self.x_plus_btn = ttk.Button(
+			pad, text="X+ ▶", width=8,
+			command=lambda: self._jog("x", -1),
+		)
 		self.x_plus_btn.grid(row=1, column=2, padx=2, pady=2)
-		Tooltip(self.x_plus_btn, "Jog one step in the +X direction (right).")
+		Tooltip(self.x_plus_btn,
+			"Jog one step toward the canvas-right side of the "
+			"workspace (toward the origin marker). Crosshair "
+			"moves RIGHT on screen.")
 		self.y_minus_btn = ttk.Button(
 			pad, text="Y− ▼", width=8,
 			command=lambda: self._jog("y", -1),
@@ -3825,6 +3896,20 @@ class App(tk.Tk):
 		# ``is_transit`` flag.
 		self.motor_speed_mode = config_store.load_motor_speed_mode()
 		self.transit_speed_factor = config_store.load_transit_speed_factor()
+		# Motion mode: "sequential" (default) moves one axis at a
+		# time; "simultaneous" interleaves both axes via Bresenham
+		# step-by-step for ~2× faster transit at the cost of higher
+		# peak current. Consulted only inside ``move_to_positions``
+		# (the gateway for every multi-axis transit move); per-axis
+		# direct calls (Manual jog, _snake_step inner sweep) are
+		# unaffected because they only touch one motor.
+		self.motion_mode = config_store.load_motion_mode()
+		# Track whether the operator has already confirmed the
+		# high-current safety prompt during this session. Cleared on
+		# every switch back to "sequential" so re-enabling
+		# "simultaneous" later re-shows the dialog.
+		self._simultaneous_motion_confirmed = (
+			self.motion_mode == "simultaneous")
 		self._apply_motor_speed_to_motors()
 
 		# Optional supplementary notifications (ntfy push + local
@@ -4035,11 +4120,18 @@ class App(tk.Tk):
 		# the space binding -- handler returns immediately when not in
 		# Manual mode or when the focused widget is a text entry, so
 		# typing in Sample ID etc. still moves the text cursor normally.
+		#
+		# X-axis signs match the on-screen jog buttons after the
+		# XY-table widget's X-mirror: pressing the Left arrow key
+		# must produce CANVAS-LEFT crosshair motion (matching the
+		# arrow glyph), which under the mirror requires increasing
+		# workspace X (sign = +1). Right arrow key is the inverse.
+		# Y wasn't mirrored, so Up/Down keep their natural signs.
 		for keysym, axis, sign in (
 			("Up",    "y", +1),
 			("Down",  "y", -1),
-			("Left",  "x", -1),
-			("Right", "x", +1),
+			("Left",  "x", +1),
+			("Right", "x", -1),
 		):
 			self.bind_all(
 				f"<KeyPress-{keysym}>",
@@ -4220,6 +4312,25 @@ class App(tk.Tk):
 		speed_var.trace_add("write", _sync_factor_state)
 		_sync_factor_state()
 
+		# ---- Motion mode (sits in the same Motor Movement section) ---
+		tk.Label(motor_lf, text="Motion mode:", anchor="w",
+			).grid(row=7, column=0, sticky="we", pady=(8, 2))
+		motion_var = tk.StringVar(value=self.motion_mode)
+		tk.Radiobutton(motor_lf, variable=motion_var, value="sequential",
+			text="Sequential (one axis at a time)",
+		).grid(row=8, column=0, sticky="w", padx=(16, 0))
+		tk.Radiobutton(motor_lf, variable=motion_var, value="simultaneous",
+			text="Simultaneous (interleaved; faster, higher peak current)",
+		).grid(row=9, column=0, sticky="w", padx=(16, 0))
+		_hint(motor_lf,
+			"Sequential moves are the safe default for marginal motor "
+			"power supplies. Simultaneous interleaves both axes during "
+			"transit for ~30-50%% faster moves at the cost of higher "
+			"peak current — confirm your supply can drive both motors "
+			"at once before enabling.",
+			wraplength=320,
+		).grid(row=10, column=0, sticky="we", padx=(16, 0), pady=(4, 0))
+
 		# ---- Col 1: Notifications -------------------------------------
 		# Spans rows 1 + 2 so its taller content balances Plate +
 		# Inter-sample Purge + Run Behavior stacked in column 0.
@@ -4312,6 +4423,30 @@ class App(tk.Tk):
 			new_speed_mode = speed_var.get()
 			if new_speed_mode not in ("slow", "variable"):
 				new_speed_mode = self.motor_speed_mode
+			new_motion_mode = motion_var.get()
+			if new_motion_mode not in ("sequential", "simultaneous"):
+				new_motion_mode = self.motion_mode
+			# One-time safety prompt when the operator switches FROM
+			# sequential TO simultaneous and hasn't already confirmed
+			# during this session. Cancel reverts the radio so the
+			# dialog still reflects the committed value if re-opened.
+			if (new_motion_mode == "simultaneous"
+					and self.motion_mode != "simultaneous"
+					and not self._simultaneous_motion_confirmed):
+				go = messagebox.askyesno(
+					"Enable Simultaneous motion?",
+					"Simultaneous motion roughly doubles the peak "
+					"current draw during transit moves because both "
+					"steppers are energised at once. Make sure your "
+					"motor power supply is rated for this (typically "
+					"12V/3A or higher feeding both motors).\n\n"
+					"Continue?",
+					parent=dlg,
+				)
+				if not go:
+					motion_var.set(self.motion_mode)
+					return
+				self._simultaneous_motion_confirmed = True
 			# Validate the transit speed factor only when Variable
 			# mode is the *new* selection; in Slow mode the field is
 			# kept as-is for round-tripping but doesn't gate OK.
@@ -4404,6 +4539,18 @@ class App(tk.Tk):
 					"Motor speed prefs updated: mode=%s factor=%.2f",
 					new_speed_mode, new_factor,
 				)
+			# Motion mode. ``move_to_positions`` consults
+			# ``self.motion_mode`` per call, so a mid-session change
+			# takes effect on the next multi-axis transit. Clear the
+			# session-confirmation flag on the way back to sequential
+			# so a future re-enable re-shows the safety dialog.
+			motion_mode_changed = (new_motion_mode != self.motion_mode)
+			self.motion_mode = new_motion_mode
+			if new_motion_mode == "sequential":
+				self._simultaneous_motion_confirmed = False
+			if motion_mode_changed:
+				logger.info(
+					"Motion mode updated: %s", new_motion_mode)
 			# Commit the notification settings into App state so the
 			# next intervention picks them up immediately, then
 			# persist to disk.
@@ -4419,6 +4566,7 @@ class App(tk.Tk):
 				config_store.save_plate_orientation(self.plate_orientation)
 				config_store.save_motor_speed_mode(self.motor_speed_mode)
 				config_store.save_transit_speed_factor(self.transit_speed_factor)
+				config_store.save_motion_mode(self.motion_mode)
 				config_store.save_notification_config(self.notification_config)
 			except Exception as exc:
 				logger.warning("Could not persist preferences: %s", exc)
@@ -4865,14 +5013,16 @@ class App(tk.Tk):
 			cancel_btn["state"] = tk.DISABLED
 
 		def _return_to_origin():
-			"""Drive both motors back to (0, 0) via absolute moves.
-			Cancel-checked between axes."""
+			"""Drive both motors back to (0, 0). Routes through
+			``move_to_positions`` so the active motion_mode
+			(sequential vs simultaneous) applies — Slippage data
+			collected under simultaneous mode will reflect that
+			path's actual mechanical signature."""
 			try:
-				self.table_motor.move_dist_absolute(0.0, is_transit=True)
-				if ctx["cancelled"]:
-					return
-				self.carriage_motor.move_dist_absolute(0.0,
-					is_transit=True)
+				self.move_to_positions(
+					table_dist=0.0, carriage_dist=0.0,
+					is_transit=True,
+				)
 			except Exception as exc:
 				logger.warning(
 					"Slippage: return-to-origin failed: %s", exc)
@@ -5002,34 +5152,29 @@ class App(tk.Tk):
 					return True
 				return False
 
+			# Each round trip = one dual-axis outbound + one dual-axis
+			# return. Routing through ``move_to_positions`` so the
+			# active motion_mode applies — under "simultaneous" the
+			# diagonal trajectory is the actual stressor; under
+			# "sequential" the two-leg L-shape is.
 			for trip in range(trips):
-				self.table_motor.move_dist_absolute(target_x_cm,
-					is_transit=True)
+				self.move_to_positions(
+					table_dist=target_x_cm,
+					carriage_dist=target_y_cm,
+					is_transit=True,
+				)
 				status = _yield(
-					f"Round trip {trip + 1}/{trips}: outbound X reached "
-					f"({target_x_cm:.2f} cm)"
+					f"Round trip {trip + 1}/{trips}: outbound at "
+					f"({target_x_cm:.2f}, {target_y_cm:.2f}) cm"
 				)
 				if _handle_skip_or_cancel(status):
 					return
-				self.carriage_motor.move_dist_absolute(target_y_cm,
-					is_transit=True)
-				status = _yield(
-					f"Round trip {trip + 1}/{trips}: outbound Y reached "
-					f"({target_y_cm:.2f} cm)"
+				self.move_to_positions(
+					table_dist=0.0, carriage_dist=0.0,
+					is_transit=True,
 				)
-				if _handle_skip_or_cancel(status):
-					return
-				self.table_motor.move_dist_absolute(0.0,
-					is_transit=True)
 				status = _yield(
-					f"Round trip {trip + 1}/{trips}: return X to origin"
-				)
-				if _handle_skip_or_cancel(status):
-					return
-				self.carriage_motor.move_dist_absolute(0.0,
-					is_transit=True)
-				status = _yield(
-					f"Round trip {trip + 1}/{trips}: return Y to origin"
+					f"Round trip {trip + 1}/{trips}: returned to origin"
 				)
 				if _handle_skip_or_cancel(status):
 					return
@@ -5094,17 +5239,16 @@ class App(tk.Tk):
 				for _well in range(wells_per_plate):
 					target_x = x_start + cx * ws
 					target_y = y_start + cy * ws
-					self.table_motor.move_dist_absolute(
-						target_x, is_transit=False)
-					status = _yield(
-						f"Snake well {done + 1}/{total_wells} "
-						f"(plate {_plate + 1}/{plates}) — X reached"
+					# Dual-axis well-to-well move; routed via
+					# ``move_to_positions`` so the active motion
+					# mode (sequential or simultaneous) drives
+					# the synthetic snake exactly the way it
+					# would drive a production fractionation.
+					self.move_to_positions(
+						table_dist=target_x,
+						carriage_dist=target_y,
+						is_transit=False,
 					)
-					if _handle_skip_or_cancel(status):
-						bail = True
-						break
-					self.carriage_motor.move_dist_absolute(
-						target_y, is_transit=False)
 					done += 1
 					status = _yield(
 						f"Snake well {done}/{total_wells} "
@@ -6024,8 +6168,11 @@ class App(tk.Tk):
 			try:
 				self.set_status("Returning to origin…")
 				self.update_idletasks()
-				self.table_motor.move_dist_absolute(0.0, is_transit=True)
-				self.carriage_motor.move_dist_absolute(0.0, is_transit=True)
+				# Route through ``move_to_positions`` so the active
+				# motion_mode applies — simultaneous shaves transit
+				# time on a wide-XY return-to-origin.
+				self.move_to_positions(
+					table_dist=0.0, carriage_dist=0.0, is_transit=True)
 				self.table_motor.tare()
 				self.carriage_motor.tare()
 			except Exception as exc:
@@ -6824,6 +6971,159 @@ class App(tk.Tk):
 
 	# -- Manual jog -------------------------------------------------------
 
+	def _move_dual_axis_simultaneous(self, table_dist_cm, carriage_dist_cm,
+			*, is_transit):
+		"""Coordinated two-axis transit via Bresenham-interleaved
+		microstepping. ``table_dist_cm`` is the absolute X target;
+		``carriage_dist_cm`` is the SOUTH-distance value (positive)
+		that ``move_to_positions`` already converts to a NEGATIVE
+		motor-frame angle before this call. Both arguments are the
+		raw values the sequential ``move_dist_absolute`` would have
+		received.
+
+		Approach:
+
+		  1. Translate both targets into per-axis angle deltas via
+		     each motor's own ``move_absolute → move_relative`` math.
+		     ``_plan_move`` returns the signed intent + backlash
+		     microstep counts and the ``hardware.FORWARD/BACKWARD``
+		     sentinel for each axis.
+		  2. **Backlash phase.** Each axis's one-shot backlash takeup
+		     fires sequentially on the affected axis (typically only
+		     one axis reverses at a time, and pre-applying backlash
+		     keeps the interleaved phase strictly intent-only). This
+		     also matches the sequential path's mechanical behaviour
+		     so wear-tracking values agree.
+		  3. **Interleaved phase.** Bresenham over both axes' intent
+		     step counts: the longer axis steps every iteration, the
+		     shorter axis steps when its accumulator overflows.
+		     Both axes run inside the same loop body so the I²C
+		     ``onestep`` calls alternate at the inter-microstep
+		     timescale — at the chassis, both motor coils are
+		     energised within each control cycle.
+		  4. **Counter accounting.** Each axis's
+		     ``total_microsteps_taken`` and ``reversal_count`` are
+		     updated exactly once per logical call via
+		     ``_record_usage`` — backlash + intent both count, same
+		     as the sequential path. The Usage tool reports
+		     identical totals across motion modes for the same
+		     physical move.
+		  5. **Step delay.** The longer axis sets the cadence; the
+		     shorter axis steps at the same wall-clock cadence but
+		     only every Nth iteration. Both axes use the same
+		     ``_step_delay_for(is_transit)`` value (which already
+		     reflects Variable-speed mode + transit multiplier per
+		     axis when both share the chassis speed setting).
+		"""
+		table = self.table_motor
+		carriage = self.carriage_motor
+
+		# Compute per-axis ANGLE delta (degrees) using each motor's
+		# own absolute-to-relative arithmetic. ``move_dist_absolute``
+		# would have done ``move_absolute(dist / cm_per_deg) →
+		# move_relative(target_angle − self.angle)``; replicate
+		# exactly so the planner sees the same numbers it would
+		# have under the sequential path.
+		x_target_angle = table_dist_cm / table.cm_per_deg
+		x_delta_angle = x_target_angle - table.angle
+		# Carriage uses NEGATIVE angle for south positions; the
+		# caller has already negated, so the value reaching us is
+		# already in motor-frame.
+		y_target_angle = carriage_dist_cm / carriage.cm_per_deg
+		y_delta_angle = y_target_angle - carriage.angle
+
+		x_intent, x_backlash, x_total, x_direction = table._plan_move(
+			x_delta_angle)
+		y_intent, y_backlash, y_total, y_direction = carriage._plan_move(
+			y_delta_angle)
+
+		# Pure single-axis move: bypass the interleave; just call
+		# the existing sequential path which we know is correct.
+		if x_total == 0 or y_total == 0:
+			# Single-axis short-circuit. Use the standard
+			# ``move_relative`` path so backlash + angle + release
+			# semantics match exactly; revert any direction flips
+			# ``_plan_move`` already applied since we're calling
+			# back into the same planner via move_relative.
+			if x_total == 0 and y_total == 0:
+				return
+			if x_total != 0:
+				# Undo the speculative reversal flip so
+				# move_relative recomputes from scratch.
+				table.forwards = not table.forwards if x_backlash else table.forwards
+				table.move_relative(x_delta_angle, is_transit=is_transit)
+			if y_total != 0:
+				carriage.forwards = not carriage.forwards if y_backlash else carriage.forwards
+				carriage.move_relative(y_delta_angle, is_transit=is_transit)
+			return
+
+		# Backlash phase — fire per-axis, sequentially. Backlash is
+		# a one-shot takeup; running it inside the interleave would
+		# leak its microsteps into the intent-step accounting.
+		step_delay = max(
+			table._step_delay_for(is_transit),
+			carriage._step_delay_for(is_transit),
+		)
+		if x_backlash != 0:
+			for _ in range(abs(x_backlash)):
+				table.motor.onestep(direction=x_direction,
+					style=hardware.MICROSTEP)
+				sleep(step_delay)
+		if y_backlash != 0:
+			for _ in range(abs(y_backlash)):
+				carriage.motor.onestep(direction=y_direction,
+					style=hardware.MICROSTEP)
+				sleep(step_delay)
+
+		# Bresenham interleave on intent steps. The longer axis is
+		# the "major" axis; the shorter rides an error accumulator.
+		x_intent_abs = abs(x_intent)
+		y_intent_abs = abs(y_intent)
+		longer = max(x_intent_abs, y_intent_abs)
+		shorter = min(x_intent_abs, y_intent_abs)
+		err = longer // 2
+		x_is_major = x_intent_abs >= y_intent_abs
+		for i in range(longer):
+			# Major axis steps every iteration.
+			if x_is_major:
+				table.motor.onestep(direction=x_direction,
+					style=hardware.MICROSTEP)
+			else:
+				carriage.motor.onestep(direction=y_direction,
+					style=hardware.MICROSTEP)
+			err -= shorter
+			if err < 0:
+				# Minor axis catches up this iteration.
+				if x_is_major:
+					carriage.motor.onestep(direction=y_direction,
+						style=hardware.MICROSTEP)
+				else:
+					table.motor.onestep(direction=x_direction,
+						style=hardware.MICROSTEP)
+				err += longer
+			sleep(step_delay)
+
+		# Counter accounting — one call per axis per logical move.
+		# ``_record_usage`` handles the zero-step short-circuit.
+		table._record_usage(x_total)
+		carriage._record_usage(y_total)
+
+		# Update each axis's tracked slider position by the intent
+		# portion only (backlash advances the motor but not the
+		# slider) — same accounting as ``StepperMotor.move_relative``.
+		table.angle = table.angle + x_intent / table.steps_per_degree
+		carriage.angle = carriage.angle + y_intent / carriage.steps_per_degree
+		# Release both coils to prevent overheating once the move
+		# completes — mirrors per-axis ``move_relative`` behaviour.
+		table.release()
+		carriage.release()
+
+		logger.debug(
+			"simultaneous move: x_intent=%d x_backlash=%d "
+			"y_intent=%d y_backlash=%d (Bresenham longer=%d shorter=%d)",
+			x_intent, x_backlash, y_intent, y_backlash, longer, shorter,
+		)
+
 	def move_to_positions(self, table_dist=None, carriage_dist=None, *,
 			is_transit=False):
 		"""Move table and/or carriage to absolute positions (cm).
@@ -6849,6 +7149,17 @@ class App(tk.Tk):
 		and the next Manual Y− click decreases its magnitude, sending
 		the crosshair UP instead of DOWN.
 		"""
+		# Both axes requested AND motion_mode == "simultaneous" →
+		# interleaved Bresenham path. Otherwise (or for single-axis
+		# moves) fall through to the sequential per-axis path.
+		if (table_dist is not None and carriage_dist is not None
+				and self.motion_mode == "simultaneous"):
+			self._move_dual_axis_simultaneous(
+				table_dist_cm=table_dist,
+				carriage_dist_cm=-carriage_dist,
+				is_transit=is_transit,
+			)
+			return
 		if table_dist is not None:
 			self.table_motor.move_dist_absolute(table_dist,
 				is_transit=is_transit)
@@ -11695,9 +12006,10 @@ class App(tk.Tk):
 	def carriage_return(self):
 		"""Return the needle to the starting position. Transit move —
 		dispense isn't in flight when this fires (Return to Origin from
-		idle / end of run)."""
-		self.table_motor.move_dist_absolute(0.0, is_transit=True)
-		self.carriage_motor.move_dist_absolute(0.0, is_transit=True)
+		idle / end of run). Routes through ``move_to_positions`` so the
+		active motion_mode applies (sequential vs simultaneous)."""
+		self.move_to_positions(
+			table_dist=0.0, carriage_dist=0.0, is_transit=True)
 
 
 def parse_args(argv=None):

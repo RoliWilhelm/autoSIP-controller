@@ -677,6 +677,59 @@ def save_motor_speed_mode(mode):
 		json.dump(existing, f, indent=2)
 
 
+# -- motion_mode ------------------------------------------------------
+
+# Top-level string preference selecting how the two axes share time
+# during multi-axis transit moves.
+#   "sequential" (default) — X moves to its target, then Y moves.
+#     Lower peak current; the safe choice for marginal power
+#     supplies. Total transit time ≈ T_x + T_y.
+#   "simultaneous" — interleaved-step Bresenham over both axes so
+#     both motors run concurrently. Roughly halves the transit
+#     time on moves where both deltas are non-trivial, at the cost
+#     of higher peak current (both motors energised at once). The
+#     operator must confirm a one-time safety prompt the first
+#     time they enable it.
+
+def load_motion_mode():
+	"""Return ``"sequential"`` or ``"simultaneous"``. Defaults to
+	``"sequential"`` so any fresh launch — and any existing config
+	from before this feature — keeps the original behaviour."""
+	path = get_config_path()
+	if not path.exists():
+		return "sequential"
+	try:
+		with open(path) as f:
+			data = json.load(f)
+	except (OSError, json.JSONDecodeError):
+		return "sequential"
+	if not isinstance(data, dict):
+		return "sequential"
+	val = data.get("motion_mode")
+	return val if val in ("sequential", "simultaneous") else "sequential"
+
+
+def save_motion_mode(mode):
+	"""Persist the motion mode to config.json. Preserves other
+	top-level keys. Silently ignores unknown values."""
+	if mode not in ("sequential", "simultaneous"):
+		return
+	path = get_config_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	existing = {}
+	if path.exists():
+		try:
+			with open(path) as f:
+				existing = json.load(f)
+		except (OSError, json.JSONDecodeError):
+			existing = {}
+	if not isinstance(existing, dict):
+		existing = {}
+	existing["motion_mode"] = mode
+	with open(path, "w") as f:
+		json.dump(existing, f, indent=2)
+
+
 def load_transit_speed_factor():
 	"""Return the persisted transit speed factor. Defaults to ``2.0``.
 	Clamped to the validation bounds on read so a malformed config
