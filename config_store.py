@@ -46,6 +46,20 @@ FIELDS = (
 # ``waste_anchor_version`` so the loader knows whether to migrate.
 WASTE_ANCHOR_VERSION = 2
 
+# Current portrait Y-direction convention. v1 = cols extend NORTH
+# (−Y) from A1; calibrated ``carriage_start_cm`` sat near the SOUTH
+# edge of the workspace. v2 = cols extend SOUTH (+Y) from A1;
+# calibrated ``carriage_start_cm`` sits near the NORTH edge (close
+# to origin). v2 was introduced when the plate-preview widget
+# adopted A1-at-top-right; this migration shifts pre-v2
+# ``carriage_start_cm`` values down by ``(cols − 1) × well_size``
+# so existing profiles continue rendering A1 at the upper-right
+# under the new convention. Only fires when the loaded payload
+# carries enough plate-geometry context to compute the shift;
+# otherwise the version stamp is updated silently and the user
+# recalibrates manually if the new layout looks wrong.
+PORTRAIT_Y_VERSION = 2
+
 _CONFIG_DIR = Path.home() / ".autosip"
 
 
@@ -88,6 +102,70 @@ def _migrate_waste_anchor(payload):
 	if wy is not None and ext_y > 0:
 		payload["waste_bin_carriage"] = f"{wy + ext_y / 2.0:.2f}"
 	payload["waste_anchor_version"] = WASTE_ANCHOR_VERSION
+
+
+def _migrate_portrait_y(payload, *, plate_orientation):
+	"""Silently bring the portrait Y convention up to current.
+
+	v1 calibrated ``carriage_start_cm`` at the SOUTH edge of the
+	workspace (cols extended NORTH from A1). v2 calibrates it at the
+	NORTH edge (cols extend SOUTH). When ``plate_orientation`` is
+	``"portrait"`` and the loaded payload predates v2, shift
+	``carriage_start`` down by ``(cols - 1) * well_size`` so the
+	stored A1 position keeps representing the same physical
+	calibration after the rendering convention flip.
+
+	When orientation is landscape, or the payload lacks the
+	geometry context (cols, well_size, carriage_start) needed to
+	compute the shift, the version stamp is updated without
+	touching the coordinate — the operator recalibrates manually
+	if the resulting layout looks wrong.
+	"""
+	try:
+		version = int(payload.get("portrait_y_version", 1) or 1)
+	except (TypeError, ValueError):
+		version = 1
+	if version >= PORTRAIT_Y_VERSION:
+		return
+
+	def _coerce_float(key):
+		raw = payload.get(key, "")
+		if raw in (None, ""):
+			return None
+		try:
+			return float(raw)
+		except (TypeError, ValueError):
+			return None
+
+	def _coerce_int(key):
+		raw = payload.get(key, "")
+		if raw in (None, ""):
+			return None
+		try:
+			return int(raw)
+		except (TypeError, ValueError):
+			return None
+
+	if plate_orientation == "portrait":
+		cols = _coerce_int("cols")
+		well_size = _coerce_float("well_size")
+		carriage_start = _coerce_float("carriage_start")
+		if (cols is not None and well_size is not None
+				and carriage_start is not None and cols > 0):
+			# v1 A1 was the SOUTH end of the plate (cols extended
+			# north), so the plate's NORTH edge sat at workspace
+			# Y = carriage_start − (cols − 1) × well_size. Under
+			# v2 cols extend SOUTH, so A1 now coincides with that
+			# same northern plate edge — the operator's physical
+			# plate location is unchanged.
+			shifted = carriage_start - (cols - 1) * well_size
+			# Defensive clamp to the validator's [0, 15] cm range
+			# so an exotic legacy calibration doesn't write an
+			# out-of-bounds value. Operator fine-tunes via Manual
+			# mode if the shifted value lands outside the plate.
+			shifted = max(0.0, min(shifted, 15.0))
+			payload["carriage_start"] = f"{shifted:.2f}"
+	payload["portrait_y_version"] = PORTRAIT_Y_VERSION
 
 
 def get_config_dir():
@@ -133,11 +211,26 @@ def load_last_used():
 		# get migrated.
 		last["waste_anchor_version"] = data.get("waste_anchor_version", 1)
 	try:
-		_pre_version = int(last.get("waste_anchor_version", 1) or 1)
+		_pre_waste_version = int(last.get("waste_anchor_version", 1) or 1)
 	except (TypeError, ValueError):
-		_pre_version = 1
+		_pre_waste_version = 1
 	_migrate_waste_anchor(last)
-	if _pre_version < WASTE_ANCHOR_VERSION:
+
+	# Portrait Y-direction (NORTH → SOUTH) migration. Uses the
+	# top-level ``plate_orientation`` to decide whether the saved
+	# ``carriage_start`` needs shifting.
+	if "portrait_y_version" not in last:
+		last["portrait_y_version"] = data.get("portrait_y_version", 1)
+	try:
+		_pre_y_version = int(last.get("portrait_y_version", 1) or 1)
+	except (TypeError, ValueError):
+		_pre_y_version = 1
+	_orientation = data.get("plate_orientation") if isinstance(
+		data.get("plate_orientation"), str) else "landscape"
+	_migrate_portrait_y(last, plate_orientation=_orientation)
+
+	if (_pre_waste_version < WASTE_ANCHOR_VERSION
+			or _pre_y_version < PORTRAIT_Y_VERSION):
 		try:
 			save_last_used(last)
 		except OSError:
@@ -194,6 +287,7 @@ def save_last_used(values):
 
 	existing["last_used"] = {k: values.get(k, "") for k in FIELDS}
 	existing["waste_anchor_version"] = WASTE_ANCHOR_VERSION
+	existing["portrait_y_version"] = PORTRAIT_Y_VERSION
 	with open(path, "w") as f:
 		json.dump(existing, f, indent=2)
 
@@ -231,13 +325,29 @@ def load_profile(name):
 	# Migration uses the on-disk dict directly so the version stamp
 	# lands inside the profile file. Persist unconditionally whenever
 	# the on-disk version was below current — covers both the
-	# coords-shifted path and the extent-0 "stamp only" path.
+	# coords-shifted path and the "stamp only" paths.
 	try:
-		on_disk_version = int(data.get("waste_anchor_version", 1) or 1)
+		on_disk_waste_version = int(data.get("waste_anchor_version", 1) or 1)
 	except (TypeError, ValueError):
-		on_disk_version = 1
+		on_disk_waste_version = 1
 	_migrate_waste_anchor(data)
-	if on_disk_version < WASTE_ANCHOR_VERSION:
+
+	try:
+		on_disk_y_version = int(data.get("portrait_y_version", 1) or 1)
+	except (TypeError, ValueError):
+		on_disk_y_version = 1
+	# Portrait-Y migration needs the current global orientation; the
+	# profile itself does not carry one, so we read it from the
+	# top-level config.json. Falls back to "landscape" (safe no-op
+	# branch) when config.json is absent.
+	try:
+		current_orientation = load_plate_orientation()
+	except Exception:
+		current_orientation = "landscape"
+	_migrate_portrait_y(data, plate_orientation=current_orientation)
+
+	if (on_disk_waste_version < WASTE_ANCHOR_VERSION
+			or on_disk_y_version < PORTRAIT_Y_VERSION):
 		try:
 			path.parent.mkdir(parents=True, exist_ok=True)
 			with open(path, "w") as f:
@@ -251,13 +361,15 @@ def load_profile(name):
 def save_profile(name, values):
 	"""Write ``values`` (filtered to FIELDS) to ``profiles/{name}.json``.
 
-	Stamps the current ``waste_anchor_version`` next to the FIELDS so
-	the corner→center migration knows the file is current.
+	Stamps the current ``waste_anchor_version`` + ``portrait_y_version``
+	next to the FIELDS so the corner→center and portrait-Y migrations
+	know the file is current.
 	"""
 	path = _profile_path(name)
 	path.parent.mkdir(parents=True, exist_ok=True)
 	payload = {k: values.get(k, "") for k in FIELDS}
 	payload["waste_anchor_version"] = WASTE_ANCHOR_VERSION
+	payload["portrait_y_version"] = PORTRAIT_Y_VERSION
 	with open(path, "w") as f:
 		json.dump(payload, f, indent=2)
 
@@ -625,11 +737,12 @@ def save_transit_speed_factor(factor):
 # Well Position.
 
 def load_plate_orientation():
-	"""Return the persisted plate orientation. ``"portrait"`` for fresh
-	installs (no config.json on disk). For pre-existing configs that
-	predate the orientation feature, defaults to ``"landscape"`` to
-	preserve the previously-working setup — those operators must
-	deliberately switch to portrait via Tools → Preferences."""
+	"""Return the persisted plate orientation, defaulting to
+	``"portrait"`` whenever the persisted value is missing or
+	unrecognised. Portrait matches the physical autoSIP layout
+	(origin at the upper-right, A1 at top-right of the plate
+	preview); operators who actually mount the plate in landscape
+	switch via Settings → Preferences."""
 	path = get_config_path()
 	if not path.exists():
 		return "portrait"
@@ -643,9 +756,7 @@ def load_plate_orientation():
 	val = data.get("plate_orientation")
 	if val in ("portrait", "landscape"):
 		return val
-	# Config exists but no key — existing user from pre-orientation
-	# build. Keep their working setup (landscape).
-	return "landscape"
+	return "portrait"
 
 
 def save_plate_orientation(orientation):

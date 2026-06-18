@@ -1345,9 +1345,10 @@ class AutomatedFrame(tk.Frame):
 		)
 		self.plate_id_te = TextEntry(runp, "Plate ID:")
 		self.plate_id_te.grid(row=2, column=0, sticky="we")
-		# First-launch default. last_used (loaded after frames build) will
-		# override this if the operator already used a different Plate ID.
-		self.plate_id_te.set("Plate-1")
+		# First-launch default is empty per the fresh-install spec —
+		# the operator must enter a plate id before the run logger
+		# accepts the input. ``set_values`` will fill from last_used
+		# if a persisted value exists.
 		Tooltip(
 			self.plate_id_te.entry,
 			"Identifies the physical plate currently on the stage. "
@@ -3862,15 +3863,20 @@ class App(tk.Tk):
 		# container's physical position is one fact, not a per-mode setting.
 		# Must be created BEFORE the frames so each frame can reference
 		# them in its constructor.
+		# Waste-bin CENTER coords stay empty on fresh install —
+		# operator must calibrate via Manual mode's Position
+		# Calibration Tool. The validators at run start refuse to
+		# proceed until they're populated when discards > 0.
 		self.waste_bin_table_var = tk.StringVar()
 		self.waste_bin_carriage_var = tk.StringVar()
-		# Waste-bin RECTANGLE extents (cm). The anchor lives in the two
-		# vars above; these two extend the bin south and east. Empty /
-		# missing values are treated as zero — preserving legacy
-		# point-target behaviour. Shared at App level for the same
-		# cross-mode reason as the anchor vars.
-		self.waste_bin_x_extent_var = tk.StringVar()
-		self.waste_bin_y_extent_var = tk.StringVar()
+		# Waste-bin rectangle extents (cm). Conservative 5 × 8 cm
+		# default for a fresh install — large enough that the
+		# shortest-path move-to-waste helper has room to clamp the
+		# needle inside the bin's interior for typical lab catch
+		# containers. Operator narrows these via Settings → Cleaning
+		# Parameters once they measure their actual bin.
+		self.waste_bin_x_extent_var = tk.StringVar(value="5.0")
+		self.waste_bin_y_extent_var = tk.StringVar(value="8.0")
 		# Inter-sample purge time. Owned at App level so the Cleaning-mode
 		# Purge Time Calibration panel can write a measured value here and
 		# Automated mode's Purge time entry picks it up immediately.
@@ -3902,11 +3908,12 @@ class App(tk.Tk):
 		# and the status-bar fill-level indicator.
 		self.max_waste_volume_var = tk.StringVar(value="250.0")
 		# Fractionation pump rate (mL/hr) and drip-wait time (s). Promoted to
-		# App level so the new Tools → Pump Parameters dialog can bind
-		# to the same variables that get_values / set_values + the
-		# state machine read. No inline default — operator must
-		# configure before the first run (run-start guard fires).
-		self.pump_rate_var = tk.StringVar(value="")
+		# App level so the new Settings → Fractionation Parameters
+		# dialog can bind to the same variables that get_values /
+		# set_values + the state machine read. Default 140 mL/hr is
+		# the conservative starting point for the Razel R-200 mid-
+		# range gear set; operator tunes per their hardware.
+		self.pump_rate_var = tk.StringVar(value="140")
 		self.drip_wait_time_var = tk.StringVar(value="1.0")
 
 		# Waste-bin estimate. Initialized to 0 on every launch and NOT
@@ -8827,8 +8834,9 @@ class App(tk.Tk):
 			advanced = True
 		if advanced:
 			if self.plate_orientation == "portrait":
+				# Portrait (post-Fix-B): rows EAST (+X), cols SOUTH (+Y).
 				target_x_cm = s.table_start_cm + s.y * s.well_size
-				target_y_cm = s.carriage_start_cm - s.x * s.well_size
+				target_y_cm = s.carriage_start_cm + s.x * s.well_size
 			else:
 				target_x_cm = s.table_start_cm + s.x * s.well_size
 				target_y_cm = s.carriage_start_cm + s.y * s.well_size
@@ -10167,9 +10175,9 @@ class App(tk.Tk):
 			else:
 				current_well_id = f"{chr(ord('A') + s.y)}{s.x + 1}"
 				if self.plate_orientation == "portrait":
-					# Portrait: rows east (+X), cols NORTH (-Y).
+					# Portrait (post-Fix-B): rows east (+X), cols SOUTH (+Y).
 					dest_x_cm = s.table_start_cm + s.y * s.well_size
-					dest_y_cm = s.carriage_start_cm - s.x * s.well_size
+					dest_y_cm = s.carriage_start_cm + s.x * s.well_size
 				else:
 					# Landscape: cols east (+X), rows south (+Y).
 					dest_x_cm = s.table_start_cm + s.x * s.well_size
@@ -11569,11 +11577,11 @@ class App(tk.Tk):
 		# Absolute target. Same orientation-aware mapping as
 		# ``well_id_to_cm`` (and ``_prime_phase``'s current-well
 		# lookup) so this move agrees with every other state-machine
-		# absolute-position computation. Portrait cols extend NORTH
-		# (−Y) from A1 per the LEFT-anchored convention.
+		# absolute-position computation. Portrait cols extend SOUTH
+		# (+Y) from A1 per the post-Fix-B convention.
 		if self.plate_orientation == "portrait":
 			target_x_cm = s.table_start_cm + s.y * s.well_size
-			target_y_cm = s.carriage_start_cm - s.x * s.well_size
+			target_y_cm = s.carriage_start_cm + s.x * s.well_size
 		else:
 			target_x_cm = s.table_start_cm + s.x * s.well_size
 			target_y_cm = s.carriage_start_cm + s.y * s.well_size
@@ -11649,9 +11657,12 @@ class App(tk.Tk):
 			col_motor = self.carriage_motor
 			# Row inner sweep on table (east-positive): no flip.
 			row_sign = +1
-			# Col outer step on carriage going NORTH (toward origin):
-			# motor.angle INCREASES from negative toward 0 → +ws.
-			col_sign = +1
+			# Col outer step on carriage going SOUTH (away from origin):
+			# motor.angle DECREASES (more negative) → −ws. Post-Fix-B
+			# convention has cols extending +Y SOUTH from A1, so the
+			# state-machine "+well_size" col delta translates to a
+			# negative carriage-motor delta (south = negative angle).
+			col_sign = -1
 		else:
 			row_motor = self.carriage_motor
 			col_motor = self.table_motor

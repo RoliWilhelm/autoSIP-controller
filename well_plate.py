@@ -2,8 +2,9 @@
 
 A ``WellPlateProgress`` widget replaces the original 25 px canvas grid with
 a to-scale SBS-format plate (row letters A.. down the left, column numbers
-1.. across the top), header text showing the current well / count / elapsed
-+ remaining time, and tooltips on hover.
+running right-to-left across the top so A1 sits at the canvas top-right
+corner), header text showing the current well / count / elapsed + remaining
+time, and tooltips on hover.
 
 The fractionation state machine in ``main.py`` keeps owning all motion +
 relay logic; it just calls the methods below to drive the view:
@@ -118,20 +119,24 @@ def well_id_to_cm(well_id, start_x_cm, start_y_cm, well_width_cm,
 	"""Return the absolute ``(x_cm, y_cm)`` table+carriage positions
 	for a SBS well_id given the calibrated A1 location and well width.
 
-	Origin (0, 0) is always the upper-left mechanical limit and the
-	motor reverse flags are fixed regardless of orientation. Plate
-	orientation only changes which plate axis maps to which motor
-	axis:
+	Origin (0, 0) is the upper-RIGHT mechanical limit (both lead
+	screws retracted closest to their motors); ``+X`` workspace
+	advances WEST along the table screw, ``+Y`` workspace advances
+	SOUTH along the carriage screw. Plate orientation only changes
+	which plate axis maps to which motor axis:
 
-	  * ``"landscape"`` — columns on X, rows on Y.
+	  * ``"landscape"`` — columns on X, rows on Y. A1 anchored
+	    near origin so the plate extends WEST + SOUTH from A1.
 	    ``x = start_x + col_idx × well_width``
 	    ``y = start_y + row_idx × well_width``
 
-	  * ``"portrait"`` — rows on X (east-positive), columns on Y
-	    (north-NEGATIVE relative to A1, since col 2, 3, ... extend
-	    UP from A1 in the LEFT-anchored portrait convention).
+	  * ``"portrait"`` — rows on X, columns on Y. A1 anchored
+	    near origin so the plate extends WEST + SOUTH from A1
+	    (matching the XY-table widget's A1-at-top-right
+	    visualization). Cols 2, 3, … extend SOUTH (``+Y``) from
+	    A1 — the post-fix kinematic convention.
 	    ``x = start_x + row_idx × well_width``
-	    ``y = start_y − col_idx × well_width``
+	    ``y = start_y + col_idx × well_width``
 
 	``start_x_cm`` / ``start_y_cm`` are the operator-calibrated A1
 	coordinates for the current orientation; they're the sole input
@@ -147,7 +152,7 @@ def well_id_to_cm(well_id, start_x_cm, start_y_cm, well_width_cm,
 	col_idx, row_idx = parse_well_id(well_id)
 	if orientation == "portrait":
 		x_cm = start_x_cm + row_idx * well_width_cm
-		y_cm = start_y_cm - col_idx * well_width_cm
+		y_cm = start_y_cm + col_idx * well_width_cm
 	else:
 		x_cm = start_x_cm + col_idx * well_width_cm
 		y_cm = start_y_cm + row_idx * well_width_cm
@@ -316,11 +321,20 @@ class TableView(tk.Frame):
 	markers (origin, waste bin), and a live crosshair for the
 	dispenser's real-time position.
 
-	Lives next to ``WellPlateProgress`` in Automated mode. Origin
-	(0, 0 cm) is the upper-left corner of the table; +X moves east,
-	+Y moves south, matching the canvas's native coordinate
-	convention so no axis flipping is needed — only a scale from
-	cm to pixels.
+	Lives next to ``WellPlateProgress`` in Automated and Manual modes.
+
+	Coordinate convention — the X-axis is **mirrored on screen** to
+	match the physical autoSIP layout. The mechanical origin (both
+	lead screws retracted closest to their motors) sits at the
+	upper-RIGHT corner of the workspace in real space, so workspace
+	X = 0 maps to the table's RIGHT edge on the canvas; increasing
+	workspace X (motor commands ``+X``) walks LEFT across the
+	screen. The Y-axis is not flipped: workspace Y = 0 stays at the
+	canvas top and ``+Y`` walks DOWN, matching the carriage motor's
+	south-positive convention. Every X-coordinate computation in
+	this widget routes through ``_ws_x_to_canvas`` so the mirror
+	lives in exactly one place; kinematics, stored coords, and
+	log.csv values are unchanged — only the rendering flips.
 
 	Implementation rolls out across five phases (see the spec the
 	user provided). This file's current scope is **Phase 1 only** —
@@ -502,16 +516,32 @@ class TableView(tk.Frame):
 		y_offset = (h - table_h_px) / 2
 		return px_per_mm, x_offset, y_offset, table_w_px, table_h_px
 
+	def _ws_x_to_canvas(self, x_mm, geom):
+		"""Map a workspace X coordinate (mm, measured from the
+		mechanical origin where both lead screws are retracted) to
+		its canvas-pixel X position. Applies the X-axis mirror so
+		workspace X = 0 lands at the table's RIGHT edge on screen,
+		matching the physical autoSIP layout. Increasing workspace X
+		walks LEFT across the canvas.
+
+		``geom`` is the tuple returned by ``_scale()``. Centralising
+		every X-coordinate conversion here means there is exactly one
+		place to flip if the operator ever reverses the chassis.
+		"""
+		pxmm, x_off, _y_off, _t_w, _t_h = geom
+		return x_off + (TABLE_WIDTH_MM - x_mm) * pxmm
+
 	def _cm_to_px(self, x_cm, y_cm, geom=None):
 		"""Convert a motor (table_cm, carriage_cm) point to canvas
-		pixels. Pass the cached ``_scale()`` tuple as ``geom`` to
-		avoid recomputing it for many points in one draw."""
+		pixels via the mirrored X helper. Pass the cached ``_scale()``
+		tuple as ``geom`` to avoid recomputing it for many points in
+		one draw."""
 		if geom is None:
 			geom = self._scale()
-		px_per_mm, x_offset, y_offset, _w, _h = geom
+		_pxmm, _x_off, y_offset, _w, _h = geom
 		return (
-			x_offset + x_cm * 10.0 * px_per_mm,
-			y_offset + y_cm * 10.0 * px_per_mm,
+			self._ws_x_to_canvas(x_cm * 10.0, geom),
+			y_offset + y_cm * 10.0 * _pxmm,
 		)
 
 	# -- Drawing --------------------------------------------------------
@@ -570,16 +600,24 @@ class TableView(tk.Frame):
 		# than as labware. Remove by flipping ``_DEBUG_GHOST_PLATES``
 		# to ``False`` once the user has confirmed the layout.
 		if self._DEBUG_GHOST_PLATES:
-			g_w = SBS_FOOTPRINT_SHORT_MM * pxmm  # 85.48 mm in portrait
 			g_h = SBS_FOOTPRINT_LONG_MM * pxmm   # 127.76 mm in portrait
-			# Left ghost: (0, 0) to (85.48, 127.76) mm
+			# Two SBS-portrait footprints tiling the table edge-to-
+			# edge in workspace X. Under the mirror, the workspace
+			# X = [0, 85.48] tile maps to the canvas-RIGHT half and
+			# the X = [85.48, 170.96] tile to the canvas-LEFT half.
+			tile_w_mm = SBS_FOOTPRINT_SHORT_MM
+			# Right-canvas tile (workspace X = [0, 85.48])
+			rx1 = self._ws_x_to_canvas(tile_w_mm, geom)
+			rx2 = self._ws_x_to_canvas(0.0, geom)
 			self.canvas.create_rectangle(
-				x_off, y_off, x_off + g_w, y_off + g_h,
+				rx1, y_off, rx2, y_off + g_h,
 				outline="#cc8844", width=1, dash=(4, 3),
 			)
-			# Right ghost: (85.48, 0) to (170.96, 127.76) mm
+			# Left-canvas tile (workspace X = [85.48, 170.96])
+			lx1 = self._ws_x_to_canvas(2 * tile_w_mm, geom)
+			lx2 = self._ws_x_to_canvas(tile_w_mm, geom)
 			self.canvas.create_rectangle(
-				x_off + g_w, y_off, x_off + 2 * g_w, y_off + g_h,
+				lx1, y_off, lx2, y_off + g_h,
 				outline="#cc8844", width=1, dash=(4, 3),
 			)
 
@@ -622,11 +660,13 @@ class TableView(tk.Frame):
 			footprint_h_mm = SBS_FOOTPRINT_LONG_MM
 			grid_w_mm = self.rows * ws_mm
 			grid_h_mm = self.cols * ws_mm
-			# A1 at BOTTOM-LEFT of grid → grid's UL corner is one
-			# half-well west of A1 and (cols·ws − half_ws) NORTH of
-			# A1's centre.
+			# A1 at TOP-LEFT of grid (post-Fix-B portrait convention:
+			# cols extend SOUTH (+Y) from A1). The grid's UL corner
+			# is one half-well NW of A1's centre — same formula as
+			# landscape, since both orientations now anchor A1 at
+			# the top-left of the grid in workspace coordinates.
 			grid_left_mm = a1_x_mm - half_ws
-			grid_top_mm  = a1_y_mm + half_ws - grid_h_mm
+			grid_top_mm  = a1_y_mm - half_ws
 
 		# SBS footprint centres the well grid via per-orientation
 		# margins. Standard plates have positive margins; extreme
@@ -638,12 +678,19 @@ class TableView(tk.Frame):
 		fp_left_mm = grid_left_mm - margin_x_mm
 		fp_top_mm  = grid_top_mm  - margin_y_mm
 
-		fp_x1 = x_off + fp_left_mm * pxmm
-		fp_y1 = y_off + fp_top_mm  * pxmm
-		fp_x2 = fp_x1 + footprint_w_mm * pxmm
+		# The footprint is a workspace-X rectangle from ``fp_left_mm``
+		# (low workspace X) to ``fp_left_mm + footprint_w_mm`` (high
+		# workspace X). Under the X-axis mirror, the low end maps to
+		# the canvas-RIGHT edge and the high end to the canvas-LEFT,
+		# so the screen rectangle is built from those mirrored
+		# endpoints.
+		fp_right_mm = fp_left_mm + footprint_w_mm
+		fp_x_left_canvas = self._ws_x_to_canvas(fp_right_mm, geom)
+		fp_x_right_canvas = self._ws_x_to_canvas(fp_left_mm, geom)
+		fp_y1 = y_off + fp_top_mm * pxmm
 		fp_y2 = fp_y1 + footprint_h_mm * pxmm
 		self.canvas.create_rectangle(
-			fp_x1, fp_y1, fp_x2, fp_y2,
+			fp_x_left_canvas, fp_y1, fp_x_right_canvas, fp_y2,
 			fill="#ffffff", outline="#444444", width=1,
 		)
 
@@ -659,9 +706,11 @@ class TableView(tk.Frame):
 					cx_mm = a1_x_mm + col_idx * ws_mm
 					cy_mm = a1_y_mm + row_idx * ws_mm
 				else:
+					# Portrait (post-Fix-B): rows on X (east),
+					# cols SOUTH on Y (+Y from A1).
 					cx_mm = a1_x_mm + row_idx * ws_mm
-					cy_mm = a1_y_mm - col_idx * ws_mm
-				cx = x_off + cx_mm * pxmm
+					cy_mm = a1_y_mm + col_idx * ws_mm
+				cx = self._ws_x_to_canvas(cx_mm, geom)
 				cy = y_off + cy_mm * pxmm
 				self.canvas.create_oval(
 					cx - well_r_px, cy - well_r_px,
@@ -689,13 +738,15 @@ class TableView(tk.Frame):
 		"""
 		pxmm, x_off, y_off, _t_w, _t_h = geom
 
-		# Origin marker — a small "+" cross at canvas (0, 0) mm.
-		# Arm length 6 mm; thicker line so it reads against the table
+		# Origin marker — a small "+" cross at workspace (0, 0) mm.
+		# Under the X-axis mirror this lands at the table's RIGHT
+		# edge on screen, matching the physical autoSIP layout. Arm
+		# length 6 mm; thicker line so it reads against the table
 		# fill. Stays in fixed dark grey so the operator can use it
 		# as a stable spatial anchor.
 		arm_mm = 6.0
 		arm_px = arm_mm * pxmm
-		ox = x_off
+		ox = self._ws_x_to_canvas(0.0, geom)
 		oy = y_off
 		self.canvas.create_line(
 			ox - arm_px, oy, ox + arm_px, oy,
@@ -705,12 +756,13 @@ class TableView(tk.Frame):
 			ox, oy - arm_px, ox, oy + arm_px,
 			fill="#333333", width=2,
 		)
-		# Caption sits in the canvas's upper-left corner (outside the
-		# table outline) so it can't be confused with the plate's
-		# starting well — placing it next to the cross used to drop the
-		# text inside the white plate footprint in landscape configs.
+		# Caption sits in the canvas's upper-RIGHT corner (outside
+		# the table outline) so it sits next to the mirrored origin
+		# cross. Placing it elsewhere risked dropping the text
+		# inside the white plate footprint in landscape configs.
+		canvas_w = self.canvas.winfo_width()
 		self.canvas.create_text(
-			4, 4, text="Origin", anchor="nw",
+			canvas_w - 4, 4, text="Origin", anchor="ne",
 			font=("TkDefaultFont", 8), fill="#333333",
 		)
 
@@ -726,11 +778,15 @@ class TableView(tk.Frame):
 		#     pre-configuration state.
 		if not self._has_waste:
 			return
-		# Center, in canvas pixels.
-		cx = x_off + self.waste_x_cm * 10.0 * pxmm
+		# Center, in canvas pixels. X uses the mirror helper so the
+		# bin renders on the screen side that matches its physical
+		# location (e.g., a bin set "far from origin" in workspace X
+		# lands on the canvas-LEFT under the mirror).
+		cx = self._ws_x_to_canvas(self.waste_x_cm * 10.0, geom)
 		cy = y_off + self.waste_y_cm * 10.0 * pxmm
 		if self.waste_x_extent_cm > 0 and self.waste_y_extent_cm > 0:
 			# Center-based rectangle: span ±extent/2 on each axis.
+			# Width is mirror-invariant (extents are unsigned).
 			half_w = self.waste_x_extent_cm * 10.0 * pxmm / 2.0
 			half_h = self.waste_y_extent_cm * 10.0 * pxmm / 2.0
 			x1, y1 = cx - half_w, cy - half_h
@@ -774,9 +830,11 @@ class TableView(tk.Frame):
 
 	def _crosshair_coords(self, geom):
 		"""Return ``(cx, cy, arm_px)`` in canvas pixels for the
-		current crosshair position."""
-		pxmm, x_off, y_off, _t_w, _t_h = geom
-		cx = x_off + self._position_x_cm * 10.0 * pxmm
+		current crosshair position. X routes through the mirror so
+		the live indicator tracks the dispenser's screen position,
+		not its raw workspace coordinate."""
+		pxmm, _x_off, y_off, _t_w, _t_h = geom
+		cx = self._ws_x_to_canvas(self._position_x_cm * 10.0, geom)
 		cy = y_off + self._position_y_cm * 10.0 * pxmm
 		arm_px = self._CROSSHAIR_ARM_MM * pxmm
 		return cx, cy, arm_px
@@ -1271,32 +1329,58 @@ class WellPlateProgress(tk.Frame):
 		self._redraw()
 
 	def _grid_dims(self):
-		"""Return the (canvas_cols, canvas_rows) tuple — i.e. how many
-		well columns and rows the canvas paints. In landscape this is
-		(plate_cols, plate_rows); in portrait the plate is rotated 90°
-		so the canvas shows (plate_rows, plate_cols)."""
+		"""Return the ``(canvas_cols, canvas_rows)`` tuple — i.e. how
+		many well columns and rows the canvas paints, before label
+		margins are added.
+
+		Orientation-aware:
+		  * **Landscape** — ``(plate_cols, plate_rows)``. Canvas is
+		    wider than tall (e.g. 12 × 8 for a 96-well plate).
+		  * **Portrait** — ``(plate_rows, plate_cols)``. Canvas is
+		    taller than wide (e.g. 8 × 12 for a 96-well plate),
+		    matching the physical 90°-rotated plate orientation on
+		    the autoSIP bed.
+
+		``_logical_to_canvas`` handles the corresponding well-to-cell
+		mapping so A1 lands at the canvas top-right corner in both
+		modes."""
 		if self.orientation == "portrait":
 			return self.rows, self.cols
 		return self.cols, self.rows
 
 	def _logical_to_canvas(self, x, y):
-		"""Map a logical well (x=plate-col-index, y=plate-row-index) to
-		canvas grid (col, row). Identity in landscape; in portrait the
-		plate is rotated so plate rows run across the canvas (rows on
-		X-axis) and plate columns run UP the canvas (col 1 at the
-		bottom, so canvas row index = (plate_cols - 1) - x)."""
+		"""Map a logical well (``x``=plate-col-index 0..cols-1,
+		``y``=plate-row-index 0..rows-1) to its canvas grid position
+		``(canvas_col, canvas_row)``.
+
+		In both orientations A1 (``x=0, y=0``) lands at the canvas's
+		**top-right** corner; the formulas differ because portrait
+		swaps which physical axis carries plate-rows vs plate-cols.
+
+		  * **Landscape** — column axis mirrored: ``canvas_col =
+		    (cols - 1) - x``; ``canvas_row = y``. A1 → (cols-1, 0).
+		    Snake A1 → B1 → … → H1 walks DOWN the right column.
+		  * **Portrait** — plate rows now run across the horizontal
+		    axis (mirrored so row A sits on the right) and plate cols
+		    run down the vertical axis (col 1 at top): ``canvas_col =
+		    (rows - 1) - y``; ``canvas_row = x``. A1 → (rows-1, 0).
+		    Snake A1 → B1 → … → H1 walks LEFT across the top row.
+
+		Both modes match the post-fix XY-table view (workspace
+		X = 0 at canvas right edge); the operator can read the two
+		widgets side-by-side.
+		"""
 		if self.orientation == "portrait":
-			return y, (self.cols - 1) - x
-		return x, y
+			return (self.rows - 1) - y, x
+		return (self.cols - 1) - x, y
 
 	def _canvas_to_logical(self, cx, cy):
 		"""Inverse of ``_logical_to_canvas``. Used by hover hit-testing
-		to translate canvas (col, row) back to plate (col_idx, row_idx)."""
+		to translate canvas (col, row) back to plate (col_idx,
+		row_idx)."""
 		if self.orientation == "portrait":
-			# canvas (col, row) → plate (x, y): plate_y = canvas_col,
-			# plate_x = (cols - 1) - canvas_row.
-			return (self.cols - 1) - cy, cx
-		return cx, cy
+			return cy, (self.rows - 1) - cx
+		return (self.cols - 1) - cx, cy
 
 	def _redraw(self):
 		"""Recompute layout (cell sizes, margins, label positions) + redraw.
@@ -1308,10 +1392,15 @@ class WellPlateProgress(tk.Frame):
 		The plate is centered within the usable area when one axis runs
 		out of room before the other.
 
-		Orientation drives the canvas layout via ``_grid_dims`` (which
-		decides the (cols_on_canvas, rows_on_canvas) pair) and
-		``_logical_to_canvas`` (which places each well at its rotated
-		position). Logical well_id semantics are orientation-independent.
+		Orientation drives the canvas aspect ratio via ``_grid_dims``
+		— landscape returns ``(plate_cols, plate_rows)`` (wider than
+		tall), portrait returns ``(plate_rows, plate_cols)`` (taller
+		than wide). ``_logical_to_canvas`` mirrors the correct axis
+		in each mode so A1 always lands at the canvas top-right
+		corner. Labels are placed on the TOP + RIGHT edges with row
+		letters rendered upside-down (``angle=180``) to match the
+		physical plate's printed orientation in the portrait-mounted
+		autoSIP.
 		"""
 		self.canvas.delete("all")
 		self._well_items.clear()
@@ -1328,24 +1417,19 @@ class WellPlateProgress(tk.Frame):
 			self._geom = None
 			return
 
-		# Per-orientation label margin layout. In landscape, the row
-		# letters live on the LEFT edge and the column numbers across
-		# the TOP — matches the physical plate held upright. In
-		# portrait the plate is tilted: row letters move to the
-		# BOTTOM edge and column numbers stay on the LEFT but run
-		# bottom-to-top (col 1 at the bottom = A1 corner). Both
-		# portrait label sets are rotated 90° so they read along
-		# their respective axes when the operator tilts the screen
-		# clockwise to match the physical plate.
-		portrait_label_band = self._PORTRAIT_LABEL_GAP + self._PORTRAIT_LABEL_CLEARANCE
+		# Label margins differ per orientation:
+		#   * Landscape — row letters on LEFT edge, column numbers
+		#     on TOP edge. Wide LEFT, narrow RIGHT.
+		#   * Portrait — row letters on TOP edge, column numbers
+		#     on RIGHT edge. Narrow LEFT, wide RIGHT.
+		# The widget keeps A1 at the canvas top-right in both modes;
+		# the difference is only WHICH labels live where.
+		top_margin = self._TOP_MARGIN
+		bottom_margin = self._BOTTOM_MARGIN
 		if self.orientation == "portrait":
-			top_margin = self._BOTTOM_MARGIN
-			bottom_margin = self._BOTTOM_MARGIN + portrait_label_band
-			left_margin = self._RIGHT_MARGIN + portrait_label_band
-			right_margin = self._RIGHT_MARGIN
+			left_margin = self._RIGHT_MARGIN
+			right_margin = self._LEFT_MARGIN
 		else:
-			top_margin = self._TOP_MARGIN
-			bottom_margin = self._BOTTOM_MARGIN
 			left_margin = self._LEFT_MARGIN
 			right_margin = self._RIGHT_MARGIN
 
@@ -1385,46 +1469,70 @@ class WellPlateProgress(tk.Frame):
 		# (cap a few pts below the in-well sequence font).
 		label_font_size = max(8, min(int(cell_size // 4), icon_font_size - 1))
 
-		# Labels — orientation-dependent placement, both drawn in
-		# the main canvas adjacent to the wells.
-		if self.orientation == "landscape":
-			# Row letters down the LEFT inside-margin, column
-			# numbers across the TOP inside-margin. No rotation.
+		# Labels — orientation-aware placement:
+		#
+		#   * Landscape (12 wide × 8 tall) — column NUMBERS on top
+		#     (one per horizontal cell, 1 above A1 at the right),
+		#     row LETTERS on LEFT edge upright (one per vertical
+		#     cell, A at top — conventional plate reading).
+		#   * Portrait (8 wide × 12 tall) — row LETTERS on top
+		#     rotated 180° (matching the physical plate's printed
+		#     orientation in the portrait-mounted autoSIP), column
+		#     NUMBERS on RIGHT edge upright (one per vertical
+		#     cell, 1 at top).
+		#
+		# The 180° rotation on portrait row letters uses Tk's
+		# ``angle=`` parameter — for single capital letters it is
+		# the visually-correct way to render an upside-down label
+		# without pulling in PIL/Pillow as a new dependency.
+		top_y = y_offset - top_margin / 2
+		right_x = x_offset + plate_w + right_margin / 2
+		left_x = x_offset - left_margin / 2
+		if self.orientation == "portrait":
+			# Row letters (A..H) on TOP, one per cell. canvas col
+			# index 0..rows-1 = (rows-1) - y, so the letter at
+			# canvas col c is chr('A' + ((rows-1) - c)).
 			for c in range(canvas_cols):
 				cx = x_offset + cell_size * (c + 0.5)
+				row_letter_idx = (self.rows - 1) - c
 				self.canvas.create_text(
-					cx, y_offset - top_margin / 2,
-					text=str(c + 1),
+					cx, top_y,
+					text=chr(ord("A") + row_letter_idx),
 					font=("TkDefaultFont", label_font_size),
+					angle=180,
 				)
+			# Column numbers (1..cols) on RIGHT, one per cell.
+			# canvas row index r corresponds to plate-col index r.
 			for r in range(canvas_rows):
 				cy = y_offset + cell_size * (r + 0.5)
 				self.canvas.create_text(
-					x_offset - left_margin / 2, cy,
-					text=chr(ord("A") + r),
+					right_x, cy,
+					text=str(r + 1),
 					font=("TkDefaultFont", label_font_size),
 				)
 		else:
-			# Portrait: rotated row letters along the BOTTOM,
-			# rotated column numbers down the LEFT.
-			label_band_mid = self._PORTRAIT_LABEL_CLEARANCE / 2
-			label_y = y_offset + plate_h + self._PORTRAIT_LABEL_GAP + label_band_mid
-			label_x = x_offset - self._PORTRAIT_LABEL_GAP - label_band_mid
+			# Landscape: column numbers (1..cols) on TOP, right to
+			# left so col 1 sits above A1 at the canvas right.
 			for c in range(canvas_cols):
 				cx = x_offset + cell_size * (c + 0.5)
+				col_number = canvas_cols - c
 				self.canvas.create_text(
-					cx, label_y,
-					text=chr(ord("A") + c),
+					cx, top_y,
+					text=str(col_number),
 					font=("TkDefaultFont", label_font_size),
-					angle=90,
 				)
+			# Row letters (A..H) on LEFT edge, upright, A at top —
+			# conventional plate reading. The wells inside the
+			# canvas still mirror the columns (col 1 at the canvas
+			# right), but the row labels sit in their familiar
+			# left-edge position so the operator can scan them
+			# without re-orienting.
 			for r in range(canvas_rows):
 				cy = y_offset + cell_size * (r + 0.5)
 				self.canvas.create_text(
-					label_x, cy,
-					text=str(self.cols - r),
+					left_x, cy,
+					text=chr(ord("A") + r),
 					font=("TkDefaultFont", label_font_size),
-					angle=90,
 				)
 
 		# Wells. Iterate logical coords; place each at its rotated
@@ -1451,10 +1559,10 @@ class WellPlateProgress(tk.Frame):
 				self._well_text_items[(x, y)] = text_id
 
 		# Preview-mode A1 accent: a thin green ring around well A1 so
-		# the operator can see at a glance where A1 lands in the
-		# current orientation. Drawn AFTER the wells so it sits on top.
-		# In landscape A1 is at the canvas upper-left; in portrait it's
-		# at the canvas lower-left.
+		# the operator can see at a glance where A1 lands. Drawn
+		# AFTER the wells so it sits on top. A1 is at the canvas
+		# top-right corner in both orientations — see
+		# ``_logical_to_canvas`` for the column mirror.
 		if self._is_preview and self.cols > 0 and self.rows > 0:
 			a1_cc, a1_cr = self._logical_to_canvas(0, 0)
 			a1_cx = x_offset + cell_size * (a1_cc + 0.5)

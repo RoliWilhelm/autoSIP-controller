@@ -30,9 +30,20 @@ logs/
 # Stray-output guards (harmless if absent).
 runs/
 config.json
+# Motor-usage tracking files. Per-machine wear record; lives under
+# ~/.autosip/. Defensive guard against a stray copy landing in the
+# repo dir.
+usage.json
+usage_history.csv
+slippage_test.csv
 
 # Notification config holds the ntfy topic — anyone who knows the topic can
 # read the operator's push stream, so the file must not be committed even
 # if a stray copy ever lands in the repo. Per-user file lives under
 # ~/.autosip/notification_config.json.
 notification_config.json
+
+# Author's Word-document working copy of the operations instructions.
+# The canonical source is docs/operation_instructions.md.
+Operation_instructions.docx
+*.docx
